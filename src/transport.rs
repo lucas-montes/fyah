@@ -7,7 +7,8 @@
 //! No concrete implementations are provided — each embedding (CLI, WebSocket,
 //! TCP, gRPC, etc.) provides its own.
 
-use crate::agent::actor::{LlmMsg, LlmResponseEvent, Message};
+pub struct PromtpMsg;
+pub struct PromtpResp;
 
 /// Abstract transport for task input and event output.
 ///
@@ -23,18 +24,12 @@ pub trait Transport: Send + 'static {
     ///
     /// Returns `None` when the transport is closed (EOF, connection drop, etc.)
     /// which signals the SessionSupervisor to shut down gracefully.
-    async fn read_task(&mut self) -> Option<LlmMsg>;
+    async fn read(&mut self) -> PromtpMsg;
 
     /// Write a single response event back to the caller.
     ///
     /// Called once per `LlmResponseEvent` — tokens are streamed individually
     /// so the transport can forward them in real time.
-    async fn write_event(&mut self, event: &LlmResponseEvent) -> Result<(), String>;
+    async fn write(&mut self, event: &PromtpResp) -> Result<(), String>;
 
-    /// Append a system message to the conversation history.
-    /// Called at startup to inject agent identity / skills / context into
-    /// the conversation. Default implementation is a no-op.
-    async fn push_initial_context(&mut self, _system: Message) {
-        // no-op by default
-    }
 }
