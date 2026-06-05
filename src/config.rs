@@ -6,14 +6,13 @@
 //!   3. CLI override: `--config <path>`
 //!
 //! No env-var support. No hot-reload (single-load at startup).
+//!
+//! TODO: at some point read .github, .opencode and all the specific configs
 
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -75,10 +74,6 @@ pub enum HookPoint {
 pub struct HookDef {
     pub command: String,
 }
-
-// ---------------------------------------------------------------------------
-// Nested config sections
-// ---------------------------------------------------------------------------
 
 /// Default listen address for the HTTP/WebSocket server.
 const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:3000";
@@ -196,9 +191,6 @@ pub struct MiddlewareConfig {
     pub before_llm: Option<HashMap<String, serde_json::Value>>,
 }
 
-// ---------------------------------------------------------------------------
-// Top-level Config
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
