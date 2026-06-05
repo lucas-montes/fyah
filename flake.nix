@@ -1,5 +1,5 @@
 {
-  description = "Maia - Personal management tool with AI-powered features";
+  description = "Fyah your harness";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -9,19 +9,21 @@
     sce.url = "github:crocoder-dev/shared-context-engineering";
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    rust-overlay,
-    flake-utils,
-    sce,
-    ...
-  }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      flake-utils,
+      sce,
+      ...
+    }:
     flake-utils.lib.eachDefaultSystem (
-      system: let
+      system:
+      let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [rust-overlay.overlays.default];
+          overlays = [ rust-overlay.overlays.default ];
         };
 
         rust = pkgs.rust-bin.stable.latest.default.override {
@@ -30,9 +32,10 @@
             "rust-analyzer"
           ];
         };
-      in {
+      in
+      {
         devShells.default = pkgs.mkShell {
-          name = "maia-dev";
+          name = "fyah";
           buildInputs = [
             pkgs.pkg-config
             pkgs.openssl
@@ -46,17 +49,14 @@
             type = "app";
             program = "${pkgs.writeShellScript "generate-openapi" ''
               ${pkgs.openapi-generator-cli}/bin/openapi-generator-cli generate \
-                -i openapi.yaml \
+                -i https://raw.githubusercontent.com/openai/openai-openapi/refs/heads/master/openapi.yaml \
                 -g rust \
                 -o generated/openapi \
+                --skip-validate-spec \
                 --additional-properties=packageName=a2a_openapi
             ''}";
           };
         };
       }
-    )
-    // {
-      # System-independent outputs (NixOS module).
-      nixosModules.default = import ./nix/module.nix {inherit self;};
-    };
+    );
 }

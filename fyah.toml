@@ -1,0 +1,17 @@
+# Fyah development configuration
+# Overrides the XDG default at ~/.config/fyah/config.toml
+
+[server]
+addr = "127.0.0.1:3000"
+
+[llm]
+model = "gpt-4o"
+max_iterations = 25
+temperature = 0.7
+
+[tools]
+timeout_seconds = 30
+
+[workflow]
+enabled = true
+max_steps = 100
