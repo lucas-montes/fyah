@@ -6,13 +6,15 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::{client::Client, session::Session, supervisor::Supervisor};
+use crate::{session::Session, transport::StdinTransport};
 
+mod agent;
 mod client;
-mod session;
 mod config;
+mod session;
 mod supervisor;
 mod transport;
 
@@ -29,34 +31,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_target(false)
         .compact()
+        .with_max_level(tracing::Level::DEBUG)
         .init();
 
     let cli = Cli::parse();
+
     debug!(config = ?cli.config, "starting Fyah");
-
     let config = config::Config::load(cli.config.clone())?;
-    info!(addr = %config.server.addr, "config loaded");
+    debug!(?config, "config loaded");
 
-    // Construct the concrete LLM client at compile-time choice.
-    // The type is chosen here — swap `Client` for `MockLlmClient`
-    // to run in development/test mode without an API key.
-    let api_key = config
-        .llm
-        .api_key
-        .clone()
-        .unwrap_or_else(|| "sk-placeholder".into());
-    let model = config.llm.model.clone().unwrap_or_else(|| "gpt-4o".into());
-    let llm_client = Client::new(api_key, model);
+    let session = Session::new(config);
+    let cancel = CancellationToken::new();
 
+    // Spawn the shutdown handler on a background task.
+    tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            shutdown_signal().await;
+            cancel.cancel();
+            info!("Cancellation requested");
+        }
+    });
 
-    let mut session = Session::new(Supervisor::new(), config);
-
-    // 7. Run the main loop
-    info!("Fyah is ready");
-
-
+    let transport = StdinTransport::default();
+    session.run(transport, cancel).await;
     info!("Fyah stopped");
-    Ok(())
+    // Use exit(0) to terminate the process immediately rather than letting
+    // the tokio runtime try to join the blocking thread pool (which may
+    // have a thread stuck on `read(stdin)`).
+    std::process::exit(0);
 }
 
 /// Wait for Ctrl+C or SIGTERM.

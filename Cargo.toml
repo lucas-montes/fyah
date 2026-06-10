@@ -17,7 +17,7 @@ reqwest = { version = "0.12", features = ["json"] }
 
 clap = { version = "4.5.40", features = ["derive"] }
 
-tokio = { version = "1.46.1", features = ["macros", "rt", "net", "io-util", "rt-multi-thread", "signal", "process", "fs"] }
+tokio = { version = "1.46.1", features = ["macros", "rt", "net", "rt-multi-thread", "signal", "process", "fs"] }
 tokio-util = "0.7"
 
 toml = "0.8"

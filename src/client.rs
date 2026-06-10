@@ -34,13 +34,24 @@ impl std::error::Error for Error {}
 
 #[derive(Debug, Serialize)]
 pub struct Prompt {
-    messages: Vec<Message>,
-    model: String,
-    tools: Vec<Tool>,
+    pub(crate) messages: Vec<Message>,
+    pub(crate) model: String,
+    pub(crate) tools: Vec<Tool>,
 }
 
-#[derive(Debug, Serialize)]
-struct Tool {
+impl Prompt {
+    /// Create a new `Prompt` with the given messages, model, and tools.
+    pub(crate) fn new(messages: Vec<Message>, model: String, tools: Vec<Tool>) -> Self {
+        Self {
+            messages,
+            model,
+            tools,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Tool {
     // The type of tool (always "function" for tools).
     #[serde(rename = "type")]
     tool_type: String,
@@ -48,17 +59,17 @@ struct Tool {
     function: ToolFunction,
 }
 
-#[derive(Debug, Serialize)]
-struct ToolFunction {
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ToolFunction {
     // The name of the function (e.g., "Read").
-    name: String,
+    pub(crate) name: String,
     // Explains the function's purpose and helps the LLM determine when to use it.
     description: String,
     // A JSON schema describing the function's parameters.
     parameters: ToolParameters,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ToolParameters {
     #[serde(rename = "type")]
     param_type: String,
@@ -68,16 +79,16 @@ struct ToolParameters {
     required: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ToolProperty {
     #[serde(rename = "type")]
     property_type: String,
     description: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
-enum Message {
+pub(crate) enum Message {
     User {
         content: String,
     },
@@ -92,36 +103,36 @@ enum Message {
 }
 
 #[derive(Debug, Deserialize)]
-struct Response {
-    choices: VecDeque<ResponseChoice>,
+pub struct Response {
+    pub(crate) choices: VecDeque<ResponseChoice>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ResponseChoice {
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ResponseChoice {
     #[serde(rename = "index")]
-    _index: usize,
-    message: Message, //NOTE: I don't remember if this is always the same role
+    pub(crate) _index: usize,
+    pub(crate) message: Message, //NOTE: I don't remember if this is always the same role
     #[serde(rename = "finish_reason")]
-    _finish_reason: String,
+    pub(crate) _finish_reason: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ToolCall {
-    id: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ToolCall {
+    pub(crate) id: String,
     #[serde(rename = "type")]
-    _tool_type: String,
-    function: ToolCallFunction,
+    pub(crate) _tool_type: String,
+    pub(crate) function: ToolCallFunction,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ToolCallFunction {
-    name: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ToolCallFunction {
+    pub(crate) name: String,
     // TODO: this can be a json
-    arguments: String,
+    pub(crate) arguments: String,
 }
 
 impl ToolCallFunction {
-    fn parse_arguments(&self) -> Result<serde_json::Value, serde_json::Error> {
+    pub(crate) fn parse_arguments(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::from_str(&self.arguments)
     }
 }
