@@ -13,7 +13,6 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-
 #[derive(Debug)]
 pub enum ConfigError {
     /// A config file was explicitly requested via --config but does not exist.
@@ -190,7 +189,6 @@ pub struct MiddlewareConfig {
     #[serde(default)]
     pub before_llm: Option<HashMap<String, serde_json::Value>>,
 }
-
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {

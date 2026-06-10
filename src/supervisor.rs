@@ -83,6 +83,7 @@ pub trait Actor: Sized + Send + 'static {
             loop {
                 tokio::select! {
                     biased; // check cancellation first
+                //NOTE: not sure it needs to be an error
                     _ = cancel.cancelled() => {
                         return Err(ActorError::Closed);
                     }
@@ -155,6 +156,37 @@ impl Supervisor {
         Self {
             children: HashMap::new(),
         }
+    }
+
+    /// Spawn an actor as a supervised child.
+    ///
+    /// Creates an unbounded message channel and a dedicated `CancellationToken`
+    /// for the child, registers it, spawns a tokio task running the actor's
+    /// `run()` loop, and returns a handle for sending messages to it.
+    ///
+    /// The child is tracked by ID and can be cancelled later via [`cancel`]
+    /// or [`cancel_all`].
+    pub fn spawn<A: Actor>(&mut self, actor: A, name: String) -> ActorHandle<A::Msg> {
+        let id = ActorId::next();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let child_token = CancellationToken::new();
+        let task_token = child_token.clone();
+
+        tokio::spawn(async move {
+            let _ = actor.run(rx, task_token).await;
+        });
+
+        self.children.insert(
+            id,
+            ChildEntry {
+                id,
+                name,
+                started_at: Instant::now(),
+                token: child_token,
+            },
+        );
+
+        ActorHandle { tx, id }
     }
 
     /// Cancel a single child by ID. Triggers its `CancellationToken`.
