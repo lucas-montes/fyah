@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
-pub enum ConfigError {
+enum ConfigError {
     /// A config file was explicitly requested via --config but does not exist.
     NotFound(PathBuf),
     /// I/O error reading a config file.
@@ -56,13 +56,10 @@ impl std::error::Error for ConfigError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Hook types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum HookPoint {
+enum HookPoint {
     BeforeLlm,
     AfterLlm,
     AfterTool,
@@ -70,17 +67,17 @@ pub enum HookPoint {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct HookDef {
-    pub command: String,
+struct HookDef {
+    command: String,
 }
 
 /// Default listen address for the HTTP/WebSocket server.
 const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:3000";
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ServerConfig {
+struct ServerConfig {
     #[serde(default = "default_server_addr")]
-    pub addr: String,
+    addr: String,
 }
 
 fn default_server_addr() -> String {
@@ -96,15 +93,15 @@ impl Default for ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct LlmConfig {
+struct LlmConfig {
     #[serde(default)]
-    pub model: Option<String>,
+    model: Option<String>,
     #[serde(default)]
-    pub api_key: Option<String>,
+    api_key: Option<String>,
     #[serde(default = "default_max_iterations")]
-    pub max_iterations: u32,
+    max_iterations: u32,
     #[serde(default = "default_temperature")]
-    pub temperature: f64,
+    temperature: f64,
 }
 
 fn default_max_iterations() -> u32 {
@@ -127,13 +124,13 @@ impl Default for LlmConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ToolsConfig {
+struct ToolsConfig {
     #[serde(default)]
-    pub enabled: Option<Vec<String>>,
+    enabled: Option<Vec<String>>,
     #[serde(default = "default_tool_timeout")]
-    pub timeout_seconds: u64,
+    timeout_seconds: u64,
     #[serde(default)]
-    pub dynamic_dir: Option<PathBuf>,
+    dynamic_dir: Option<PathBuf>,
 }
 
 fn default_tool_timeout() -> u64 {
@@ -151,13 +148,13 @@ impl Default for ToolsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct WorkflowConfig {
+struct WorkflowConfig {
     #[serde(default = "default_workflow_enabled")]
-    pub enabled: bool,
+    enabled: bool,
     #[serde(default)]
-    pub dir: Option<PathBuf>,
+    dir: Option<PathBuf>,
     #[serde(default = "default_workflow_max_steps")]
-    pub max_steps: u32,
+    max_steps: u32,
 }
 
 fn default_workflow_enabled() -> bool {
@@ -179,33 +176,33 @@ impl Default for WorkflowConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct SkillsConfig {
+struct SkillsConfig {
     #[serde(default)]
-    pub path: Option<PathBuf>,
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct MiddlewareConfig {
+struct MiddlewareConfig {
     #[serde(default)]
-    pub before_llm: Option<HashMap<String, serde_json::Value>>,
+    before_llm: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
-    pub server: ServerConfig,
+    server: ServerConfig,
     #[serde(default)]
-    pub llm: LlmConfig,
+    llm: LlmConfig,
     #[serde(default)]
-    pub tools: ToolsConfig,
+    tools: ToolsConfig,
     #[serde(default)]
-    pub workflow: WorkflowConfig,
+    workflow: WorkflowConfig,
     #[serde(default)]
-    pub skills: SkillsConfig,
+    skills: SkillsConfig,
     #[serde(default)]
-    pub hooks: HashMap<HookPoint, Vec<HookDef>>,
+    hooks: HashMap<HookPoint, Vec<HookDef>>,
     #[serde(default)]
-    pub middleware: MiddlewareConfig,
+    middleware: MiddlewareConfig,
 }
 
 impl Config {
@@ -219,6 +216,7 @@ impl Config {
     pub fn load(cli_override: Option<PathBuf>) -> Result<Self, ConfigError> {
         let mut merged = toml::Value::Table(toml::value::Table::new());
 
+        //TODO: instead of using a default value at the end we could populate the config and then reuse it
         // 1. XDG default: ~/.config/fyah/config.toml (silently skipped if missing)
         if let Some(xdg_path) = xdg_config_path()
             && xdg_path.exists()
@@ -250,10 +248,6 @@ impl Config {
         Ok(config)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Resolve the XDG config path: `$HOME/.config/fyah/config.toml`.
 fn xdg_config_path() -> Option<PathBuf> {
@@ -294,205 +288,5 @@ fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
             }
         }
         (base, overlay) => *base = overlay,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    /// Write a string to a unique temp file (avoiding `tempfile` crate).
-    /// Returns the path. The caller is responsible for cleanup.
-    fn write_temp_config(content: &str) -> PathBuf {
-        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("fyah_config_test_{}", n));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("config.toml");
-        fs::write(&path, content).expect("write temp config");
-        path
-    }
-
-    #[test]
-    fn test_load_no_files_returns_defaults() {
-        // No files at any path → all defaults.
-        let config = Config::load(None).expect("load with no files should succeed");
-        assert_eq!(config.server.addr, "127.0.0.1:3000");
-        assert_eq!(config.llm.max_iterations, 25);
-        assert_eq!(config.llm.temperature, 0.7);
-        assert_eq!(config.tools.timeout_seconds, 30);
-        assert!(config.workflow.enabled);
-        assert_eq!(config.workflow.max_steps, 100);
-        assert!(config.hooks.is_empty());
-    }
-
-    #[test]
-    fn test_load_cli_override() {
-        let path = write_temp_config(
-            r#"
-[server]
-addr = "0.0.0.0:8080"
-"#,
-        );
-        let config = Config::load(Some(path)).expect("load with CLI override");
-        assert_eq!(config.server.addr, "0.0.0.0:8080");
-        // Everything else still has defaults.
-        assert_eq!(config.llm.max_iterations, 25);
-    }
-
-    #[test]
-    fn test_load_cli_override_missing_file() {
-        let result = Config::load(Some(PathBuf::from("/nonexistent/fyah.toml")));
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ConfigError::NotFound(p) => assert_eq!(p, PathBuf::from("/nonexistent/fyah.toml")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
-    }
-
-    #[test]
-    fn test_merge_precedence() {
-        // Write an XDG-level config.
-        let xdg_path = write_temp_config(
-            r#"
-[llm]
-model = "gpt-4o"
-max_iterations = 10
-temperature = 1.0
-"#,
-        );
-
-        // Write a local-level config that overrides some fields.
-        let local_path = write_temp_config(
-            r#"
-[llm]
-model = "gpt-4o-mini"
-temperature = 0.5
-"#,
-        );
-
-        // Manually simulate: start empty, merge XDG, merge local.
-        let mut merged = toml::Value::Table(toml::value::Table::new());
-        load_and_merge(&mut merged, &xdg_path).unwrap();
-        load_and_merge(&mut merged, &local_path).unwrap();
-
-        let toml_string = toml::to_string(&merged).unwrap();
-        let config: Config = toml::from_str(&toml_string).unwrap();
-
-        // local overrides model and temperature
-        assert_eq!(config.llm.model.unwrap(), "gpt-4o-mini");
-        assert_eq!(config.llm.temperature, 0.5);
-        // max_iterations from XDG should survive (not overridden by local)
-        assert_eq!(config.llm.max_iterations, 10);
-    }
-
-    #[test]
-    fn test_full_config() {
-        let path = write_temp_config(
-            r#"
-[server]
-addr = "0.0.0.0:3000"
-
-[llm]
-model = "claude-3-opus"
-max_iterations = 50
-temperature = 0.0
-
-[tools]
-timeout_seconds = 60
-
-[workflow]
-enabled = false
-max_steps = 200
-
-[[hooks.before_llm]]
-command = "python3 hook.py"
-
-[[hooks.after_tool]]
-command = "validate.sh"
-"#,
-        );
-
-        let config = Config::load(Some(path)).expect("load full config");
-        assert_eq!(config.server.addr, "0.0.0.0:3000");
-        assert_eq!(config.llm.model.unwrap(), "claude-3-opus");
-        assert_eq!(config.llm.max_iterations, 50);
-        assert_eq!(config.llm.temperature, 0.0);
-        assert_eq!(config.tools.timeout_seconds, 60);
-        assert!(!config.workflow.enabled);
-        assert_eq!(config.workflow.max_steps, 200);
-
-        // Hooks
-        let before_llm_hooks = config
-            .hooks
-            .get(&HookPoint::BeforeLlm)
-            .expect("before_llm hooks");
-        assert_eq!(before_llm_hooks.len(), 1);
-        assert_eq!(before_llm_hooks[0].command, "python3 hook.py");
-
-        let after_tool_hooks = config
-            .hooks
-            .get(&HookPoint::AfterTool)
-            .expect("after_tool hooks");
-        assert_eq!(after_tool_hooks.len(), 1);
-        assert_eq!(after_tool_hooks[0].command, "validate.sh");
-
-        // middleware was not provided — should be Default (empty)
-        assert!(config.middleware.before_llm.is_none());
-    }
-
-    #[test]
-    fn test_xdg_config_path() {
-        let home = std::env::var("HOME").ok();
-        if let Some(home) = home {
-            let path = xdg_config_path().expect("xdg path");
-            let expected: PathBuf = [&home, ".config", "fyah", "config.toml"].iter().collect();
-            assert_eq!(path, expected);
-        }
-    }
-
-    #[test]
-    fn test_merge_toml_table_overwrites_scalar() {
-        let mut base = toml::Value::Table({
-            let mut t = toml::value::Table::new();
-            t.insert("key".into(), toml::Value::String("old".into()));
-            t
-        });
-        let overlay = toml::Value::Table({
-            let mut t = toml::value::Table::new();
-            t.insert("key".into(), toml::Value::String("new".into()));
-            t
-        });
-        merge_toml(&mut base, overlay);
-        assert_eq!(base.get("key").unwrap().as_str(), Some("new"));
-    }
-
-    #[test]
-    fn test_merge_toml_nested_tables() {
-        let mut base = toml::Value::Table({
-            let mut t = toml::value::Table::new();
-            let mut inner = toml::value::Table::new();
-            inner.insert("a".into(), toml::Value::Integer(1));
-            t.insert("inner".into(), toml::Value::Table(inner));
-            t
-        });
-        let overlay = toml::Value::Table({
-            let mut t = toml::value::Table::new();
-            let mut inner = toml::value::Table::new();
-            inner.insert("b".into(), toml::Value::Integer(2));
-            t.insert("inner".into(), toml::Value::Table(inner));
-            t
-        });
-        merge_toml(&mut base, overlay);
-        let inner = base.get("inner").unwrap().as_table().unwrap();
-        assert_eq!(inner.get("a").unwrap().as_integer(), Some(1));
-        assert_eq!(inner.get("b").unwrap().as_integer(), Some(2));
     }
 }

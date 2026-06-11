@@ -3,20 +3,23 @@
 //! The root entry point. Loads config, creates the SessionSupervisor, registers
 //! built-in tools, and waits for the cancellation signal.
 //!
+mod agent;
+
+mod config;
+mod session;
+mod context;
+mod transport;
+
+
 use std::path::PathBuf;
 
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
+use uuid::Uuid;
 
-use crate::{session::Session, transport::StdinTransport};
+use crate::{agent::AgentFactory, config::Config, session::Runtime, transport::StdinTransport};
 
-mod agent;
-mod client;
-mod config;
-mod session;
-mod supervisor;
-mod transport;
 
 #[derive(Debug, Parser)]
 #[command(name = "Fyah", author, version, about)]
@@ -37,10 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     debug!(config = ?cli.config, "starting Fyah");
-    let config = config::Config::load(cli.config.clone())?;
+    let config = Config::load(cli.config)?;
     debug!(?config, "config loaded");
 
-    let session = Session::new(config);
+    let runtime = Runtime::new(Uuid::now_v7().to_string(), config, AgentFactory::default());
     let cancel = CancellationToken::new();
 
     // Spawn the shutdown handler on a background task.
@@ -54,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let transport = StdinTransport::default();
-    session.run(transport, cancel).await;
+    runtime.run(transport, cancel).await;
     info!("Fyah stopped");
     // Use exit(0) to terminate the process immediately rather than letting
     // the tokio runtime try to join the blocking thread pool (which may
