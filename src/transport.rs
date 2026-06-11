@@ -8,6 +8,8 @@
 //!
 //! - [`StdinTransport`] — reads lines from stdin / writes strings to stdout.
 
+use std::io::Write;
+
 /// A user task string, typically read from an input transport.
 pub type PromtpMsg = String;
 
@@ -42,8 +44,6 @@ impl Default for StdinTransport {
 
 impl Transport for StdinTransport {
     async fn read(&mut self) -> Result<PromtpMsg, String> {
-        use std::io::Write;
-
         // Flush stdout so any prompt appears before blocking on stdin.
         let _ = std::io::stdout().flush();
 
@@ -68,7 +68,6 @@ impl Transport for StdinTransport {
     async fn write(&mut self, event: PromtpResp) -> Result<(), String> {
         let event = event.clone();
         tokio::task::spawn_blocking(move || {
-            use std::io::Write;
             let mut stdout = std::io::stdout();
             stdout.write_all(event.as_bytes())?;
             stdout.write_all(b"\n")?;

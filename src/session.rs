@@ -3,20 +3,44 @@ use futures::TryFutureExt;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use uuid::Uuid;
 
+use crate::agent::AgentFactory;
 use crate::config::Config;
 use crate::transport::Transport;
 
-struct ClientBuilder {}
+//TODO: runtime is better than session actually
 
-//TODO: create a builder struct to be able to create clients for the agents with some generic stuff
-pub struct Session {
-    config: Config,
+
+enum Steps {
+    /// Step to gather requirements, define the problem, and plan the solution.
+    Planing,
+    /// Step to implement the solution, which may involve multiple iterations of development and refinement.
+    Implementing,
+    /// Step to test the solution, which may involve multiple iterations of testing and debugging.
+    Testing,
+    /// Step to deploy the solution, which may involve multiple iterations of deployment and monitoring.
+    Commiting,
 }
 
-impl Session {
-    pub fn new(config: Config) -> Self {
-        Self { config }
+/// Some kind of main structure that holds the state (aka the context) of the whole work.
+/// Holding the whole context can help to control what information pass to the agents
+pub struct Runtime {
+    id: String,
+    config: Config,
+    step: Steps,
+    agent_factory: AgentFactory,
+    //TODO: needs to spwan a task to listen for config changes as in the tools got updated
+}
+
+impl Runtime {
+    pub fn new(id: String, config: Config, agent_factory: AgentFactory) -> Self {
+        Self {
+            config,
+            id,
+            agent_factory,
+            step: Steps::Planing,
+        }
     }
 
     /// Run the interactive session loop.
@@ -24,14 +48,14 @@ impl Session {
     /// Reads user input from `transport`, echoes back a response, and
     /// continues until EOF, an I/O error, or external cancellation.
     pub async fn run(self, mut transport: impl Transport, cancel: CancellationToken) {
-        info!("Session loop started");
+        info!("Runtime loop started");
 
         // TODO: when something goes wrong, like EOF or I/O error, we should retry probably, but with some kind of limit. How to handle the limit tho?
         loop {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    info!("Session loop cancelled");
+                    info!("Runtime loop cancelled");
                     break;
                 }
                 result = transport.read() => {
@@ -39,7 +63,7 @@ impl Session {
                         // EOF — clean close
                         // TODO: handle EOF in a more graceful way
                         Ok(msg) if msg.is_empty() => {
-                            info!("Session loop EOF");
+                            info!("Runtime loop EOF");
                             break;
                         }
                         // Normal input — echo back
@@ -60,7 +84,7 @@ impl Session {
             }
         }
 
-        info!("Session loop exited");
+        info!("Runtime loop exited");
     }
 }
 
