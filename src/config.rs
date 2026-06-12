@@ -56,7 +56,6 @@ impl std::error::Error for ConfigError {
     }
 }
 
-
 #[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum HookPoint {

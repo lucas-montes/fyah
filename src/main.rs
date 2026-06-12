@@ -3,13 +3,12 @@
 //! The root entry point. Loads config, creates the SessionSupervisor, registers
 //! built-in tools, and waits for the cancellation signal.
 //!
-mod agent;
+mod llm;
 
 mod config;
-mod session;
 mod context;
+mod runtime;
 mod transport;
-
 
 use std::path::PathBuf;
 
@@ -18,8 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::{agent::AgentFactory, config::Config, session::Runtime, transport::StdinTransport};
-
+use crate::{llm::AgentFactory, config::Config, runtime::Runtime, transport::StdinTransport};
 
 #[derive(Debug, Parser)]
 #[command(name = "Fyah", author, version, about)]

@@ -1,4 +1,4 @@
-mod interface;
 mod client;
+mod interface;
 
 pub use interface::AgentFactory;

@@ -1,7 +1,14 @@
-pub struct Agent;
+use crate::agent::client::LlmClient;
+
+
+
+pub struct Agent<Client: LlmClient, >{}
 
 impl Agent {
-    fn handle_prompt(&mut self, prompt: String) -> impl std::future::Future<Output = Result<String, String>> {
+    fn handle_prompt(
+        &mut self,
+        prompt: String,
+    ) -> impl std::future::Future<Output = Result<String, String>> {
         todo!()
     }
 }
