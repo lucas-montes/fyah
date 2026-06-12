@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {

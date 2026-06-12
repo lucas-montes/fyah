@@ -92,18 +92,10 @@ impl LlmClient for Client {
 fn handle_response(
     response: reqwest::Response,
 ) -> impl std::future::Future<Output = Result<Response, Error>> + Send {
-    response
-        .error_for_status()
-        .map_err(|status_error| Error::ApiError {
-            code: status_error
-                .status()
-                .expect("why there is no status code?")
-                .to_string(),
-            message: status_error.to_string(),
-        })
-        .map(|resp| {
-            resp.json()
-                .map_err(|e| Error::ParseError(e.to_string()))
-                .inspect(|resp| debug!(?resp, "LLM response"))
-        })
+    futures::future::ready(response.error_for_status().map_err(|e| Error::ApiError {
+        code: e.status().unwrap().to_string(),
+        message: e.to_string(),
+    }))
+    .and_then(|resp| resp.json().map_err(|e| Error::ParseError(e.to_string())))
+    .inspect(|resp| debug!(?resp, "LLM response"))
 }
