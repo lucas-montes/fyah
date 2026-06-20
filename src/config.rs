@@ -13,8 +13,10 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::hooks::HooksConfig;
+
 #[derive(Debug)]
-enum ConfigError {
+pub enum Error {
     /// A config file was explicitly requested via --config but does not exist.
     NotFound(PathBuf),
     /// I/O error reading a config file.
@@ -31,7 +33,7 @@ enum ConfigError {
     Deserialize(String),
 }
 
-impl std::fmt::Display for ConfigError {
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound(p) => write!(f, "config file not found: {}", p.display()),
@@ -46,7 +48,7 @@ impl std::fmt::Display for ConfigError {
     }
 }
 
-impl std::error::Error for ConfigError {
+impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
@@ -56,42 +58,7 @@ impl std::error::Error for ConfigError {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum HookPoint {
-    BeforeLlm,
-    AfterLlm,
-    AfterTool,
-    BeforeResponse,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct HookDef {
-    command: String,
-}
-
-/// Default listen address for the HTTP/WebSocket server.
-const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:3000";
-
-#[derive(Debug, Clone, Deserialize)]
-struct ServerConfig {
-    #[serde(default = "default_server_addr")]
-    addr: String,
-}
-
-fn default_server_addr() -> String {
-    DEFAULT_SERVER_ADDR.to_string()
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            addr: default_server_addr(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct LlmConfig {
     #[serde(default)]
     model: Option<String>,
@@ -122,89 +89,20 @@ impl Default for LlmConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct ToolsConfig {
-    #[serde(default)]
-    enabled: Option<Vec<String>>,
-    #[serde(default = "default_tool_timeout")]
-    timeout_seconds: u64,
-    #[serde(default)]
-    dynamic_dir: Option<PathBuf>,
-}
 
-fn default_tool_timeout() -> u64 {
-    30
-}
 
-impl Default for ToolsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: None,
-            timeout_seconds: default_tool_timeout(),
-            dynamic_dir: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct WorkflowConfig {
-    #[serde(default = "default_workflow_enabled")]
-    enabled: bool,
-    #[serde(default)]
-    dir: Option<PathBuf>,
-    #[serde(default = "default_workflow_max_steps")]
-    max_steps: u32,
-}
-
-fn default_workflow_enabled() -> bool {
-    true
-}
-
-fn default_workflow_max_steps() -> u32 {
-    100
-}
-
-impl Default for WorkflowConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_workflow_enabled(),
-            dir: None,
-            max_steps: default_workflow_max_steps(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct SkillsConfig {
-    #[serde(default)]
-    path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct MiddlewareConfig {
-    #[serde(default)]
-    before_llm: Option<HashMap<String, serde_json::Value>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default)]
 pub struct Config {
-    #[serde(default)]
-    server: ServerConfig,
     #[serde(default)]
     llm: LlmConfig,
     #[serde(default)]
-    tools: ToolsConfig,
-    #[serde(default)]
-    workflow: WorkflowConfig,
-    #[serde(default)]
-    skills: SkillsConfig,
-    #[serde(default)]
-    hooks: HashMap<HookPoint, Vec<HookDef>>,
-    #[serde(default)]
-    middleware: MiddlewareConfig,
+    hooks: HooksConfig,
 }
 
 impl Config {
+    pub fn hooks(&self) -> &HooksConfig {
+        &self.hooks
+    }
     /// Load and merge config from all sources in precedence order.
     ///
     /// 1. XDG default: `~/.config/fyah/config.toml` (silently skipped if missing)
@@ -212,7 +110,7 @@ impl Config {
     /// 3. CLI override: `--config <path>` (errors if provided but missing)
     ///
     /// If no file exists at any location, returns a `Config` with all defaults.
-    pub fn load(cli_override: Option<PathBuf>) -> Result<Self, ConfigError> {
+    pub fn load(cli_override: Option<PathBuf>) -> Result<Self, Error> {
         let mut merged = toml::Value::Table(toml::value::Table::new());
 
         //TODO: instead of using a default value at the end we could populate the config and then reuse it
@@ -234,15 +132,15 @@ impl Config {
             if cli_path.exists() {
                 load_and_merge(&mut merged, cli_path)?;
             } else {
-                return Err(ConfigError::NotFound(cli_path.clone()));
+                return Err(Error::NotFound(cli_path.clone()));
             }
         }
 
         // Deserialize the merged TOML value into a Config.
         let toml_string =
-            toml::to_string(&merged).map_err(|e| ConfigError::Deserialize(e.to_string()))?;
+            toml::to_string(&merged).map_err(|e| Error::Deserialize(e.to_string()))?;
         let config: Config =
-            toml::from_str(&toml_string).map_err(|e| ConfigError::Deserialize(e.to_string()))?;
+            toml::from_str(&toml_string).map_err(|e| Error::Deserialize(e.to_string()))?;
 
         Ok(config)
     }
@@ -260,12 +158,12 @@ fn xdg_config_path() -> Option<PathBuf> {
 }
 
 /// Read a TOML file at `path`, parse to `toml::Value`, and merge into `base`.
-fn load_and_merge(base: &mut toml::Value, path: &PathBuf) -> Result<(), ConfigError> {
-    let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
+fn load_and_merge(base: &mut toml::Value, path: &PathBuf) -> Result<(), Error> {
+    let contents = std::fs::read_to_string(path).map_err(|e| Error::Io {
         path: path.clone(),
         source: e,
     })?;
-    let value: toml::Value = toml::from_str(&contents).map_err(|e| ConfigError::Parse {
+    let value: toml::Value = toml::from_str(&contents).map_err(|e| Error::Parse {
         path: path.clone(),
         source: e,
     })?;

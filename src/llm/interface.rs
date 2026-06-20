@@ -1,15 +1,16 @@
-use crate::agent::client::LlmClient;
+use crate::{context::ContextManagement, llm::client::LlmClient};
 
+pub struct Agent<Client: LlmClient, Ctx: ContextManagement> {
+    context: Ctx,
+    client: Client,
+}
 
-
-pub struct Agent<Client: LlmClient, >{}
-
-impl Agent {
+impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
     fn handle_prompt(
         &mut self,
-        prompt: String,
+        _prompt: String,
     ) -> impl std::future::Future<Output = Result<String, String>> {
-        todo!()
+        async move { todo!() }
     }
 }
 
@@ -17,7 +18,7 @@ impl Agent {
 pub struct AgentFactory;
 
 impl AgentFactory {
-    pub fn create(&self) -> Agent {
+    pub fn create<C: LlmClient, Ctx: ContextManagement>(&self) -> Agent<C, Ctx> {
         todo!()
     }
 }

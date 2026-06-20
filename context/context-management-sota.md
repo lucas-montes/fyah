@@ -2,8 +2,8 @@
 
 > Synthesized from: Adaptive CM (LangGraph), MemAct (RL-based curation), CAT (Context-as-Tool),
 > U-Fold (intent-aware folding), ContextBudget (budget-constrained), AgentProg (program-guided),
-> and the ETCLOVG Harness Engineering survey.
-> Date: 2026-06-10
+> ETCLOVG Harness Engineering survey, plus new papers from June 2026.
+> Date: 2026-06-16
 
 ---
 
@@ -346,11 +346,39 @@ Agent emits: tool_call("compress_context", { summary: "...", prune_ids: [...] })
 
 ## References
 
-1. **Adaptive Context Management for Long-Running LLM Agent Sessions** (2025) — Pre-flight checking, tiered compression, 3:1 to 8:1 ratios
-2. **Memory-as-Action (MemAct)** (2025) — Context curation as RL policy, DCPO algorithm, trajectory segmentation
-3. **CAT: Context as a Tool** (2025) — Structured workspace (task semantics + long-term memory + short-term working memory), agent-driven compression
-4. **U-Fold: Dynamic Intent-Aware Context Folding** (2026) — Conversation summarization + dynamic data extraction, to-do lists, user-centric
-5. **ContextBudget: Budget-Aware Context Management** (2026) — Budget-constrained sequential decisions, RL-optimized compression
-6. **AgentProg: Program-Guided Context Management** (2025) — Code data flow determines relevance, GUI agent focus
-7. **ReSum: Unlocking Search via Context Summarization** (2025) — Periodic external summarization tool, plug-and-play
-8. **Agent Harness Engineering: A Survey (ETCLOVG)** (2026) — Seven-layer taxonomy, context as layer C, harness-as-constraint thesis
+### Core context management papers (with verified links)
+
+1. **[Memory as Action: Autonomous Context Curation for Long-Horizon Agentic Tasks (MemAct)](https://arxiv.org/abs/2510.12635)** (Oct 2025, updated May 2026) — Treats context management as a learnable policy (deletion/insertion operations) via end-to-end RL. Introduces Dynamic Context Policy Optimization (DCPO). 14B model matches 16× larger models with 51% shorter context. — *Key insight: context curation as MDP actions, not external rules.*
+
+2. **[U-Fold: Dynamic Intent-Aware Context Folding for User-Centric Agents](https://arxiv.org/abs/2601.18285)** (Jan 2026) — Conversation summarization that tracks evolving user intent + dynamic tool data extraction filtered to pending to-do items. 71.4% win rate vs ReAct in long-context settings, up to 27% improvement over prior folding. — *Key insight: user intent drift is the underexplored problem.*
+
+3. **[ReSum: Unlocking Long-Horizon Search Intelligence via Context Summarization](https://arxiv.org/abs/2509.13313)** (Sep 2025, updated Mar 2026) — Plug-and-play paradigm: periodically invokes external tool to condense interaction histories. ReSum-GRPO adapts GRPO via advantage broadcasting. 4.5% improvement in training-free setting, further 8.2% with GRPO. — *Key insight: no architectural changes needed — just a summarization tool call.*
+
+4. **[AgentProg: Empowering Long-Horizon GUI Agents with Program-Guided Context Management](https://arxiv.org/abs/2512.10371)** (Dec 2025, updated May 2026) — Reframes interaction history as a program with variables and control flow. Program structure determines what to retain/discard. Global belief state (Belief MDP) for partial observability. SOTA on AndroidWorld. — *Key insight: code data-flow structure is a principled relevance filter.*
+
+5. **[ContextBudget: Budget-Aware Context Management for Long-Horizon Search Agents (BACM)](https://arxiv.org/abs/2604.01664)** (Apr 2026) — Formulates context management as sequential decision problem with budget constraint. Agents assess budget before incorporating observations. BACM-RL: curriculum-based RL for compression strategies. 1.6× gains over baselines at high complexity. — *Key insight: budget headroom awareness is the missing state variable.*
+
+6. **[GraphBit: A Graph-based Agentic Framework for Non-Linear Agent Orchestration](https://arxiv.org/abs/2605.13848)** (Mar 2026) — Rust-based deterministic DAG execution engine. Three-tier memory (ephemeral scratch, structured state, external connectors) isolates context across stages. 67.6% accuracy on GAIA, zero framework-induced hallucinations, 11.9ms overhead. — *Key insight: context isolation via staged memory prevents cascading bloat.*
+
+### Latest papers (June 2026)
+
+7. **[Exploring Cross-Scenario Generality of Agentic Memory Systems (AutoMEM)](https://arxiv.org/abs/2606.04315)** (Jun 2026) — Benchmarks 8 memory systems + a harness that self-manages flat text-file storage via tool calls. The harness achieves best cross-task ranking. AutoMEM: agentic memory harness with self-managed tool interface. — *Key insight: giving the agent active control over storage/retrieval beats passive pipelines.*
+
+8. **[EvoDS: Self-Evolving Autonomous Data Science Agent with Skill Learning and Context Management](https://arxiv.org/abs/2606.03841)** (Jun 2026, KDD 2026) — Adaptive Context Compression (ACC) treats context management as a learned control problem. Autonomous Skill Acquisition mechanism. 28.9% improvement over SOTA, eliminates out-of-token failures. — *Key insight: information bottleneck principle ensures efficient context use.*
+
+9. **[Model-Native Computing Architecture (ICAM)](https://arxiv.org/abs/2606.00288)** (May 2026) — LLM-as-OS survey + six-layer framework. Introduces Context Budget Law (effective working sets under finite windows), Semantic Locality Law (KV-cache reuse), Agent Speedup Law (diminishing returns). — *Key insight: three design laws for context as a systems resource.*
+
+10. **[Masking Stale Observations Helps Search Agents — Until It Doesn't](https://arxiv.org/abs/2606.00408)** (May 2026) — Systematic study of observation masking across 4B–284B models. Gain follows asymmetric inverted-U: collapses when model is saturated. — *Key insight: context management effectiveness is regime-dependent on model capacity × retriever quality.*
+
+11. **[Game-Theoretic Secure MCP (GT-MCP) for Robust Contextual Reasoning](https://arxiv.org/abs/2606.10322)** (Jun 2026) — Treats context management as closed-loop dynamical process. Three heterogeneous agents + trust function evaluating causal consistency, semantic agreement, distributional drift. 99.6% of turns have bounded drift. — *Key insight: multi-agent control loop for context integrity under adversarial conditions.*
+
+12. **[Harness-Bench: Measuring Harness Effects across Models](https://arxiv.org/abs/2605.27922)** (May 2026) — 5,194 trajectories across model-harness pairings. Substantial variation in completion, quality, efficiency, failure behavior. — *Key insight: agent capability should be reported at model-harness-configuration level, not model alone.*
+
+13. **[Agent Harness Engineering: A Survey (ETCLOVG)](https://arxiv.org/abs/2605.27922)** (2026) — Seven-layer taxonomy: Execution, Tool, Context, Lifecycle, Observability, Verification, Governance. Context as layer C. Harness-as-constraint thesis.
+
+### Earlier influential work
+
+14. **Adaptive Context Management for Long-Running LLM Agent Sessions** (2025, LangGraph-based) — Pre-flight token budget checking, tiered compression (recent N pairs verbatim, older summarized at 3:1 to 8:1), sub-agent isolation. Not yet on arXiv.
+15. **CAT: Context as a Tool** (2025) — Structured workspace: stable task semantics + condensed long-term memory + high-fidelity short-term working memory. Agent-driven compression. Preprint.
+16. **StateFlow: FSM-based Agent Workflows** (COLM 2024) — 13-28% higher task success, 3-5× cost reduction vs ReAct.
+17. **Memory-Induced Tool-Drift in LLM Agents** (May 2026, arXiv:2605.24941) — Personality biases stored in memory silently affect tool calls. Systematic vulnerability in current safeguards.

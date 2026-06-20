@@ -24,6 +24,7 @@ toml = "0.8"
 
 futures = "0.3"
 regex = "1.11"
+ctrlc = "3.4"
 uuid = { version = "1.23.3", features = ["v7"] }
 
 [workspace.lints.clippy]

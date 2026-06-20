@@ -33,6 +33,7 @@ pub enum Error {
 /// Test: `MockLlmClient` (pre-programmed response sequences).
 pub trait LlmClient: Send + Sync {
     type Prompt;
+    const URL: &'static str;
     /// Send a chat completion request and return the parsed response.
     ///
     /// `messages` — the conversation history including the latest user message.
@@ -53,7 +54,7 @@ pub struct Prompt {
 /// Production LLM client that calls OpenAI's `/v1/chat/completions` via reqwest.
 #[derive(Clone)]
 pub struct Client {
-    api_key: String,
+    auth: String,
     model: String,
     http_client: reqwest::Client,
 }
@@ -64,8 +65,9 @@ impl Client {
     /// `api_key` — OpenAI API key (from `Config.llm.api_key`).
     /// `model` — model identifier (e.g. "gpt-4o").
     pub fn new(api_key: String, model: String) -> Self {
+        let auth = format!("Bearer {}", api_key);
         Self {
-            api_key,
+            auth,
             model,
             http_client: reqwest::Client::new(),
         }
@@ -74,14 +76,15 @@ impl Client {
 
 impl LlmClient for Client {
     type Prompt = Prompt;
+    const URL: &'static str = "https://api.openai.com/v1/chat/completions";
 
     fn chat_completion(
         &self,
         prompt: &Prompt,
     ) -> impl std::future::Future<Output = Result<Response, Error>> + Send {
         self.http_client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .post(Self::URL)
+            .header("Authorization", &self.auth)
             .json(&prompt)
             .send()
             .map_err(|e| Error::RequestFailed(e.to_string()))

@@ -7,13 +7,12 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::context::ContextManagement;
+use crate::hooks::AfterHooks;
+use crate::hooks::BeforeHooks;
 use crate::llm::AgentFactory;
 
 use crate::transport::Transport;
 
-// ---------------------------------------------------------------------------
-// StateMachine — what each state's run() returns
-// ---------------------------------------------------------------------------
 /// The result of executing a state: continue to the next state, or stop.
 enum StateMachine<T: Transport, Ctx: ContextManagement> {
     /// Transition to the next state function.
@@ -22,33 +21,28 @@ enum StateMachine<T: Transport, Ctx: ContextManagement> {
     Done,
 }
 
-// ---------------------------------------------------------------------------
 // StateFn — plain function pointer for type-erased state dispatch
 //
 // Each state is a `fn(&mut Runtime<T, Ctx>) -> StateMachine<T, Ctx>`.
 // States return `StateMachine::Continue(next_state_fn)` to advance, or
 // `StateMachine::Done` to stop.  The loop stores the next fn in a local
-// variable — no field needed on Runtime, no heap alloc, no vtable.
+// variable.
 //
 // Why a type alias instead of a struct wrapping a fn pointer?
 // Previous versions used a recursive struct to work around Rust's ban on
 // recursive type aliases.  With `StateMachine` as the non-recursive return
 // type (no `Option<StateFn>` wrapping), a plain type alias compiles cleanly.
-// ---------------------------------------------------------------------------
 type StateFn<T, Ctx> = fn(&mut Runtime<T, Ctx>) -> StateMachine<T, Ctx>;
 
-// ---------------------------------------------------------------------------
-// Runtime — not generic over the Step type
-// ---------------------------------------------------------------------------
 pub struct Runtime<T: Transport, Ctx: ContextManagement> {
     id: String,
+    //TODO: the runtime probably shouldn't own the configs, we just need to have some and pass them to the interested parties.
+    // Te config should be used to have info about the llms, the hooks, what kind of strategy context to use, etc...
     config: Config,
     user_channel: T,
     agent_factory: AgentFactory,
     cancelled: Arc<AtomicBool>,
     context: Ctx,
-    /// Scratch data passed between states (avoided by real agent context later).
-    state_data: Option<String>,
 }
 
 impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
@@ -67,31 +61,23 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
             agent_factory,
             cancelled,
             context,
-            state_data: None,
         }
     }
 
     /// Start the state machine from `Plan`.
-    pub fn run(&mut self) {
+    pub fn run(mut self) {
         info!("State machine started");
 
         let mut f: StateFn<T, Ctx> = <Plan as Step>::run::<T, Ctx>;
 
-        loop {
-            if self.cancelled.load(Ordering::Relaxed) {
-                info!("State machine cancelled");
-                break;
-            }
-            match f(self) {
-                StateMachine::Continue(next) => f = next,
-                StateMachine::Done => break,
-            }
+        while let StateMachine::Continue(next) = f(&mut self)
+            && !self.cancelled.load(Ordering::Relaxed)
+        {
+            f = next;
         }
 
         info!("State machine exited");
     }
-
-    // -- Convenience I/O helpers ------------------------------------------
 
     /// Write a message to the user (ignores I/O errors).
     pub fn write(&mut self, msg: &str) {
@@ -115,9 +101,6 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step trait — each state declares its valid successors
-// ---------------------------------------------------------------------------
 trait Step {
     /// The state to transition to on success (forward path).
     type Ok: Step;
@@ -125,12 +108,37 @@ trait Step {
     /// The state to transition to on failure (backtrack / retry path).
     type Err: Step;
 
+    const NAME: &'static str;
+
     /// Execute this state's work and return the next state function, or
     /// `Done` to stop the machine.
     ///
     /// Use `<Self::Ok as Step>::run::<T, Ctx>` for forward transitions and
     /// `<Self::Err as Step>::run::<T, Ctx>` for backtrack transitions.
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx>;
+    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
+        let before_hook = rt.config.hooks().before();
+        Self::before_hook(rt, before_hook);
+        let result = Self::execute(rt);
+        Self::after_hook(rt, rt.config.hooks().after());
+        result
+    }
+
+    //TODO: for the run methods we could have something fancy like the functions from axum where you have extractors to get only the data needed
+
+    fn before_hook<T: Transport, Ctx: ContextManagement>(
+        _rt: &mut Runtime<T, Ctx>,
+        hook: &BeforeHooks,
+    ) -> () {
+    }
+    fn after_hook<T: Transport, Ctx: ContextManagement>(
+        _rt: &mut Runtime<T, Ctx>,
+        hook: &AfterHooks,
+    ) -> () {
+    }
+
+    fn execute<T: Transport, Ctx: ContextManagement>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx>;
 
     fn advance<T: Transport, Ctx: ContextManagement>() -> StateMachine<T, Ctx> {
         StateMachine::Continue(<Self::Ok as Step>::run::<T, Ctx>)
@@ -141,17 +149,16 @@ trait Step {
     }
 }
 
-// ===========================================================================
-// State definitions
-// ===========================================================================
-
 /// Ask the user for their idea. Store it and move to `PlanDraft`.
 struct Plan;
 impl Step for Plan {
     type Ok = PlanDraft;
     type Err = Plan;
+    const NAME: &'static str = "plan";
 
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
+    fn execute<T: Transport, Ctx: ContextManagement>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx> {
         rt.write("── Plan ──────────────────────────────");
         rt.write("Enter your idea (or type 'exit' to quit): ");
 
@@ -164,10 +171,9 @@ impl Step for Plan {
 
         if input.is_empty() {
             rt.write("Nothing entered — try again.");
-            return Self::advance();
+            return Self::backtrack();
         }
 
-        rt.state_data = Some(input);
         rt.write("Got it! Let's refine your idea.");
         Self::advance()
     }
@@ -178,19 +184,19 @@ struct PlanDraft;
 impl Step for PlanDraft {
     type Ok = PlanApproved;
     type Err = Plan;
+    const NAME: &'static str = "plan-draft";
 
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
-        let idea = rt.state_data.clone().unwrap_or_default();
-
+    fn execute<T: Transport, Ctx: ContextManagement>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx> {
         rt.write("── Plan Draft ─────────────────────────");
-        rt.write(&format!("Your idea: \"{idea}\""));
+        // rt.write(&format!("Your idea: \"{idea}\""));
         rt.write("Approve this idea and proceed? (y/n): ");
 
         if rt.read_yes_no() {
             rt.write("Plan approved! Moving to implementation.");
             Self::advance()
         } else {
-            rt.state_data = None;
             rt.write("Let's start over.");
             Self::backtrack()
         }
@@ -202,11 +208,13 @@ struct PlanApproved;
 impl Step for PlanApproved {
     type Ok = Implement;
     type Err = Plan;
+    const NAME: &'static str = "plan-approved";
 
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
-        let idea = rt.state_data.clone().unwrap_or_default();
+    fn execute<T: Transport, Ctx: ContextManagement>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx> {
         rt.write("── Plan Approved ──────────────────────");
-        rt.write(&format!("Ready to implement: \"{idea}\""));
+        // rt.write(&format!("Ready to implement: \"{idea}\""));
         rt.write("Press Enter to begin implementation...");
         let _ = rt.read();
         Self::advance()
@@ -218,8 +226,11 @@ struct Implement;
 impl Step for Implement {
     type Ok = Test;
     type Err = Plan;
+    const NAME: &'static str = "implement";
 
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
+    fn execute<T: Transport, Ctx: ContextManagement>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx> {
         rt.write("── Implement ──────────────────────────");
         rt.write("Implementing... (simulated)");
         rt.write("Implementation complete. Press Enter to run tests...");
@@ -233,8 +244,11 @@ struct Test;
 impl Step for Test {
     type Ok = Commit;
     type Err = Implement;
+    const NAME: &'static str = "test";
 
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
+    fn execute<T: Transport, Ctx: ContextManagement>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx> {
         rt.write("── Test ───────────────────────────────");
         rt.write("Did all tests pass? (y/n): ");
 
@@ -253,8 +267,11 @@ struct Commit;
 impl Step for Commit {
     type Ok = Done;
     type Err = Done;
+    const NAME: &'static str = "commit";
 
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
+    fn execute<T: Transport, Ctx: ContextManagement>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx> {
         rt.write("── Commit ─────────────────────────────");
         rt.write("Committed! Press Enter to finish...");
         let _ = rt.read();
@@ -268,18 +285,15 @@ struct Done;
 impl Step for Done {
     type Ok = Done;
     type Err = Done;
+    const NAME: &'static str = "done";
 
-    fn run<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement>(
         _rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         info!("State machine completed");
         StateMachine::Done
     }
 }
-
-// ===========================================================================
-// Tests
-// ===========================================================================
 
 #[cfg(test)]
 mod tests {
