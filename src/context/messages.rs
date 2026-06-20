@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,7 +47,7 @@ impl Message {
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatResponse {
+pub struct ChatResponse {
     choices: VecDeque<ResponseChoice>,
 }
 

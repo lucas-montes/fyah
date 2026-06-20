@@ -208,3 +208,143 @@ fn handle_tool_call(tool_call: &ToolCall) -> Result<String, Box<dyn std::error::
     }
     Err("we should handle a known tool".into())
 }
+
+// Old runtime with fn pointers
+use std::sync::Arc;
+
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+use tracing::info;
+
+use crate::config::Config;
+use crate::context::ContextManagement;
+use crate::llm::AgentFactory;
+
+use crate::transport::Transport;
+
+/// State machine result — transitions to a next state or stops.
+pub enum StateMachine<T: Transport, Ctx: ContextManagement> {
+    /// Transition to the next state.
+    Continue(StateFn<T, Ctx>),
+    /// Terminal state — machine stops.
+    Done,
+}
+
+/// A state handler function.
+///
+/// Each state is a plain `fn(&mut Runtime)` that inspects the runtime,
+/// may interact with the user via the transport, and returns the next
+/// state to enter (or `Done` to exit the loop).
+type StateFn<T, Ctx> = fn(&mut Runtime<T, Ctx>) -> StateMachine<T, Ctx>;
+
+/// Some kind of main structure that holds the state (aka the context) of the whole work.
+/// Holding the whole context can help to control what information pass to the agents
+pub struct Runtime<T: Transport, Ctx: ContextManagement> {
+    id: String,
+    config: Config,
+    user_channel: T,
+    agent_factory: AgentFactory,
+    next_step: Option<StateFn<T, Ctx>>,
+    cancelled: Arc<AtomicBool>,
+    context: Ctx,
+    //TODO: needs to spwan a task to listen for config changes as in the tools got updated
+}
+
+impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
+    pub fn new(
+        id: String,
+        config: Config,
+        user_channel: T,
+        agent_factory: AgentFactory,
+        cancelled: Arc<AtomicBool>,
+        context: Ctx,
+    ) -> Self {
+        Self {
+            id,
+            config,
+            user_channel,
+            agent_factory,
+            next_step: Some(plan_gather),
+            cancelled,
+            context,
+        }
+    }
+
+    /// Run the state machine loop.
+    ///
+    /// Executes state handler functions in sequence. Each state function
+    /// returns the next state or `Done` to exit.  Checks the cancellation
+    /// flag between states transitions so Ctrl+C (wired in T05) is
+    /// respected at the next safe stopping point.
+    pub fn run(&mut self) {
+        info!("Runtime loop started");
+
+        while let Some(state_fn) = self.next_step.take() {
+            if self.cancelled.load(Ordering::Relaxed) {
+                info!("Runtime loop cancelled");
+                break;
+            }
+            self.next_step = match state_fn(self) {
+                StateMachine::Continue(next) => Some(next),
+                StateMachine::Done => None,
+            };
+        }
+
+        info!("Runtime loop exited");
+    }
+}
+
+/// Initial planning state — gather the user's idea.
+fn plan_gather<T: Transport, Ctx: ContextManagement>(
+    _rt: &mut Runtime<T, Ctx>,
+) -> StateMachine<T, Ctx> {
+    todo!("gather user idea")
+}
+
+/// Plan is being drafted by the agent.
+fn plan_draft<T: Transport, Ctx: ContextManagement>(
+    _rt: &mut Runtime<T, Ctx>,
+) -> StateMachine<T, Ctx> {
+    todo!("draft plan")
+}
+
+/// Plan needs user feedback — may refine or be approved.
+fn plan_refine<T: Transport, Ctx: ContextManagement>(
+    _rt: &mut Runtime<T, Ctx>,
+) -> StateMachine<T, Ctx> {
+    todo!("refine plan with user feedback")
+}
+
+/// Plan is approved and ready — transition to implementation.
+fn plan_approved<T: Transport, Ctx: ContextManagement>(
+    _rt: &mut Runtime<T, Ctx>,
+) -> StateMachine<T, Ctx> {
+    todo!("plan approved")
+}
+
+/// Implementation step — agent produces code.
+fn implement<T: Transport, Ctx: ContextManagement>(
+    _rt: &mut Runtime<T, Ctx>,
+) -> StateMachine<T, Ctx> {
+    todo!("implement")
+}
+
+/// Testing step — may loop back to implement on failure.
+fn test<T: Transport, Ctx: ContextManagement>(_rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
+    todo!("test")
+}
+
+/// Prepare the commit (summary, diff review).
+fn commit_prepare<T: Transport, Ctx: ContextManagement>(
+    _rt: &mut Runtime<T, Ctx>,
+) -> StateMachine<T, Ctx> {
+    todo!("prepare commit")
+}
+
+/// Wait for user confirmation before final commit.
+fn commit_confirm<T: Transport, Ctx: ContextManagement>(
+    _rt: &mut Runtime<T, Ctx>,
+) -> StateMachine<T, Ctx> {
+    todo!("confirm commit with user")
+}
