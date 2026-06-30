@@ -19,6 +19,15 @@
 | **StdinTransport** | Concrete `Transport` using blocking `std::io::stdin().read_line()` / `std::io::stdout().write_all()`. Returns `Ok("")` on EOF. |
 | **PromtpMsg** | Type alias for `String` — the unit of input from a transport. |
 | **PromtpResp** | Type alias for `String` — the unit of output to a transport. |
-| **AgentFactory** | Stub factory in `src/llm/interface.rs`. `create()` is `todo!()`. |
-| **Agent** | LLM conversation struct (generic over `LlmClient`). Not yet implemented. |
+| **Agent (config)** | Config struct in `src/llm/config.rs` — `{ name, model, max_iterations, system_prompt, temperature, max_tokens, context }`. Links to a `Model` by name. Deserialized from TOML. |
+| **Agent (runtime)** | Generic struct `Agent<Ctx: ContextManagement>` in `src/llm/interface.rs` — holds `client::Client`, context store, `max_iterations`, `system_prompt`, `model_name`, `temperature`. Created by `AgentFactory::create()`. |
+| **AgentFactory** | Unit struct in `src/llm/interface.rs`. `create(config, agent_name, context)` resolves agent → model → provider, builds a `Client`, and returns `Agent<Ctx>`. Returns `CreationError` on failure. |
+| **CreationError** | Enum in `src/llm/interface.rs` — `AgentNotFound(String)`, `ModelNotFound(String)`, `NoApiKey(String)`. Implements `Display` and `Error`. Returned by `AgentFactory::create()`. |
+| **Provider** | Config struct in `src/llm/config.rs` — `{ name, url, api_key, models }`. Describes an LLM provider endpoint. |
+| **Model** | Config struct in `src/llm/config.rs` — `{ name, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, stop, seed }`. Full set of common API parameters. No `provider` field (models are nested inside `Provider`). |
+| **ContextStrategy** | Enum in `src/llm/config.rs` — `SlidingWindow`, `TokenBudget`, `Summary`. Controls per-agent context management. Also provides `try_build() -> Box<dyn ContextManagement>` to construct the concrete strategy. |
+| **ContextManagement** | Trait in `src/context/memory.rs` — `add_message()`, `get_history()`, `should_compact()`, `compact()`. Methods have default no-op impls. |
+| **SlidingWindowContext** | Concrete `ContextManagement` in `src/context/memory.rs`. Keeps the last N messages, drops oldest when over limit. |
+| **TokenBudgetContext** | Concrete `ContextManagement` in `src/context/memory.rs`. Keeps messages within a cumulative token budget (rough estimate: content_len / 4). Drops oldest when over budget. |
+| **SummaryContext** | Concrete `ContextManagement` in `src/context/memory.rs`. Compacts at 50 messages, keeps last 25 (real LLM summarisation deferred). |
 | **LlmClient** | Async trait for LLM chat completion (OpenAI / mock). Defined in `src/llm/client.rs`. |

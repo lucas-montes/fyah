@@ -5,9 +5,28 @@
 addr = "127.0.0.1:3000"
 
 [llm]
+
+[[llm.providers]]
+name = "openai"
+url = "https://api.openai.com/v1"
+api_key = "sk-test-key"
+
+[[llm.providers.models]]
+name = "gpt-4o"
+temperature = 0.7
+max_tokens = 4096
+top_p = 0.9
+frequency_penalty = 0.0
+presence_penalty = 0.0
+
+[[llm.agents]]
+name = "primary"
 model = "gpt-4o"
 max_iterations = 25
-temperature = 0.7
+system_prompt = "You are Fyah, an AI coding assistant."
+temperature = 0.3
+max_tokens = 2048
+context = { sliding_window = { max_messages = 20 } }
 
 [tools]
 timeout_seconds = 30

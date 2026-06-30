@@ -20,47 +20,23 @@ impl HookDef {
 }
 
 #[derive(Debug, Deserialize, Default)]
-pub struct BeforeHooks(HashMap<String, HookDef>);
-
-impl Hook for BeforeHooks {
-    fn execute<'a>(&'a self, step_name: &'a str) -> Result<(), Error<'a>> {
-        self.0
-            .get(step_name)
-            .ok_or(Error::InvalidHook(step_name))
-            .and_then(|hook| hook.execute())
-    }
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct AfterHooks(HashMap<String, HookDef>);
-
-impl Hook for AfterHooks {
-    fn execute<'a>(&'a self, step_name: &'a str) -> Result<(), Error<'a>> {
-        self.0
-            .get(step_name)
-            .ok_or(Error::InvalidHook(step_name))
-            .and_then(|hook| hook.execute())
-    }
-}
-
-trait Hook {
-    fn execute<'a>(&'a self, step_name: &'a str) -> Result<(), Error<'a>>;
-}
-
-#[derive(Debug, Deserialize, Default)]
 pub struct HooksConfig {
-    #[serde(default)]
-    before: BeforeHooks,
-    #[serde(default)]
-    after: AfterHooks,
+    before: HashMap<String, HookDef>,
+    after: HashMap<String, HookDef>,
 }
 
 impl HooksConfig {
-    pub fn before(&self) -> &BeforeHooks {
-        &self.before
+    pub fn before<'a>(&'a self, step_name: &'a str) -> Result<(), Error<'a>> {
+        self.before
+            .get(step_name)
+            .ok_or(Error::InvalidHook(step_name))
+            .and_then(|hook| hook.execute())
     }
 
-    pub fn after(&self) -> &AfterHooks {
-        &self.after
+    pub fn after<'a>(&'a self, step_name: &'a str) -> Result<(), Error<'a>> {
+        self.after
+            .get(step_name)
+            .ok_or(Error::InvalidHook(step_name))
+            .and_then(|hook| hook.execute())
     }
 }

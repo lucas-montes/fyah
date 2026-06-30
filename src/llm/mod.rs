@@ -1,5 +1,7 @@
+mod agent;
 mod client;
-mod interface;
+mod config;
+mod responses;
 
-pub use client::{Client, LlmClient};
-pub use interface::AgentFactory;
+pub use agent::AgentFactory;
+pub use config::Config;

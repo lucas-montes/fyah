@@ -50,7 +50,7 @@ trait Step {
     type Err: Step;    // backtrack/retry on failure
 
     /// Execute this state and return the next state function, or Done.
-    fn run<T: Transport, Ctx: ContextManagement>(
+    fn run<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx>;
 }
@@ -79,7 +79,23 @@ transport and agent factory through it.
 ### LLM Client (`src/llm/client.rs`)
 - Async `LlmClient` trait (separate from the sync state machine)
 - OpenAI `Client` via reqwest (async)
+- `Prompt` includes `temperature` + optional API params (`max_tokens`, `top_p`, etc.)
 - Not yet wired into state functions
+
+### AgentFactory (`src/llm/interface.rs`)
+- Unit struct; `create(config, agent_name, context)` resolves:
+  1. Find agent config by name
+  2. Find the agent's referenced model + its owning provider
+  3. Require API key from provider
+  4. Build `client::Client(url, api_key, model)`
+  5. Resolve effective temperature (agent override → model default)
+  6. Return `Agent { context, client, ... }`
+- Returns `CreationError` (`AgentNotFound`, `ModelNotFound`, `NoApiKey`) on failure
+
+### Runtime Agent (`src/llm/interface.rs`)
+- `Agent<Ctx: ContextManagement>` — generic over context store
+- Holds concrete `client::Client` (not generic)
+- `handle_prompt` is `todo!()` — agent tool-calling loop not yet implemented
 
 ## Graceful shutdown chain
 

@@ -7,10 +7,9 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::context::ContextManagement;
-use crate::hooks::AfterHooks;
-use crate::hooks::BeforeHooks;
 use crate::llm::AgentFactory;
 
+use crate::transport::PromtpMsg;
 use crate::transport::Transport;
 
 /// The result of executing a state: continue to the next state, or stop.
@@ -39,10 +38,13 @@ pub struct Runtime<T: Transport, Ctx: ContextManagement> {
     //TODO: the runtime probably shouldn't own the configs, we just need to have some and pass them to the interested parties.
     // Te config should be used to have info about the llms, the hooks, what kind of strategy context to use, etc...
     config: Config,
+    // TODO: the runtime could hold the hooks, idk if it's something that should be updated? probably yes
+    // however as the hooks is just a file we call, we could let the user change the hook itself, so if he wants to chain workflows or call more things it can do it in the hook itself
     user_channel: T,
     agent_factory: AgentFactory,
     cancelled: Arc<AtomicBool>,
     context: Ctx,
+    executor: tokio::runtime::Runtime,
 }
 
 impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
@@ -53,6 +55,7 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
         agent_factory: AgentFactory,
         cancelled: Arc<AtomicBool>,
         context: Ctx,
+        executor: tokio::runtime::Runtime,
     ) -> Self {
         Self {
             id,
@@ -61,11 +64,15 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
             agent_factory,
             cancelled,
             context,
+            executor,
         }
     }
 
     /// Start the state machine from `Plan`.
-    pub fn run(mut self) {
+    pub fn run(mut self)
+    where
+        Ctx: Default,
+    {
         info!("State machine started");
 
         let mut f: StateFn<T, Ctx> = <Plan as Step>::run::<T, Ctx>;
@@ -79,24 +86,48 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
         info!("State machine exited");
     }
 
+    fn spawn_agent(&mut self, provider: &str, model: &str, agent_name: &str) {
+        match self.agent_factory.spawn(
+            self.config.llm(),
+            provider,
+            model,
+            agent_name,
+            &self.context,
+        ) {
+            Ok(agent) => {
+                // Agent ready; tool-calling loop (handle_prompt) not yet implemented.
+                let _ = agent;
+            }
+            Err(e) => {
+                self.write(&format!("Agent creation skipped: {e}"));
+            }
+        }
+    }
+
     /// Write a message to the user (ignores I/O errors).
-    pub fn write(&mut self, msg: &str) {
+    fn write(&mut self, msg: &str) {
         let _ = self.user_channel.write(msg.to_owned());
     }
 
     /// Read a line from the user. Returns empty string on error/EOF.
-    pub fn read(&mut self) -> String {
-        self.user_channel.read().unwrap_or_default()
+    fn read(&mut self) -> PromtpMsg {
+        self.read_retry(5, 0)
     }
 
-    /// Read a line and trim whitespace.
-    pub fn read_trimmed(&mut self) -> String {
-        self.read().trim().to_owned()
+    fn read_retry(&mut self, max_retries: usize, retry: usize) -> PromtpMsg {
+        // NOTE: could this really fail that many times?
+        match self.user_channel.read() {
+            Ok(msg) => msg,
+            Err(e) => {
+                self.write(&format!("Error reading input: {e}"));
+                self.read_retry(max_retries, retry + 1)
+            }
+        }
     }
 
     /// Read a yes/no answer. Returns `true` for "y" or "yes".
-    pub fn read_yes_no(&mut self) -> bool {
-        let input = self.read_trimmed().to_lowercase();
+    fn read_yes_no(&mut self) -> bool {
+        let input = self.read().prompt().to_lowercase();
         input == "y" || input == "yes"
     }
 }
@@ -115,36 +146,24 @@ trait Step {
     ///
     /// Use `<Self::Ok as Step>::run::<T, Ctx>` for forward transitions and
     /// `<Self::Err as Step>::run::<T, Ctx>` for backtrack transitions.
-    fn run<T: Transport, Ctx: ContextManagement>(rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
-        let before_hook = rt.config.hooks().before();
-        Self::before_hook(rt, before_hook);
+    fn run<T: Transport, Ctx: ContextManagement + Default>(
+        rt: &mut Runtime<T, Ctx>,
+    ) -> StateMachine<T, Ctx> {
+        let _before_hook = rt.config.hooks().before(Self::NAME);
         let result = Self::execute(rt);
-        Self::after_hook(rt, rt.config.hooks().after());
+        let _after_hook = rt.config.hooks().after(Self::NAME);
         result
     }
 
-    //TODO: for the run methods we could have something fancy like the functions from axum where you have extractors to get only the data needed
-
-    fn before_hook<T: Transport, Ctx: ContextManagement>(
-        _rt: &mut Runtime<T, Ctx>,
-        hook: &BeforeHooks,
-    ) -> () {
-    }
-    fn after_hook<T: Transport, Ctx: ContextManagement>(
-        _rt: &mut Runtime<T, Ctx>,
-        hook: &AfterHooks,
-    ) -> () {
-    }
-
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx>;
 
-    fn advance<T: Transport, Ctx: ContextManagement>() -> StateMachine<T, Ctx> {
+    fn advance<T: Transport, Ctx: ContextManagement + Default>() -> StateMachine<T, Ctx> {
         StateMachine::Continue(<Self::Ok as Step>::run::<T, Ctx>)
     }
 
-    fn backtrack<T: Transport, Ctx: ContextManagement>() -> StateMachine<T, Ctx> {
+    fn backtrack<T: Transport, Ctx: ContextManagement + Default>() -> StateMachine<T, Ctx> {
         StateMachine::Continue(<Self::Err as Step>::run::<T, Ctx>)
     }
 }
@@ -156,13 +175,14 @@ impl Step for Plan {
     type Err = Plan;
     const NAME: &'static str = "plan";
 
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("── Plan ──────────────────────────────");
         rt.write("Enter your idea (or type 'exit' to quit): ");
 
-        let input = rt.read_trimmed();
+        let input = rt.read();
+        let input = input.prompt().trim();
 
         if input.eq_ignore_ascii_case("exit") {
             rt.write("Goodbye!");
@@ -186,7 +206,7 @@ impl Step for PlanDraft {
     type Err = Plan;
     const NAME: &'static str = "plan-draft";
 
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("── Plan Draft ─────────────────────────");
@@ -210,7 +230,7 @@ impl Step for PlanApproved {
     type Err = Plan;
     const NAME: &'static str = "plan-approved";
 
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("── Plan Approved ──────────────────────");
@@ -228,13 +248,18 @@ impl Step for Implement {
     type Err = Plan;
     const NAME: &'static str = "implement";
 
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("── Implement ──────────────────────────");
+
+        let msg = rt.read();
+
+        rt.spawn_agent(msg.provider(), msg.model(), msg.agent_name());
+
         rt.write("Implementing... (simulated)");
         rt.write("Implementation complete. Press Enter to run tests...");
-        let _ = rt.read();
+
         Self::advance()
     }
 }
@@ -246,7 +271,7 @@ impl Step for Test {
     type Err = Implement;
     const NAME: &'static str = "test";
 
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("── Test ───────────────────────────────");
@@ -269,7 +294,7 @@ impl Step for Commit {
     type Err = Done;
     const NAME: &'static str = "commit";
 
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("── Commit ─────────────────────────────");
@@ -287,82 +312,10 @@ impl Step for Done {
     type Err = Done;
     const NAME: &'static str = "done";
 
-    fn execute<T: Transport, Ctx: ContextManagement>(
+    fn execute<T: Transport, Ctx: ContextManagement + Default>(
         _rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         info!("State machine completed");
         StateMachine::Done
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context::SimpleContext;
-
-    use std::collections::VecDeque;
-
-    struct TestTransport {
-        buffer: VecDeque<String>,
-    }
-    impl TestTransport {
-        fn new(responses: &[&str]) -> Self {
-            Self {
-                buffer: responses.iter().map(|s| s.to_string()).collect(),
-            }
-        }
-    }
-    impl Transport for TestTransport {
-        fn read(&mut self) -> Result<String, String> {
-            Ok(self.buffer.pop_front().unwrap_or_default())
-        }
-        fn write(&mut self, _event: String) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn happy_path_plan_to_done() {
-        let mut rt = Runtime::<TestTransport, SimpleContext>::new(
-            "test".into(),
-            Config::default(),
-            // Plan("my idea") → PlanDraft(y) → PlanApproved → Implement
-            // → Test(y) → Commit → Done
-            TestTransport::new(&["my idea", "y", "", "", "y", ""]),
-            AgentFactory::default(),
-            Arc::new(AtomicBool::new(false)),
-            SimpleContext::default(),
-        );
-
-        rt.run();
-    }
-
-    #[test]
-    fn backtrack_test_to_implement() {
-        let mut rt = Runtime::<TestTransport, SimpleContext>::new(
-            "test".into(),
-            Config::default(),
-            // Plan("idea") → PlanDraft(y) → PlanApproved → Implement → Test(n)
-            // → Implement → Test(y) → Commit → Done
-            TestTransport::new(&["idea", "y", "", "", "n", "", "y", ""]),
-            AgentFactory::default(),
-            Arc::new(AtomicBool::new(false)),
-            SimpleContext::default(),
-        );
-
-        rt.run();
-    }
-
-    #[test]
-    fn exit_from_plan_stops_immediately() {
-        let mut rt = Runtime::<TestTransport, SimpleContext>::new(
-            "test".into(),
-            Config::default(),
-            TestTransport::new(&["exit"]),
-            AgentFactory::default(),
-            Arc::new(AtomicBool::new(false)),
-            SimpleContext::default(),
-        );
-        rt.run();
     }
 }

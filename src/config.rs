@@ -10,10 +10,10 @@
 //! TODO: at some point read .github, .opencode and all the specific configs
 
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::hooks::HooksConfig;
+use crate::llm::Config as LlmConfig;
 
 #[derive(Debug)]
 pub enum Error {
@@ -58,39 +58,6 @@ impl std::error::Error for Error {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct LlmConfig {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    api_key: Option<String>,
-    #[serde(default = "default_max_iterations")]
-    max_iterations: u32,
-    #[serde(default = "default_temperature")]
-    temperature: f64,
-}
-
-fn default_max_iterations() -> u32 {
-    25
-}
-
-fn default_temperature() -> f64 {
-    0.7
-}
-
-impl Default for LlmConfig {
-    fn default() -> Self {
-        Self {
-            model: None,
-            api_key: None,
-            max_iterations: default_max_iterations(),
-            temperature: default_temperature(),
-        }
-    }
-}
-
-
-
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -102,6 +69,10 @@ pub struct Config {
 impl Config {
     pub fn hooks(&self) -> &HooksConfig {
         &self.hooks
+    }
+
+    pub fn llm(&self) -> &LlmConfig {
+        &self.llm
     }
     /// Load and merge config from all sources in precedence order.
     ///
