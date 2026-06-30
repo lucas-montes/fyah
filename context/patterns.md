@@ -24,7 +24,7 @@ trait Step {
     type Ok: Step;     // forward on success
     type Err: Step;    // backtrack on failure
 
-    fn run<T: Transport, Ctx: ContextManagement>(
+    fn run<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx>;
 }
@@ -35,7 +35,7 @@ impl Step for Test {
     type Ok = Commit;
     type Err = Implement;
 
-    fn run<T: Transport, Ctx: ContextManagement>(
+    fn run<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("Did all tests pass? (y/n): ");

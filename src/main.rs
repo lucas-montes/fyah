@@ -4,13 +4,17 @@
 //! runs the interactive session loop.  Ctrl+C is handled by the Runtime
 //! (via `ctrlc` crate) for graceful cancellation between state transitions.
 
+// Binary crate: dead code from pre-wired features (LLM client, context strategies,
+// tool calling) is expected until wiring tasks are implemented.
+#![allow(dead_code)]
+
 mod llm;
 
 mod config;
 mod context;
+mod hooks;
 mod runtime;
 mod transport;
-mod hooks;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load(cli.config)?;
     debug!(?config, "config loaded");
 
-    let transport = StdinTransport::default();
+    let transport = StdinTransport;
     let cancelled = CANCEL
         .get_or_init(|| {
             let flag: Arc<AtomicBool> = Arc::default();
@@ -65,18 +69,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .clone();
 
-    let context = SimpleContext::default();
+    let context = SimpleContext;
+    let executor = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
 
-    let mut runtime = Runtime::new(
+    Runtime::new(
         Uuid::now_v7().to_string(),
         config,
         transport,
-        AgentFactory::default(),
+        AgentFactory,
         cancelled,
         context,
-    );
-
-    runtime.run();
+        executor,
+    )
+    .run();
 
     info!("Fyah stopped");
     // Use exit(0) to terminate the process immediately rather than letting

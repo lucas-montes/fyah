@@ -8,10 +8,42 @@
 //!
 //! - [`StdinTransport`] — reads lines from stdin / writes strings to stdout.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 /// A user task string, typically read from an input transport.
-pub type PromtpMsg = String;
+pub struct PromtpMsg {
+    model: String,
+    agent: String,
+    provider: String,
+    prompt: String,
+}
+
+impl PromtpMsg {
+    pub fn new(model: String, agent: String, provider: String, prompt: String) -> Self {
+        Self {
+            model,
+            agent,
+            provider,
+            prompt,
+        }
+    }
+
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn agent_name(&self) -> &str {
+        &self.agent
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+}
 
 /// A response event string, typically written to an output transport.
 pub type PromtpResp = String;
@@ -47,14 +79,20 @@ impl Transport for StdinTransport {
         let _ = std::io::stdout().flush();
 
         let mut line = String::new();
-        match std::io::stdin().read_line(&mut line) {
-            Ok(0) => Ok(String::new()), // EOF
-            Ok(_) => Ok(line
+        let prompt = match std::io::stdin().read_line(&mut line) {
+            Ok(0) => line, // EOF
+            Ok(_) => line
                 .trim_end_matches('\n')
                 .trim_end_matches('\r')
-                .to_string()),
-            Err(e) => Err(e.to_string()),
-        }
+                .to_string(),
+            Err(e) => return Err(e.to_string()),
+        };
+        Ok(PromtpMsg::new(
+            "openai".to_string(),
+            "gpt-3.5-turbo".to_string(),
+            "openai".to_string(),
+            prompt,
+        ))
     }
 
     fn write(&mut self, event: PromtpResp) -> Result<(), String> {

@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,26 +17,30 @@ pub enum Message {
 }
 
 impl Message {
-    fn content(&self) -> Option<&String> {
+    /// Total length of text content across all fields (for rough token estimation).
+    pub fn content_len(&self) -> usize {
         match self {
-            Message::User { content } => Some(content),
-            Message::Assistant { content, .. } => content.as_ref(),
-            Message::Tool { content, .. } => Some(content),
+            Message::User { content } => content.len(),
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
+                let c = content.as_ref().map(|s| s.len()).unwrap_or(0);
+                let t = tool_calls
+                    .as_ref()
+                    .map(|calls| calls.iter().map(|tc| tc.estimate_len()).sum())
+                    .unwrap_or(0);
+                c + t
+            }
+            Message::Tool { content, .. } => content.len(),
         }
     }
 
-    fn tool_calls(&self) -> Option<&Vec<ToolCall>> {
-        match self {
-            Message::Assistant { tool_calls, .. } => tool_calls.as_ref(),
-            _ => None,
-        }
-    }
-
-    fn new_user(content: String) -> Self {
+    pub fn new_user(content: String) -> Self {
         Message::User { content }
     }
 
-    fn new_tool(tool_call_id: String, content: String) -> Self {
+    pub fn new_tool(tool_call_id: String, content: String) -> Self {
         Message::Tool {
             tool_call_id,
             content,
@@ -46,37 +48,43 @@ impl Message {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ChatResponse {
-    choices: VecDeque<ResponseChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseChoice {
-    #[serde(rename = "index")]
-    _index: usize,
-    message: Message,
-    #[serde(rename = "finish_reason")]
-    _finish_reason: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ToolCall {
+pub struct ToolCall {
     id: String,
     #[serde(rename = "type")]
     _tool_type: String,
     function: ToolCallFunction,
 }
 
+impl ToolCall {
+    pub fn split(self) -> (String, ToolCallFunction) {
+        (self.id, self.function)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
-struct ToolCallFunction {
+pub struct ToolCallFunction {
     name: String,
     // TODO: this can be a json
     arguments: String,
 }
 
+impl ToolCall {
+    fn estimate_len(&self) -> usize {
+        self.id.len()
+            + self._tool_type.len()
+            + self.function.name.len()
+            + self.function.arguments.len()
+    }
+}
+
 impl ToolCallFunction {
-    fn parse_arguments(&self) -> Result<serde_json::Value, serde_json::Error> {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn function_args(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::from_str(&self.arguments)
     }
 }

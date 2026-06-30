@@ -28,9 +28,29 @@ Implement → Test → Commit → Done`), each interacting with the user via a
 - **LLM Client** (`src/llm/client.rs`) — async `LlmClient` trait + OpenAI
   `Client` impl + mock support. Not yet wired into state functions.
 - **Config** (`src/config.rs`) — TOML-based config loading with merge
-  precedence (XDG → local → CLI override).
-- **AgentFactory** (`src/llm/interface.rs`) — stub factory. `Agent` is not
-  yet implemented.
+  precedence (XDG → local → CLI override). LLM config at `Config.llm()`
+  returns `Option<&llm::config::Config>` with `providers`, `agents`, and
+  per-agent `ContextStrategy`.
+- **LLM Config** (`src/llm/config.rs`) — deserialization structs: `Provider`
+  (name, url, api_key, models), `Model` (name + all common API parameters:
+  temperature, max_tokens, top_p, frequency_penalty, presence_penalty, stop,
+  seed), `Agent` (name, model, max_iterations, system_prompt, temperature,
+  max_tokens, context — links to `Model` by name), and `ContextStrategy` enum
+  (`SlidingWindow`, `TokenBudget`, `Summary`). All fields private with accessors.
+- **Context Management** (`src/context/memory.rs`) — `ContextManagement` trait
+  with `add_message`, `get_history`, `should_compact`, `compact`. Three concrete
+  strategies: `SlidingWindowContext` (keep last N messages), `TokenBudgetContext`
+  (keep within token budget), `SummaryContext` (truncate at threshold; real
+  summarisation deferred). Construction via `ContextStrategy::try_build()`.
+  `SimpleContext` kept as placeholder.
+- **AgentFactory** (`src/llm/interface.rs`) — unit struct with `create(config,
+  agent_name, context)` method. Resolves agent config → model config → provider
+  config, builds a `Client`, and returns `Agent<Ctx>`. Error enum `CreationError`
+  for missing agents, models, or API keys.
+- **Runtime Agent** (`src/llm/interface.rs`) — `Agent<Ctx: ContextManagement>`.
+  Holds a concrete `client::Client`, the context store, `max_iterations`,
+  `system_prompt`, `model_name`, and `temperature`. `handle_prompt` is
+  `todo!()` (agent tool-calling loop not yet implemented).
 
 ## State machine workflow
 

@@ -10,6 +10,7 @@
 | [patterns.md](patterns.md) | Recurring design patterns (typestate FSM, fn-pointer dispatch) |
 | [context-management-sota.md](context-management-sota.md) | SOTA research survey on context management for AI agents (20+ papers, verified links) |
 | [brainstorm-sota-session-agents.md](brainstorm-sota-session-agents.md) | Session architecture brainstorm: agent hierarchy, supervision trees, FSM orchestration |
+| | [context-sota-papers.md](context-sota-papers.md) | Quick reference: each paper's core idea + how it maps to Rust code patterns |
 
 ## Plans
 
@@ -19,6 +20,7 @@
 | [plans/interactive-state-transitions.md](plans/interactive-state-transitions.md) | Superseded — interactive logic was implemented directly in `runtime_trait.rs`, not via this plan |
 | [plans/typestate-compile-time-enforcement.md](plans/typestate-compile-time-enforcement.md) | Superseded — `handler()` and `Option<Result<>>` replaced by `StateMachine<T,Ctx>` with direct `<Self::Ok as Step>::run` dispatch |
 | [plans/simplify-state-machine-approach.md](plans/simplify-state-machine-approach.md) | Complete — all tasks done |
+| [plans/llm-config-provider-architecture.md](plans/llm-config-provider-architecture.md) | Active — LLM config, provider, agent, context architecture redesign |
 
 ## Decisions
 
