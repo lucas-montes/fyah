@@ -48,7 +48,6 @@ impl Message {
     }
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     id: String,
@@ -58,8 +57,8 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    pub fn split(self) -> (String, ToolCallFunction) {
-        (self.id, self.function)
+    pub fn split(&self) -> (String, &ToolCallFunction) {
+        (self.id.to_owned(), &self.function)
     }
 }
 
@@ -80,6 +79,14 @@ impl ToolCall {
 }
 
 impl ToolCallFunction {
+    /// Create a new `ToolCallFunction` with the given name and JSON arguments string.
+    pub fn new(name: impl Into<String>, arguments: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

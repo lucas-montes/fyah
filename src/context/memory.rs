@@ -6,11 +6,41 @@ use crate::context::Message;
 /// implementors (e.g. `SimpleContext`) compile without changes.
 pub trait ContextManagement {
     /// Append a message to the conversation history.
+    fn add_message(&mut self, _msg: Message);
+
+    /// Return the current conversation history.
+    fn get_history(&self) -> &[Message];
+
+    fn get_model(&self) -> &str;
+
+    /// Whether the history has exceeded its configured limits and should
+    /// be compacted.
+    fn should_compact(&self) -> bool {
+        false
+    }
+
+    /// Compact the history (truncate, summarize, etc.) to fit within limits.
+    fn compact(&mut self) {}
+
+    fn merge(&mut self, other: &impl ContextManagement);
+}
+
+/// Placeholder context that stores nothing. Used until T05 wires real
+/// context strategies into the Runtime.
+#[derive(Debug, Default)]
+pub struct SimpleContext;
+
+impl ContextManagement for SimpleContext {
+    /// Append a message to the conversation history.
     fn add_message(&mut self, _msg: Message) {}
 
     /// Return the current conversation history.
     fn get_history(&self) -> &[Message] {
         &[]
+    }
+
+    fn get_model(&self) -> &str {
+        "phi3:mini"
     }
 
     /// Whether the history has exceeded its configured limits and should
@@ -22,28 +52,23 @@ pub trait ContextManagement {
     /// Compact the history (truncate, summarize, etc.) to fit within limits.
     fn compact(&mut self) {}
 
-    fn merge(&mut self, other: &impl ContextManagement) {
+    fn merge(&mut self, _other: &impl ContextManagement) {
         todo!()
     }
 }
-
-/// Placeholder context that stores nothing. Used until T05 wires real
-/// context strategies into the Runtime.
-#[derive(Debug, Default)]
-pub struct SimpleContext;
-
-impl ContextManagement for SimpleContext {}
 
 /// Context that keeps only the last N messages.
 #[derive(Debug, Default)]
 pub struct SlidingWindowContext {
     max_messages: usize,
     history: Vec<Message>,
+    model: String,
 }
 
 impl SlidingWindowContext {
-    pub fn new(max_messages: usize) -> Self {
+    pub fn new(model: String, max_messages: usize) -> Self {
         Self {
+            model,
             max_messages,
             history: Vec::new(),
         }
@@ -51,6 +76,12 @@ impl SlidingWindowContext {
 }
 
 impl ContextManagement for SlidingWindowContext {
+    fn get_model(&self) -> &str {
+        &self.model
+    }
+    fn merge(&mut self, other: &impl ContextManagement) {
+        todo!()
+    }
     fn add_message(&mut self, msg: Message) {
         self.history.push(msg);
     }

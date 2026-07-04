@@ -51,6 +51,18 @@ Implement → Test → Commit → Done`), each interacting with the user via a
   Holds a concrete `client::Client`, the context store, `max_iterations`,
   `system_prompt`, `model_name`, and `temperature`. `handle_prompt` is
   `todo!()` (agent tool-calling loop not yet implemented).
+- **ToolCommand** (`src/llm/tools.rs`) — typed enum for tool dispatch:
+  `Read { file_path }`, `Write { file_path, content }`, `Bash { command }`,
+  `Custom { name, args }`. Parsed from `ToolCallFunction` via `TryFrom`.
+  Generates `ToolDef` definitions for the LLM via `tool_definitions()`.
+- **ToolDef trait** (`src/llm/tool_def.rs`) — trait for generating JSON Schema
+  from struct definitions. `fn schema() -> Value` returns the JSON Schema;
+  `fn tool_def(name, desc) -> responses::ToolDef` wraps it into a tool definition.
+  Implemented by the `#[define(Tool)]` proc-macro from `fyah-derive`.
+- **fyah-derive** (`fyah-derive/`) — proc-macro crate providing `#[define(Tool)]`
+  attribute macro. Reads struct fields, types, and doc comments to generate
+  `impl ToolDef` with correct JSON Schema output. Supports String, integers,
+  f64, bool, Vec, and Option types.
 
 ## State machine workflow
 

@@ -46,7 +46,19 @@ impl PromtpMsg {
 }
 
 /// A response event string, typically written to an output transport.
-pub type PromtpResp = String;
+pub struct PromtpResp(String);
+
+impl PromtpResp {
+    pub const fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl From<String> for PromtpResp {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
 
 /// Abstract transport for task input and event output.
 pub trait Transport {

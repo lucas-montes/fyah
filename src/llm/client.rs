@@ -4,7 +4,7 @@ use futures::{FutureExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::{context::{Message, Tool, ToolCall}, };
+use crate::context::{ContextManagement, Message, Tool, ToolCall};
 
 #[derive(Debug, Deserialize)]
 pub struct Response {
@@ -18,7 +18,7 @@ impl Response {
 }
 
 #[derive(Debug, Deserialize)]
-struct ResponseChoice {
+pub struct ResponseChoice {
     #[serde(rename = "index")]
     _index: usize,
     message: Message,
@@ -58,18 +58,18 @@ pub enum Error {
 ///
 /// Production: `Client` (reqwest → OpenAI-compatible API).
 pub trait LlmClient: Send + Sync {
-    type Prompt;
+    // type Prompt;
     /// Send a chat completion request and return the parsed response.
     fn chat_completion(
         &self,
-        prompt: &Self::Prompt,
+        prompt: &Prompt,
     ) -> impl std::future::Future<Output = Result<Response, Error>> + Send;
 }
 
 #[derive(Debug, Serialize)]
-pub struct Prompt {
-    messages: Vec<Message>,
-    model: String,
+pub struct Prompt<'a> {
+    messages: &'a [Message],
+    model: &'a str,
     tools: Vec<Tool>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,23 +86,38 @@ pub struct Prompt {
     seed: Option<u64>,
 }
 
+impl<'a, T> From<&'a T> for Prompt<'a>
+where
+    T: ContextManagement,
+{
+    fn from(context: &'a T) -> Self {
+        Self {
+            messages: context.get_history(),
+            model: context.get_model(),
+            tools: Vec::new(),
+            temperature: 0.7,
+            max_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+        }
+    }
+}
+
 /// Production LLM client that calls an OpenAI-compatible `/v1/chat/completions`
 /// endpoint via reqwest.
 #[derive(Debug, Clone)]
 pub struct Client {
     url: String,
-    auth: String,
+    auth: Option<String>,
     http_client: reqwest::Client,
 }
 
 impl Client {
-    /// Create a new `Client`.
-    ///
-    /// `url` — OpenAI-compatible API base URL (e.g. "https://api.openai.com/v1/chat/completions").
-    /// `api_key` — API key.
-    /// `model` — model identifier (e.g. "gpt-4o").
-    pub fn new(url: String, api_key: String) -> Self {
-        let auth = format!("Bearer {}", api_key);
+    pub fn new(url: String, api_key: Option<&str>) -> Self {
+        let auth = api_key.map(|key| format!("Bearer {}", key));
         Self {
             url,
             auth,
@@ -112,17 +127,17 @@ impl Client {
 }
 
 impl LlmClient for Client {
-    type Prompt = Prompt;
-
     fn chat_completion(
         &self,
         prompt: &Prompt,
     ) -> impl std::future::Future<Output = Result<Response, Error>> + Send {
-        self.http_client
-            .post(&self.url)
-            .header("Authorization", &self.auth)
-            .json(&prompt)
-            .send()
+        let mut req = self.http_client.post(&self.url).json(&prompt);
+
+        if let Some(auth) = &self.auth {
+            req = req.header("Authorization", auth);
+        }
+
+        req.send()
             .map_err(|e| Error::RequestFailed(e.to_string()))
             .and_then(handle_response)
     }
@@ -137,4 +152,34 @@ fn handle_response(
     }))
     .and_then(|resp| resp.json().map_err(|e| Error::Parse(e.to_string())))
     .inspect(|resp| debug!(?resp, "LLM response"))
+}
+
+#[tokio::test]
+async fn live_ollama_smoke_test() {
+    let base = std::env::var("OLLAMA_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434/v1/chat/completions".to_string());
+
+    let client = Client::new(base, None);
+
+    let prompt = Prompt {
+        messages: &[Message::User {
+            content: "Hello, world!".to_string(),
+        }],
+        model: "phi3:mini",
+        tools: vec![],
+        temperature: 0.7,
+        max_tokens: None,
+        top_p: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        stop: None,
+        seed: None,
+    };
+
+    let out = client
+        .chat_completion(&prompt)
+        .await
+        .expect("ollama call should succeed");
+
+    println!("Response: {:?}", out);
 }
