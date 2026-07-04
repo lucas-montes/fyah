@@ -43,7 +43,8 @@ pub struct Cli {
 /// a single time per process.  Every `Runtime` shares the same `Arc`.
 static CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_target(false)
         .compact()
@@ -70,7 +71,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone();
 
     let context = SimpleContext;
-    let executor = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
 
     Runtime::new(
         Uuid::now_v7().to_string(),
@@ -79,7 +79,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AgentFactory,
         cancelled,
         context,
-        executor,
     )
     .run();
 

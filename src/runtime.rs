@@ -44,7 +44,6 @@ pub struct Runtime<T: Transport, Ctx: ContextManagement> {
     agent_factory: AgentFactory,
     cancelled: Arc<AtomicBool>,
     context: Ctx,
-    executor: tokio::runtime::Runtime,
 }
 
 impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
@@ -54,8 +53,8 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
         user_channel: T,
         agent_factory: AgentFactory,
         cancelled: Arc<AtomicBool>,
+        // TODO: we probably need a context and some kind of historic of what happended and with what model.
         context: Ctx,
-        executor: tokio::runtime::Runtime,
     ) -> Self {
         Self {
             id,
@@ -64,7 +63,6 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
             agent_factory,
             cancelled,
             context,
-            executor,
         }
     }
 
@@ -95,7 +93,7 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
             &self.context,
         ) {
             Ok(agent) => {
-                // Agent ready; tool-calling loop (handle_prompt) not yet implemented.
+                // TODO: maybe we want to keep the agents in a map and have some channel to communicate with them
                 let _ = agent;
             }
             Err(e) => {
@@ -106,7 +104,7 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
 
     /// Write a message to the user (ignores I/O errors).
     fn write(&mut self, msg: &str) {
-        let _ = self.user_channel.write(msg.to_owned());
+        let _ = self.user_channel.write(msg.to_owned().into());
     }
 
     /// Read a line from the user. Returns empty string on error/EOF.
@@ -149,6 +147,7 @@ trait Step {
     fn run<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
+        //TODO: we could add in the config some param to allow the user to fail when the hooks fail and some retry mechanism
         let _before_hook = rt.config.hooks().before(Self::NAME);
         let result = Self::execute(rt);
         let _after_hook = rt.config.hooks().after(Self::NAME);

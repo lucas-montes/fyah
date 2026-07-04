@@ -1,14 +1,13 @@
-use std::fs::read_to_string;
-
 use tokio::task::JoinHandle;
 
-use crate::context::{ContextManagement, Message, SlidingWindowContext, ToolCall, ToolCallFunction};
+use crate::context::{ContextManagement, Message, SlidingWindowContext, ToolCallFunction};
 
 use super::{
     client::{self, LlmClient},
     config::Config,
 };
 
+#[derive(Debug)]
 pub enum Error {
     Client(client::Error),
     Context(String),
@@ -27,6 +26,60 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::ToolCall(err.to_string())
+    }
+}
+
+impl From<String> for Error {
+    fn from(err: String) -> Self {
+        Error::ToolCall(err)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(err: &str) -> Self {
+        Error::ToolCall(err.to_string())
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Client(e) => write!(f, "client error: {e:?}"),
+            Error::Context(e) => write!(f, "context error: {e}"),
+            Error::ToolCall(e) => write!(f, "tool call error: {e}"),
+        }
+    }
+}
+
+impl Error {
+    /// Create an error for an unknown tool name.
+    pub fn unknown_tool(name: impl Into<String>) -> Self {
+        Error::ToolCall(format!("unknown tool: {}", name.into()))
+    }
+
+    /// Create an error for an invalid or missing argument on a tool.
+    pub fn invalid_argument(
+        tool: impl Into<String>,
+        field: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Error::ToolCall(format!(
+            "tool '{}': invalid argument '{}': {}",
+            tool.into(),
+            field.into(),
+            detail.into()
+        ))
+    }
+
+    /// Wrap an I/O error with context about the operation that failed.
+    pub fn io_error(context: impl Into<String>, err: std::io::Error) -> Self {
+        Error::ToolCall(format!("{}: {}", context.into(), err))
+    }
+}
+
 /// A configured LLM agent ready to process prompts.
 ///
 /// Generic over `Ctx: ContextManagement` for the conversation history store.
@@ -41,20 +94,19 @@ pub struct Agent<Client: LlmClient, Ctx: ContextManagement> {
     max_iterations: u32,
     /// Optional system prompt.
     system_prompt: Option<String>,
-    /// Resolved model name.
-    model_name: String,
     /// Effective temperature (model default overridden by agent config).
     temperature: f64,
 }
 
 impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
-
     //TODO: we should check how to leverage more lifetimes as we only want to reference the context of the runtime and have some more information
     async fn run(mut self) -> Result<Ctx, Error> {
         let mut tool_calls_messages = Vec::new();
 
+        let ctx = &self.context;
+
         loop {
-            let mut response = self.client.chat_completion(&prompt).await?;
+            let mut response = self.client.chat_completion(&ctx.into()).await?;
 
             if let Some(choice) = response.next_choice() {
                 let tool_calls = choice.tool_calls();
@@ -76,12 +128,14 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
 
                         let result = handle_tool_call(&tool_call_function)?;
 
-                        tool_calls_messages
-                            .push(Message::new_tool(tool_call_id, result));
+                        tool_calls_messages.push(Message::new_tool(tool_call_id, result));
                     }
                 }
 
-                // prompt.messages.push(choice.message());
+                //NOTE: so maybe the message for the llm and the ones saved could be different. why do we need to send the tool calls list?
+                // maybe split the two kind of messages? having the incoming and outgoing?
+
+                // self.context.add_message(choice.message());
                 // prompt.messages.append(&mut tool_calls_messages);
             }
         }
@@ -91,41 +145,27 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
 }
 
 fn handle_tool_call(tool_call: &ToolCallFunction) -> Result<String, Error> {
-    match tool_call.name() {
-        "Read" => {
-            //TODO: maybe we can type this
-            let args = tool_call.function_args()?;
-            eprintln!("Reading file with arguments: {:?}", args);
-            let file_path = args["file_path"]
-                .as_str()
-                .ok_or("file_path is not a string")?;
-            return read_to_string(file_path).map_err(|e| e.into());
-        }
-        "Write" => {
-            let args = tool_call.function_args()?;
-            eprintln!("Writing file with arguments: {:?}", args);
-            let file_path = args["file_path"]
-                .as_str()
-                .ok_or("file_path is not a string")?;
-            let content = args["content"].as_str().ok_or("content is not a string")?;
-            std::fs::write(file_path, content)?;
-            return Ok("".to_string());
-        }
-        "Bash" => {
-            let args = tool_call.function_args()?;
-            eprintln!("Running bash command with arguments: {:?}", args);
-            let command = args["command"].as_str().ok_or("command is not a string")?;
-            let output = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(command)
-                .output()?;
-            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
-        }
-        _ => {
-            eprintln!("Unknown tool function: {}", tool_call.name());
-        }
-    }
-    Err("we should handle a known tool".into())
+    // let cmd = ToolCommand::try_from(tool_call)?;
+
+    // match cmd {
+    //     ToolCommand::Read { file_path } => {
+    //         info!(tool = "Read", %file_path, "executing tool call");
+    //         handle_read(&file_path)
+    //     }
+    //     ToolCommand::Write { file_path, content } => {
+    //         info!(tool = "Write", %file_path, content_len = content.len(), "executing tool call");
+    //         handle_write(&file_path, &content)
+    //     }
+    //     ToolCommand::Bash { command } => {
+    //         info!(tool = "Bash", %command, "executing tool call");
+    //         handle_bash(&command)
+    //     }
+    //     ToolCommand::Custom { name, .. } => {
+    //         warn!(tool = %name, "unknown tool function");
+    //         Err(agent::Error::unknown_tool(name))
+    //     }
+    // }
+    Ok("tool call result placeholder".to_string())
 }
 
 /// Errors that can occur when creating an agent from config.
@@ -165,14 +205,14 @@ impl std::error::Error for FactoryError {}
 pub struct AgentFactory;
 
 impl AgentFactory {
-    pub fn spawn(
+    pub fn spawn<T: ContextManagement>(
         &self,
         config: &Config,
-        provider: &str,
+        provider_name: &str,
         model: &str,
         agent_name: &str,
-        runtime_context: &impl ContextManagement,
-    ) -> Result<JoinHandle<()>, FactoryError> {
+        runtime_context: &T,
+    ) -> Result<JoinHandle<Result<impl ContextManagement + use<T>, Error>>, FactoryError> {
         let agent_cfg = config
             .agents()
             .iter()
@@ -180,10 +220,8 @@ impl AgentFactory {
             .ok_or_else(|| FactoryError::AgentNotFound(agent_name.to_string()))?;
 
         let provider = config
-            .providers()
-            .iter()
-            .find(|p| p.name() == provider)
-            .ok_or_else(|| FactoryError::ProviderNotFound(provider.to_string()))?;
+            .get_provider(provider_name)
+            .ok_or_else(|| FactoryError::ProviderNotFound(provider_name.to_string()))?;
 
         let model = provider
             .models()
@@ -191,13 +229,11 @@ impl AgentFactory {
             .find(|m| m.name() == model)
             .ok_or_else(|| FactoryError::ModelNotFound(model.to_string()))?;
 
-        let api_key = provider
-            .api_key()
-            .ok_or_else(|| FactoryError::NoApiKey(provider.name().to_string()))?;
+        let api_key = provider.api_key();
 
-        let client = client::Client::new(provider.url().to_string(), api_key.to_string());
+        let client = client::Client::new(provider.url().to_string(), api_key);
 
-        let mut context = SlidingWindowContext::new(500);
+        let mut context = SlidingWindowContext::new(model.name().to_string(), 500);
         context.merge(runtime_context);
 
         let temperature = agent_cfg.temperature().unwrap_or(model.temperature());
@@ -207,7 +243,6 @@ impl AgentFactory {
             client,
             max_iterations: agent_cfg.max_iterations(),
             system_prompt: agent_cfg.system_prompt().map(String::from),
-            model_name: model.name().to_string(),
             temperature,
         };
 

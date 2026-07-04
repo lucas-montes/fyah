@@ -40,6 +40,7 @@
             pkgs.openssl
             sce.packages.${system}.default
             rust
+            pkgs.ollama
           ];
         };
 

@@ -31,3 +31,10 @@
 | **TokenBudgetContext** | Concrete `ContextManagement` in `src/context/memory.rs`. Keeps messages within a cumulative token budget (rough estimate: content_len / 4). Drops oldest when over budget. |
 | **SummaryContext** | Concrete `ContextManagement` in `src/context/memory.rs`. Compacts at 50 messages, keeps last 25 (real LLM summarisation deferred). |
 | **LlmClient** | Async trait for LLM chat completion (OpenAI / mock). Defined in `src/llm/client.rs`. |
+| **ToolCommand** | Typed enum in `src/llm/tools.rs` — `Read { file_path }`, `Write { file_path, content }`, `Bash { command }`, `Custom { name, args }`. Parsed from a `ToolCallFunction` via `TryFrom`. Generates `ToolDef` entries for the LLM via `ToolCommand::tool_definitions()`. |
+| **GenerateToolDef** | Trait in `src/llm/tools.rs` — `fn tool_defs() -> Vec<ToolDef>`. Standardized interface for producing `ToolDef` entries from a type. Implemented for `ToolCommand` (Read/Write/Bash), excluding `Custom`. `tool_definitions()` delegates to this trait. |
+| **ToolDef (trait)** | Trait in `src/llm/tool_def.rs` — `fn schema() -> serde_json::Value` and `fn tool_def(name, desc) -> responses::ToolDef`. Implemented by `#[define(Tool)]` proc-macro. Generates JSON Schema from struct fields. |
+| **ToolDef (struct)** | Struct in `src/llm/responses.rs` — name, description, and JSON Schema parameters for a tool exposed to the LLM. Constructed via `ToolDef::new()`. |
+| **CustomToolHandler** | Trait in `src/llm/tools.rs` — `fn handle(&self, args: &HashMap<String, Value>) -> Result<String, String>`. Must be `Send + Sync`. Implemented by user-defined tool handlers registered in `ToolRegistry`. |
+| **ToolRegistry** | Struct in `src/llm/tools.rs` — maps tool names to `Box<dyn CustomToolHandler>`. Methods: `new()`, `register(name, handler)`, `handle(name, args)`. Used by `handle_tool_call_with_registry()` to dispatch custom tools. |
+| **handle_tool_call_with_registry** | Function in `src/llm/tools.rs` — like `handle_tool_call` but accepts a `&ToolRegistry` for dispatching custom tools. Built-in tools (Read/Write/Bash) dispatch identically regardless. |

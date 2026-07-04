@@ -37,3 +37,66 @@ struct ToolProperty {
     property_type: String,
     description: String,
 }
+
+impl Tool {
+    /// Create a new `Tool` from a name, description, and JSON Schema parameters.
+    ///
+    /// The `parameters` value is expected to follow the standard OpenAI tool
+    /// JSON Schema shape: `{ type: "object", properties: { ... }, required: [...] }`.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        let param_type = parameters
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("object")
+            .to_string();
+        let properties = parameters
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(key, val)| {
+                        let prop = ToolProperty {
+                            property_type: val
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("string")
+                                .to_string(),
+                            description: val
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        };
+                        (key.clone(), prop)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let required = parameters
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Self {
+            tool_type: "function".to_string(),
+            function: ToolFunction {
+                name: name.into(),
+                description: description.into(),
+                parameters: ToolParameters {
+                    param_type,
+                    properties,
+                    required,
+                },
+            },
+        }
+    }
+}

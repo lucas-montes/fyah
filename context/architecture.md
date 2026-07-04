@@ -97,6 +97,16 @@ transport and agent factory through it.
 - Holds concrete `client::Client` (not generic)
 - `handle_prompt` is `todo!()` — agent tool-calling loop not yet implemented
 
+### Tool dispatch (`src/llm/tools.rs`)
+- **`ToolCommand`** — typed enum for built-in tools:
+  - `Read { file_path }`, `Write { file_path, content }`, `Bash { command }`
+  - `Custom { name, args }` — catch-all for unknown / user-defined tools
+- **Parsing**: `impl TryFrom<&ToolCallFunction> for ToolCommand` — dispatches by name, uses `serde_json::from_value` with `#[serde(deny_unknown_fields)]` on private arg structs to reject LLM-hallucinated fields
+- **Dispatch**: `handle_tool_call(tool_call)` → parses to `ToolCommand`, matches on typed variants, calls private helpers (`handle_read`, `handle_write`, `handle_bash`). No string matching.
+- **Custom tools**: `ToolRegistry` maps tool names to `Box<dyn CustomToolHandler>`. `handle_tool_call_with_registry(tool_call, registry)` checks registry for `Custom` variants.
+- **Tool definitions**: `trait GenerateToolDef { fn tool_defs() -> Vec<ToolDef> }` — standardized interface. Implemented for `ToolCommand` (Read/Write/Bash only, excludes `Custom`). `ToolCommand::tool_definitions()` delegates to the trait.
+- **Architecture**: all dispatch is synchronous and typed. No domain enums, no `dyn` in the dispatch path itself (only in the optional registry). Built-in tools are monomorphized; custom tools use `Box<dyn>` only when registered.
+
 ## Graceful shutdown chain
 
 ```

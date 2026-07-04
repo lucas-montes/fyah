@@ -128,7 +128,73 @@ impl Step for Plan {
 }
 ```
 
-## Related files
+## Typed enum + Custom variant for tool dispatch
 
-- [architecture.md](architecture.md) — full component layout
-- [glossary.md](glossary.md) — terminology
+LLM tool calls arrive as untyped name/arguments pairs. The dispatch layer uses a
+**closed typed enum for built-in tools** plus an **open `Custom` variant** for
+user-defined tools. This balances compile-time safety with runtime extensibility.
+
+### Core idea
+
+```rust
+// The closed enum — compiler checks every variant's fields.
+pub enum ToolCommand {
+    Read { file_path: String },
+    Write { file_path: String, content: String },
+    Bash { command: String },
+    Custom {
+        name: String,
+        args: HashMap<String, serde_json::Value>,
+    },
+}
+
+// Each built-in variant has a private serde struct for safe argument parsing.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs { file_path: String }
+
+impl TryFrom<&ToolCallFunction> for ToolCommand {
+    fn try_from(tc: &ToolCallFunction) -> Result<Self, Error> {
+        match tc.name() {
+            "Read"  => { let a: ReadArgs = serde_json::from_value(...)?;
+                         Ok(ToolCommand::Read { file_path: a.file_path }) }
+            // ... Write, Bash ...
+            name    => Ok(ToolCommand::Custom { name: name.into(), args: ... })
+        }
+    }
+}
+
+// Dispatch — match on typed enum, no string matching.
+pub fn handle_tool_call(tool_call: &ToolCallFunction) -> Result<String, Error> {
+    let cmd = ToolCommand::try_from(tool_call)?;
+    match cmd {
+        ToolCommand::Read { file_path }  => handle_read(&file_path),
+        ToolCommand::Write { file_path, content } => handle_write(&file_path, &content),
+        ToolCommand::Bash { command }    => handle_bash(&command),
+        ToolCommand::Custom { name, .. } => Err(Error::unknown_tool(name)),
+    }
+}
+```
+
+### Why this works
+
+| Concern | Mechanism |
+|---------|-----------|
+| Type-safe arguments | Each built-in variant has a dedicated `#[derive(Deserialize)]` struct with `deny_unknown_fields` — rejects hallucinated fields at parse time |
+| No string matching | The `TryFrom` impl centralises name→variant mapping. The dispatch function matches on the `ToolCommand` enum — the compiler catches missing variants |
+| Extensibility | Unknown tool names fall through to `Custom { name, args }` — no enum change needed for new tools |
+| Custom handler registration | `ToolRegistry` maps `String → Box<dyn CustomToolHandler>`. `handle_tool_call_with_registry` checks the registry before returning "unknown tool" |
+| Standardised definitions | `trait GenerateToolDef` produces `Vec<ToolDef>` from a type. Implemented for `ToolCommand` — `Custom` excluded since it's not built-in |
+
+### When to use this pattern
+
+- You have a fixed set of built-in tools (Read, Write, Bash) that should never be
+  accidentally misspelled or misconfigured.
+- You want to allow user-defined tools without reopening the enum.
+- You want to reject malformed arguments at parse time (serde + `deny_unknown_fields`).
+
+### Related files
+
+- [architecture.md](architecture.md) — tool dispatch section
+- [glossary.md](glossary.md) — `ToolCommand`, `ToolRegistry`, `GenerateToolDef`, `CustomToolHandler`
+- `src/llm/tools.rs` — all dispatch code
