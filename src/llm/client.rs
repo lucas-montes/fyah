@@ -4,7 +4,8 @@ use futures::{FutureExt, TryFutureExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::context::{ContextManagement, Message, Tool, ToolCall};
+use crate::context::{ContextManagement, Message, ToolCall};
+use crate::tools::ToolSchema;
 
 #[derive(Debug, Deserialize)]
 pub struct Response {
@@ -70,7 +71,7 @@ pub trait LlmClient: Send + Sync {
 pub struct Prompt<'a> {
     messages: &'a [Message],
     model: &'a str,
-    tools: Vec<Tool>,
+    tools: Vec<ToolSchema>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,

@@ -16,13 +16,16 @@ flowchart LR
 
 ### Entry point (`src/main.rs`)
 - Loads config
+- Destructures `Config` into `(HooksConfig, LlmConfig, ToolsConfig)` via `into_parts()`
 - Creates `Runtime`, `StdinTransport`
 - Calls `runtime.run()` (synchronous)
 - Exits via `std::process::exit(0)` after the loop
 
-### Runtime (`src/runtime_trait.rs`)
-- Holds `Config`, `AgentFactory`, `cancelled: Arc<AtomicBool>`, and
-  no state machine storage — the next handler is a local loop variable.
+### Runtime (`src/runtime.rs`)
+- Holds `HooksConfig`, `LlmConfig`, `AgentFactory`, `cancelled: Arc<AtomicBool>`,
+  `watcher_rx: mpsc::Receiver<WatchedEvent>`, and `ToolRegistry` — no state
+  machine storage, the next handler is a local loop variable. The monolithic
+  `Config` is destructured before construction.
 - `run()` — synchronous loop:
 
 ```

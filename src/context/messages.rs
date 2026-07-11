@@ -7,7 +7,7 @@ pub enum Message {
         content: String,
     },
     Assistant {
-        content: Option<String>,
+        content: Option<String>, //TODO: change to String? this should always be full?
         tool_calls: Option<Vec<ToolCall>>,
     },
     Tool {

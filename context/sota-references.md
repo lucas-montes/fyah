@@ -591,3 +591,37 @@ pub struct AgentDrivenContext {
 12. Context Engineering Guide (Jun 2026) — the 7-slot model
 13. Token-Efficient Serialization (Apr 2026) — format optimization
 14. Survey of Context Engineering (Jul 2025) — formal discipline
+
+
+---
+
+Let me search the web for this.
+◈ Exa Web Search "AI agent harness architecture state machine runtime vs agent level orchestration literature survey"
+◈ Exa Web Search "StateFlow COLM 2024 FSM agent workflow outer FSM inner LLM autonomy pattern"
+◈ Exa Web Search "LangGraph supervisor pattern multi-agent orchestration state machine design"
+Thinking: Now I have a very rich set of sources to draw from. Let me also search for the ETCLOVG taxonomy, the Anthropic/OpenAI agent SDK patterns specifically, and the "outer FSM + inner LLM autonomy" pattern.
+◈ Exa Web Search "ETCLOVG taxonomy agent harness seven layers lifecycle orchestration 2026"
+◈ Exa Web Search "Anthropic Claude agent SDK design pattern outer FSM inner LLM autonomy state machine"
+◈ Exa Web Search "OpenAI Agents SDK runtime loop single agent vs multi-agent orchestration architecture design 2025 2026"
+Thinking: Now I have a very comprehensive picture from the literature. Let me synthesize the findings from all the major sources:
+1. ETCLOVG Taxonomy (Agent Harness Engineering Survey, 2026) - 7 layers: Execution, Tooling, Context, Lifecycle/Orchestration, Observability, Verification, Governance. The L (Lifecycle/Orchestration) layer explicitly distinguishes between:
+   - Single-agent inner loop (the agent's own observe-think-act cycle)
+   - Multi-agent orchestration patterns (supervisor, hierarchical, network)
+   - Full lifecycle pipelines (issue-to-PR workflows)
+2. StateFlow (Microsoft / AutoGen, COLM 2024) - The core insight: process grounding (state + transitions) is separated from sub-task solving (actions within a state). This is the "outer FSM + inner LLM autonomy" pattern. Gives 13-28% higher success rates with 3-5x cost reduction.
+3. Graph Harness (arXiv 2604.11378, 2026) - Formalizes the agent execution as scheduling theory. Distinguishes:
+   - Agent Loop (single-ready-unit, non-deterministic policy - the inner loop)
+   - State Machine (single-ready-unit, semi-explicit policy)
+   - Graph/Flow (multi-ready-unit, explicit policy)
+
+   Proposes 3-layer separation: Planning → Execution → Recovery
+4. Anthropic (Building Effective Agents, Dec 2024) - The critical architectural distinction:
+   - Workflows: predefined code paths orchestrate LLMs and tools
+   - Agents: LLMs dynamically direct their own processes
+   - Question: "Who decides the control flow?" If your code fixes it → workflow. If the model can change it → agent.
+   - Claude Agent SDK loop: gather context → take action → verify → repeat
+5. OpenAI Agents SDK - Two orchestration patterns:
+   - LLM-driven: handoffs, agents as tools
+   - Code-driven: chaining, routing, parallelization, evaluator-optimizer
+   - Core: Runner.run() orchestrates the agent loop
+6. LangGraph Supervisor Pattern - Graph-based orchestration with centralized supervisor routing to specialist workers. The supervisor is a node in a StateGraph that decides routing.

@@ -1,5 +1,4 @@
 [workspace]
-resolver = "2"
 members = ["fyah-derive"]
 
 [package]
@@ -31,6 +30,10 @@ futures = "0.3"
 regex = "1.11"
 ctrlc = "3.4"
 uuid = { version = "1.23.3", features = ["v7"] }
+
+notify = { version = "9.0.0-rc.4", features = ["serde"] }
+notify-types = "2.1"
+notify-debouncer-full = "0.8.0-rc.2"
 
 [workspace.lints.clippy]
 all = { level = "deny" }

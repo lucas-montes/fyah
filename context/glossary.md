@@ -2,7 +2,7 @@
 
 | Term | Definition |
 |------|-----------|
-| **Runtime** | Sync state machine owner in `src/runtime_trait.rs`. Holds `Config`, `AgentFactory`, `cancelled: Arc<AtomicBool>`. No state machine storage — the next function pointer is a local loop variable. Runs the dispatch loop in `run()`. |
+| **Runtime** | Sync state machine owner in `src/runtime.rs`. Holds `HooksConfig`, `LlmConfig`, `AgentFactory`, `cancelled: Arc<AtomicBool>`, and watcher event receiver. No state machine storage — the next function pointer is a local loop variable. Runs the dispatch loop in `run()`. The monolithic `Config` is destructured before construction. |
 | **StateFn** | Type alias for `fn(&mut Runtime<T, Ctx>) -> StateMachine<T, Ctx>`. A plain function pointer (8 bytes, no heap, no vtable). Each state's `Step::run` coerces to this type. |
 | **StateMachine** | Enum with `Continue(StateFn)` (advance to the next state) and `Done` (stop). Returned by each state's `run()` method. |
 | **Step** | Trait that every state implements. Encodes transitions via `type Ok` (forward) and `type Err` (backtrack). Method `run(rt)` returns `StateMachine<T, Ctx>` — states select the next function with `<Self::Ok as Step>::run::<T, Ctx>` or `<Self::Err as Step>::run::<T, Ctx>`. |
@@ -36,5 +36,6 @@
 | **ToolDef (trait)** | Trait in `src/llm/tool_def.rs` — `fn schema() -> serde_json::Value` and `fn tool_def(name, desc) -> responses::ToolDef`. Implemented by `#[define(Tool)]` proc-macro. Generates JSON Schema from struct fields. |
 | **ToolDef (struct)** | Struct in `src/llm/responses.rs` — name, description, and JSON Schema parameters for a tool exposed to the LLM. Constructed via `ToolDef::new()`. |
 | **CustomToolHandler** | Trait in `src/llm/tools.rs` — `fn handle(&self, args: &HashMap<String, Value>) -> Result<String, String>`. Must be `Send + Sync`. Implemented by user-defined tool handlers registered in `ToolRegistry`. |
-| **ToolRegistry** | Struct in `src/llm/tools.rs` — maps tool names to `Box<dyn CustomToolHandler>`. Methods: `new()`, `register(name, handler)`, `handle(name, args)`. Used by `handle_tool_call_with_registry()` to dispatch custom tools. |
+| **ToolsConfig** | Struct in `src/config.rs` — `{ dir: PathBuf }`. Parsed from `[tools]` in `fyah.toml`. Defaults `dir` to `"./tools"`. Accessor: `dir() -> &Path`. |
+| **ToolRegistry** | Struct in `src/llm/tools.rs` — maps tool names to `Box<dyn CustomToolHandler>`. Methods: `new()`, `register(name, handler)`, `remove(name)`, `handle(name, args)`. Used by `handle_tool_call_with_registry()` to dispatch custom tools. |
 | **handle_tool_call_with_registry** | Function in `src/llm/tools.rs` — like `handle_tool_call` but accepts a `&ToolRegistry` for dispatching custom tools. Built-in tools (Read/Write/Bash) dispatch identically regardless. |

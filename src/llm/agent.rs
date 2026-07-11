@@ -103,10 +103,9 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
     async fn run(mut self) -> Result<Ctx, Error> {
         let mut tool_calls_messages = Vec::new();
 
-        let ctx = &self.context;
-
         loop {
-            let mut response = self.client.chat_completion(&ctx.into()).await?;
+            let prompt = (&self.context).into();
+            let mut response = self.client.chat_completion(&prompt).await?;
 
             if let Some(choice) = response.next_choice() {
                 let tool_calls = choice.tool_calls();
@@ -132,10 +131,7 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
                     }
                 }
 
-                //NOTE: so maybe the message for the llm and the ones saved could be different. why do we need to send the tool calls list?
-                // maybe split the two kind of messages? having the incoming and outgoing?
-
-                // self.context.add_message(choice.message());
+                self.context.add_message(choice.message());
                 // prompt.messages.append(&mut tool_calls_messages);
             }
         }
@@ -144,27 +140,7 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
     }
 }
 
-fn handle_tool_call(tool_call: &ToolCallFunction) -> Result<String, Error> {
-    // let cmd = ToolCommand::try_from(tool_call)?;
-
-    // match cmd {
-    //     ToolCommand::Read { file_path } => {
-    //         info!(tool = "Read", %file_path, "executing tool call");
-    //         handle_read(&file_path)
-    //     }
-    //     ToolCommand::Write { file_path, content } => {
-    //         info!(tool = "Write", %file_path, content_len = content.len(), "executing tool call");
-    //         handle_write(&file_path, &content)
-    //     }
-    //     ToolCommand::Bash { command } => {
-    //         info!(tool = "Bash", %command, "executing tool call");
-    //         handle_bash(&command)
-    //     }
-    //     ToolCommand::Custom { name, .. } => {
-    //         warn!(tool = %name, "unknown tool function");
-    //         Err(agent::Error::unknown_tool(name))
-    //     }
-    // }
+fn handle_tool_call(_tool_call: &ToolCallFunction) -> Result<String, Error> {
     Ok("tool call result placeholder".to_string())
 }
 

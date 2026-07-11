@@ -10,7 +10,7 @@
 //! TODO: at some point read .github, .opencode and all the specific configs
 
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::hooks::HooksConfig;
 use crate::llm::Config as LlmConfig;
@@ -58,12 +58,39 @@ impl std::error::Error for Error {
     }
 }
 
+/// Tools directory configuration, parsed from `[tools]` in `fyah.toml`.
+#[derive(Debug, Deserialize)]
+pub struct ToolsConfig {
+    /// Directory where tool scripts are located.
+    dir: PathBuf,
+}
+
+impl ToolsConfig {
+    /// Path to the tools directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            dir: PathBuf::from("tools"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     llm: LlmConfig,
     #[serde(default)]
     hooks: HooksConfig,
+    #[serde(default)]
+    tools: ToolsConfig,
+    /// The filesystem path this config was loaded from (set by `load()`).
+    #[serde(skip)]
+    path: Option<PathBuf>,
 }
 
 impl Config {
@@ -73,6 +100,22 @@ impl Config {
 
     pub fn llm(&self) -> &LlmConfig {
         &self.llm
+    }
+
+    pub fn tools(&self) -> &ToolsConfig {
+        &self.tools
+    }
+
+    /// The filesystem path this config was loaded from, if any.
+    pub fn source_path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Consume `Config` and return its three inner parts.
+    ///
+    /// Order: `(hooks, llm_config, tools_config)`.
+    pub fn into_parts(self) -> (HooksConfig, LlmConfig, ToolsConfig) {
+        (self.hooks, self.llm, self.tools)
     }
     /// Load and merge config from all sources in precedence order.
     ///
@@ -84,24 +127,30 @@ impl Config {
     pub fn load(cli_override: Option<PathBuf>) -> Result<Self, Error> {
         let mut merged = toml::Value::Table(toml::value::Table::new());
 
+        // Track the most specific config file that was loaded.
+        let mut resolved_path: Option<PathBuf> = None;
+
         //TODO: instead of using a default value at the end we could populate the config and then reuse it
         // 1. XDG default: ~/.config/fyah/config.toml (silently skipped if missing)
         if let Some(xdg_path) = xdg_config_path()
             && xdg_path.exists()
         {
             load_and_merge(&mut merged, &xdg_path)?;
+            resolved_path = Some(xdg_path);
         }
 
         // 2. Local: ./fyah.toml
         let local_path = PathBuf::from("fyah.toml");
         if local_path.exists() {
             load_and_merge(&mut merged, &local_path)?;
+            resolved_path = Some(local_path);
         }
 
-        // 3. CLI override
+        // 3. CLI override (most specific — overwrites any previous path)
         if let Some(ref cli_path) = cli_override {
             if cli_path.exists() {
                 load_and_merge(&mut merged, cli_path)?;
+                resolved_path = Some(cli_path.clone());
             } else {
                 return Err(Error::NotFound(cli_path.clone()));
             }
@@ -110,8 +159,9 @@ impl Config {
         // Deserialize the merged TOML value into a Config.
         let toml_string =
             toml::to_string(&merged).map_err(|e| Error::Deserialize(e.to_string()))?;
-        let config: Config =
+        let mut config: Config =
             toml::from_str(&toml_string).map_err(|e| Error::Deserialize(e.to_string()))?;
+        config.path = resolved_path;
 
         Ok(config)
     }
@@ -119,13 +169,12 @@ impl Config {
 
 /// Resolve the XDG config path: `$HOME/.config/fyah/config.toml`.
 fn xdg_config_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
+    std::env::var("HOME").ok().map(|home| {
         PathBuf::from(home)
             .join(".config")
             .join("fyah")
-            .join("config.toml"),
-    )
+            .join("config.toml")
+    })
 }
 
 /// Read a TOML file at `path`, parse to `toml::Value`, and merge into `base`.
