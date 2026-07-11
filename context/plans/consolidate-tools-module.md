@@ -10,13 +10,13 @@ loop and client.
 
 ## Success Criteria
 
-1. `src/tools.rs` contains all tool types: `ToolDef` trait, `ToolSchema` (wire format),
+1. `src/tools.rs` contains all tool types: `ToolDef` trait, `Tool` (wire format),
    `ToolParameters`, `ToolProperty`, `ToolCommand` enum, `ToolRegistry`,
    `CustomToolHandler`, `GenerateToolDef`, arg structs (`ReadArgs`, `WriteArgs`,
    `BashArgs`), dispatch functions, and tests.
 2. `fyah-derive` `#[derive(ToolDef)]` generates code referencing `crate::tools::*`
    (not `crate::llm::tool_def::*`).
-3. `src/llm/client.rs` imports `ToolSchema` from `crate::tools` instead of `crate::context::Tool`.
+3. `src/llm/client.rs` imports `Tool` from `crate::tools` instead of `crate::context::Tool`.
 4. `src/llm/agent.rs` uses real tool dispatch from `crate::tools` (removes placeholder).
 5. `cargo build` passes (0 errors, only pre-existing warnings).
 6. `cargo test -p fyah-derive` passes.
@@ -42,14 +42,14 @@ loop and client.
 
 - **Task ID**: T01
 - **Goal**: Write `src/tools.rs` containing every type and function: `ToolDef` trait,
-  `ToolSchema`, `ToolParameters`, `ToolProperty`, `ToolCommand` enum, `ToolRegistry`,
+  `Tool`, `ToolParameters`, `ToolProperty`, `ToolCommand` enum, `ToolRegistry`,
   `CustomToolHandler`, `GenerateToolDef`, arg structs (`ReadArgs`, `WriteArgs`,
   `BashArgs`), dispatch functions (`handle_tool_call`, `handle_tool_call_with_registry`),
   and comprehensive tests.
 - **Boundaries**:
   - In: `ToolDef` trait with `fn schema() -> ToolParameters` + default method
-    `fn tool_schema(name, desc) -> ToolSchema`
-  - In: `ToolSchema` struct (pub, Serialize) with `ToolFunction` inner type
+    `fn tool_schema(name, desc) -> Tool`
+  - In: `Tool` struct (pub, Serialize) with `ToolFunction` inner type
   - In: `ToolParameters` struct (pub, Serialize) with `properties: HashMap<String, ToolProperty>`
   - In: `ToolProperty` struct (pub, Serialize)
   - In: `ReadArgs`, `WriteArgs`, `BashArgs` with `#[derive(ToolDef)]`
@@ -85,12 +85,12 @@ loop and client.
 ### T03: Wire tools into agent.rs and update client.rs imports (status:todo)
 
 - **Task ID**: T03
-- **Goal**: Update `src/llm/client.rs` to import `ToolSchema` from `crate::tools`
+- **Goal**: Update `src/llm/client.rs` to import `Tool` from `crate::tools`
   instead of `crate::context::Tool`. Update `src/llm/agent.rs` to use real tool
   dispatch from `crate::tools` (replace placeholder `handle_tool_call`).
 - **Boundaries**:
-  - In: `client.rs` — change `use crate::context::Tool` to `use crate::tools::ToolSchema`
-  - In: `client.rs` — change `Prompt.tools` field type from `Vec<Tool>` to `Vec<ToolSchema>`
+  - In: `client.rs` — change `use crate::context::Tool` to `use crate::tools::Tool`
+  - In: `client.rs` — change `Prompt.tools` field type from `Vec<Tool>` to `Vec<Tool>`
   - In: `agent.rs` — uncomment and fix `handle_tool_call` to use `crate::tools::handle_tool_call`
   - Out: Any changes to the agent loop structure itself
 - **Done when**:

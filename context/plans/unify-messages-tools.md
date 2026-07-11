@@ -6,7 +6,7 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
 
 1. **Unified `Message`** — 6-variant enum aligned with OpenAI spec (`Developer`, `System`, `User`, `Assistant`, `Tool`, `Function`) with `Content` type (string or parts array). Replaces the 3-variant `context::messages::Message`.
 2. **`Tool` enum** — a single enum representing all tools (Read/Write/Bash/Custom), with a new `#[derive(ToolSet)]` proc-macro that generates `TryFrom`, `definitions()`, and the `Custom` variant automatically.
-3. **`ToolSchema`** — the wire-format struct (renamed from `context::tools::Tool`) that serializes to the LLM API. Built from `ToolDef` trait output.
+3. **`Tool`** — the wire-format struct (renamed from `context::tools::Tool`) that serializes to the LLM API. Built from `ToolDef` trait output.
 4. **Context = history, Prompt = context window** — `ContextManagement` stores only conversation history. `Prompt` becomes the full "what the LLM sees" representation, assembled by the Agent from system prompt + history + tools + sampling params.
 5. **Module restructure** — dissolve `src/context/` entirely. All types move into `llm/` with clean submodules: `message.rs`, `tool.rs`, `context.rs`.
 6. **Single dispatch function** — consolidate `handle_tool_call` + `handle_tool_call_with_registry` into one `fn handle(Tool, &ToolRegistry)`.
@@ -15,11 +15,11 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
 
 1. `src/context/` directory is deleted — no remnants
 2. `llm/message.rs` contains the unified `Message` enum (6 variants) with `Content` type
-3. `llm/tool.rs` contains `Tool` enum, `ToolSchema`, `ToolDef` trait, `ToolParameters`, `ToolProperty`
+3. `llm/tool.rs` contains `Tool` enum, `Tool`, `ToolDef` trait, `ToolParameters`, `ToolProperty`
 4. `#[derive(ToolSet)]` macro generates `TryFrom<&ToolCallFunction>`, `definitions()`, and `Custom` variant
 5. `llm/context.rs` contains `ContextManagement` trait (no `get_model()`) + strategies
 6. `llm/tools.rs` has a single `fn handle(Tool, &ToolRegistry)` dispatch function
-7. `llm/client.rs` `Prompt` has `system: Option<String>`, `tools: Vec<ToolSchema>`, `messages: &[Message]`
+7. `llm/client.rs` `Prompt` has `system: Option<String>`, `tools: Vec<Tool>`, `messages: &[Message]`
 8. `llm/agent.rs` Agent builds `Prompt` from components; tool dispatch wired into loop
 9. `providers/openai.rs` has `From`/`Into` conversions between provider and interface types
 10. `cargo build` succeeds, `cargo test` passes, `cargo fmt --check` clean, `cargo clippy` clean
@@ -43,7 +43,7 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
 |----|----------|-----------|
 | D01 | `ContextManagement` = history only. Remove `get_model()`. System prompt is config, not history. | Clean separation of concerns. System prompt never gets compacted/dropped. |
 | D02 | `Prompt` = full context window (system + messages + tools + sampling). Agent builds it. | Single "what the LLM sees" representation. Explicit assembly, no hidden magic. |
-| D03 | `Tool` is an enum, not a struct. `ToolSchema` is the wire-format struct. | Enum enables type-safe dispatch. ToolSchema handles API serialization. |
+| D03 | `Tool` is an enum, not a struct. `Tool` is the wire-format struct. | Enum enables type-safe dispatch. Tool handles API serialization. |
 | D04 | New `#[derive(ToolSet)]` macro alongside existing `#[derive(ToolDef)]`. | Separation of concerns: ToolDef = schema from arg struct, ToolSet = enum boilerplate. |
 | D05 | Content type on ALL message variants (not just Assistant). | Consistency with OpenAI spec. Future-proofs for multimodal user input. |
 | D06 | Single `fn handle(Tool, &ToolRegistry)` replaces two dispatch functions. | Eliminates code duplication. ToolRegistry is always required (use `Default` if empty). |
@@ -67,18 +67,18 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
 
 ---
 
-- [ ] T02: `Create llm/tool.rs — ToolDef trait, ToolParameters, ToolProperty, ToolSchema` (status:todo)
+- [ ] T02: `Create llm/tool.rs — ToolDef trait, ToolParameters, ToolProperty, Tool` (status:todo)
 
   - **Task ID**: T02
-  - **Goal**: Create `src/llm/tool.rs` with the ToolDef trait, schema types, and ToolSchema wire-format struct. This is the missing module that blocks compilation of `llm/tools.rs`. Also update the `fyah-derive` codegen to target the new module path.
+  - **Goal**: Create `src/llm/tool.rs` with the ToolDef trait, schema types, and Tool wire-format struct. This is the missing module that blocks compilation of `llm/tools.rs`. Also update the `fyah-derive` codegen to target the new module path.
   - **Boundaries**:
     - In: New file `src/llm/tool.rs` containing:
-      - `ToolDef` trait: `fn schema() -> ToolParameters` + provided `fn tool_schema(name, desc) -> ToolSchema`
+      - `ToolDef` trait: `fn schema() -> ToolParameters` + provided `fn tool_schema(name, desc) -> Tool`
       - `ToolParameters` struct (public, Serialize): `param_type: String`, `properties: HashMap<String, ToolProperty>`, `required: Vec<String>`
       - `ToolProperty` struct (public, Serialize): `property_type: String`, `description: String`
-      - `ToolSchema` struct (public, Serialize): `tool_type: String` (always "function"), `function: ToolFunction` — the renamed version of `context::tools::Tool`
+      - `Tool` struct (public, Serialize): `tool_type: String` (always "function"), `function: ToolFunction` — the renamed version of `context::tools::Tool`
       - `ToolFunction` struct: `name`, `description`, `parameters: ToolParameters`
-      - `ToolSchema::new(name, description, ToolParameters)` constructor
+      - `Tool::new(name, description, ToolParameters)` constructor
     - In: Update `src/llm/mod.rs` to declare `mod tool;`
     - In: Update `fyah-derive/src/codegen.rs` to generate `crate::llm::tool::ToolDef`, `crate::llm::tool::ToolParameters`, `crate::llm::tool::ToolProperty` (replacing `crate::llm::tool_def::*`)
     - In: Update `fyah-derive/src/lib.rs` doc comments to reference new path
@@ -101,7 +101,7 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
     - In: New file `fyah-derive/src/tool_set.rs` containing the `#[proc_macro_derive(ToolSet, attributes(tool))]` implementation. The macro reads each variant's `#[tool("Name")]` attribute and doc comment, looks at the inner type (which must implement `ToolDef`), and generates:
       - A `Custom { name: String, args: HashMap<String, serde_json::Value> }` variant appended to the enum
       - `impl TryFrom<&ToolCallFunction> for Tool` — match by name, deserialize args into the inner type
-      - `impl Tool { pub fn definitions() -> Vec<ToolSchema> }` — call `ToolDef::tool_schema()` for each variant
+      - `impl Tool { pub fn definitions() -> Vec<Tool> }` — call `ToolDef::tool_schema()` for each variant
     - In: Register the new macro in `fyah-derive/src/lib.rs`
     - In: Add `Tool` enum to `src/llm/tool.rs`:
       ```rust
@@ -117,7 +117,7 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
   - **Done when**:
     - `cargo test -p fyah-derive` passes (new tests for ToolSet macro)
     - `Tool` enum compiles with `Custom` variant
-    - `Tool::definitions()` returns 3 ToolSchema entries (Read, Write, Bash)
+    - `Tool::definitions()` returns 3 Tool entries (Read, Write, Bash)
     - `Tool::try_from(&ToolCallFunction)` correctly parses built-in and custom tools
   - **Verification notes**: `cargo build && cargo test -p fyah-derive`
 
@@ -165,13 +165,13 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
 - [ ] T06: `Refactor llm/client.rs — Prompt with system + tools` (status:todo)
 
   - **Task ID**: T06
-  - **Goal**: Redesign `Prompt` in `client.rs` to be the full "context window" representation. Add `system: Option<String>`, change `tools: Vec<Tool>` to `tools: Vec<ToolSchema>`, make fields accessible for agent construction. Remove the `From<&ContextManagement>` impl (agent builds Prompt directly).
+  - **Goal**: Redesign `Prompt` in `client.rs` to be the full "context window" representation. Add `system: Option<String>`, change `tools: Vec<Tool>` to `tools: Vec<Tool>`, make fields accessible for agent construction. Remove the `From<&ContextManagement>` impl (agent builds Prompt directly).
   - **Boundaries**:
-    - In: `src/llm/client.rs` — add `system: Option<String>` field to `Prompt`. Change `tools` field type to `Vec<ToolSchema>`. Make all `Prompt` fields `pub(crate)` (or use a builder). Remove `impl<'a, T> From<&'a T> for Prompt where T: ContextManagement`. Update imports to use `crate::llm::message::Message`, `crate::llm::tool::ToolSchema`, `crate::llm::tool::ToolCall` (not `crate::context::*`). Update `ResponseChoice` to work with new `Message` (add arm for System, Developer, Function variants in `content()`).
+    - In: `src/llm/client.rs` — add `system: Option<String>` field to `Prompt`. Change `tools` field type to `Vec<Tool>`. Make all `Prompt` fields `pub(crate)` (or use a builder). Remove `impl<'a, T> From<&'a T> for Prompt where T: ContextManagement`. Update imports to use `crate::llm::message::Message`, `crate::llm::tool::Tool`, `crate::llm::tool::ToolCall` (not `crate::context::*`). Update `ResponseChoice` to work with new `Message` (add arm for System, Developer, Function variants in `content()`).
     - Out: No changes to `LlmClient` trait. No changes to `Client` implementation. No changes to agent.
   - **Done when**:
     - `Prompt` has `system: Option<String>` field
-    - `Prompt` tools field uses `ToolSchema` type
+    - `Prompt` tools field uses `Tool` type
     - `From<&ContextManagement>` impl is removed
     - `ResponseChoice::content()` handles all 6 Message variants
     - `cargo build` succeeds
@@ -203,7 +203,7 @@ Consolidate the scattered `Message`, `Tool`, and tool-dispatch types across `con
   - **Goal**: Delete the entire `src/context/` directory and update all import paths across the codebase to use `llm::` instead.
   - **Boundaries**:
     - In: Delete `src/context/mod.rs`, `src/context/messages.rs`, `src/context/tools.rs`, `src/context/memory.rs`. Update imports in: `src/main.rs` (`context::SimpleContext` → `llm::context::SimpleContext`), `src/runtime.rs` (`context::ContextManagement` → `llm::context::ContextManagement`), `src/config.rs` (if any context imports), `src/llm/agent.rs`, `src/llm/client.rs`, `src/llm/tools.rs` (ensure all use `llm::*` paths, not `context::*`).
-    - In: Update `src/llm/mod.rs` to re-export the new public types: `Message`, `Tool`, `ToolSchema`, `ContextManagement`, `SimpleContext`, `SlidingWindowContext`.
+    - In: Update `src/llm/mod.rs` to re-export the new public types: `Message`, `Tool`, `Tool`, `ContextManagement`, `SimpleContext`, `SlidingWindowContext`.
     - Out: No functional changes. No new features.
   - **Done when**:
     - `src/context/` directory is fully deleted

@@ -34,6 +34,7 @@
 | [plans/unify-messages-tools.md](plans/unify-messages-tools.md) | Active — unify Message/Tool types across context/llm/providers, dissolve context/, Tool enum + ToolSet macro, Prompt redesign |
 | [plans/runtime-watcher-channels.md](plans/runtime-watcher-channels.md) | Active — remove Config from Runtime, channel-based fs_watcher, shared ToolRegistry, ToolsConfig in fyah.toml |
 | [plans/consolidate-tools-module.md](plans/consolidate-tools-module.md) | Complete — consolidated all tool types, dispatch, and fyah-derive into single `src/tools.rs` module |
+| [plans/tool-schema-tagged-enum.md](plans/tool-schema-tagged-enum.md) | Complete — `Tool` rewritten as serde internally-tagged enum, `ToolType`/`ToolFunction` removed |
 
 ## Decisions
 
@@ -42,5 +43,5 @@
 | D01 | State machine uses typed `Step` trait with `Ok`/`Err` associated types; dispatch via `StateFn` type alias `fn(&mut Runtime) -> StateMachine`. No domain enums, no `dyn`, no `Box`. | Adopted |
 | D02 | `Step::run` returns `StateMachine<T, Ctx>` — `Continue(StateFn)` for advance, `Done` for stop. States use `<Self::Ok as Step>::run` / `<Self::Err as Step>::run` for direct dispatch. No `handler()`, no `next_step` field. | Adopted |
 | D03 | `ContextManagement` = history only. System prompt is config, not history. `Prompt` = full context window (system + messages + tools + sampling). Agent assembles Prompt. | Adopted |
-| D04 | `Tool` is an enum (Read/Write/Bash/Custom). `ToolSchema` is the wire-format struct. `#[derive(ToolSet)]` macro generates TryFrom, definitions(), Custom variant. | Adopted |
+| D04 | `Tool` is an enum (Read/Write/Bash/Custom). `Tool` is the wire-format struct. `#[derive(ToolSet)]` macro generates TryFrom, definitions(), Custom variant. | Adopted |
 | D05 | Message aligned with OpenAI spec: 6 variants (Developer, System, User, Assistant, Tool, Function) with `Content` type. | Adopted |
