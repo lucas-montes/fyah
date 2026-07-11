@@ -1,10 +1,21 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+#[derive(Debug)]
 pub enum Error<'a> {
     /// A hook command that doesn't exist.
     InvalidHook(&'a str),
 }
+
+impl std::fmt::Display for Error<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::InvalidHook(step_name) => write!(f, "Invalid hook command: {}", step_name),
+        }
+    }
+}
+
+impl std::error::Error for Error<'_> {}
 
 #[derive(Debug, Deserialize)]
 struct HookDef {

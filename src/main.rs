@@ -8,12 +8,13 @@
 // tool calling) is expected until wiring tasks are implemented.
 #![allow(dead_code)]
 
-mod llm;
-
 mod config;
 mod context;
+mod fs_watcher;
 mod hooks;
+mod llm;
 mod runtime;
+mod tools;
 mod transport;
 
 use std::path::PathBuf;
@@ -72,9 +73,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let context = SimpleContext;
 
+    // Destructure config into its parts — the watcher (T04) will be spawned here later.
+    let (hooks, llm_config, _tools_config) = config.into_parts();
+
     Runtime::new(
         Uuid::now_v7().to_string(),
-        config,
+        hooks,
+        llm_config,
         transport,
         AgentFactory,
         cancelled,

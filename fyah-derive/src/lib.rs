@@ -1,6 +1,6 @@
 //! Proc-macro derive for the Fyah agent harness — `#[derive(ToolDef)]`.
 //!
-//! Generates an `impl crate::llm::tool_def::ToolDef` block from a struct
+//! Generates an `impl crate::tools::ToolDef` block from a struct
 //! definition, producing JSON Schema for tool arguments.
 //!
 //! ## Usage

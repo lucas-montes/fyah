@@ -69,7 +69,7 @@ fn build_property_entries(field_infos: &[FieldInfo]) -> Vec<TokenStream> {
         let entry = quote! {
             (
                 #name_str.to_string(),
-                crate::llm::tool_def::ToolProperty {
+                crate::tools::ToolProperty {
                     property_type: (#json_type).to_string(),
                     description: (#doc).to_string(),
                 },
@@ -92,7 +92,7 @@ fn collect_required_names(field_infos: &[FieldInfo]) -> Vec<String> {
 /// Generate the full `impl ToolDef` token stream for a named-field struct.
 ///
 /// Returns a `TokenStream` containing the original struct definition
-/// unchanged plus a generated `impl crate::llm::tool_def::ToolDef` block
+/// unchanged plus a generated `impl crate::tools::ToolDef` block
 /// with a `schema()` method that returns a typed [`ToolParameters`].
 pub fn generate_tool_def_impl(
     struct_name: &Ident,
@@ -105,9 +105,9 @@ pub fn generate_tool_def_impl(
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     quote! {
-        impl #impl_generics crate::llm::tool_def::ToolDef for #struct_name #ty_generics #where_clause {
-            fn schema() -> crate::llm::tool_def::ToolParameters {
-                crate::llm::tool_def::ToolParameters {
+        impl #impl_generics crate::tools::ToolDef for #struct_name #ty_generics #where_clause {
+            fn schema() -> crate::tools::ToolParameters {
+                crate::tools::ToolParameters {
                     param_type: "object".to_string(),
                     properties: ::std::collections::HashMap::from([
                         #(#property_entries),*
@@ -197,12 +197,12 @@ mod tests {
 
         let compact: String = output_str.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            compact.contains("implcrate::llm::tool_def::ToolDefforTestTool"),
+            compact.contains("implcrate::tools::ToolDefforTestTool"),
             "output missing trait path: {output_str}"
         );
         assert!(output_str.contains("fn schema"));
         assert!(
-            compact.contains("crate::llm::tool_def::ToolParameters"),
+            compact.contains("crate::tools::ToolParameters"),
             "output missing ToolParameters: {output_str}"
         );
         assert!(
@@ -230,8 +230,7 @@ mod tests {
 
         let compact: String = output_str.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            compact
-                .contains("impl<T:std::fmt::Debug>crate::llm::tool_def::ToolDefforGenericTool<T>"),
+            compact.contains("impl<T:std::fmt::Debug>crate::tools::ToolDefforGenericTool<T>"),
             "output missing generics: {output_str}"
         );
     }

@@ -5,9 +5,10 @@ use std::sync::atomic::Ordering;
 
 use tracing::info;
 
-use crate::config::Config;
 use crate::context::ContextManagement;
+use crate::hooks::HooksConfig;
 use crate::llm::AgentFactory;
+use crate::llm::Config as LlmConfig;
 
 use crate::transport::PromtpMsg;
 use crate::transport::Transport;
@@ -33,32 +34,35 @@ enum StateMachine<T: Transport, Ctx: ContextManagement> {
 // type (no `Option<StateFn>` wrapping), a plain type alias compiles cleanly.
 type StateFn<T, Ctx> = fn(&mut Runtime<T, Ctx>) -> StateMachine<T, Ctx>;
 
+//TODO: maybe we need a runtime to drive the agent/s so they follow the steps that we want and this in a deterministic way. And another layer that bridges context agregation, agents orchestration, users communication and the fs_watcher so the 'knowledge' is updated
+
+//TODO: do we need this runtime? we need a way to manage agents and let the user send promts, that's all. However the back and forth between the agent and user is fairly common
 pub struct Runtime<T: Transport, Ctx: ContextManagement> {
     id: String,
-    //TODO: the runtime probably shouldn't own the configs, we just need to have some and pass them to the interested parties.
-    // Te config should be used to have info about the llms, the hooks, what kind of strategy context to use, etc...
-    config: Config,
-    // TODO: the runtime could hold the hooks, idk if it's something that should be updated? probably yes
-    // however as the hooks is just a file we call, we could let the user change the hook itself, so if he wants to chain workflows or call more things it can do it in the hook itself
+    hooks: HooksConfig,
+    // TODO: should the agents always have the latest tools available?
+    llm_config: LlmConfig,
     user_channel: T,
-    agent_factory: AgentFactory,
+    agent_factory: AgentFactory, //TODO: maybe instead of a factory i just want a proxy that would allow me to call agent stuff like 'one shot', or 'spawn a long term agent'
     cancelled: Arc<AtomicBool>,
+    //TODO: maybe this context should be a bit different, we could have a map that stores context from different agents
     context: Ctx,
 }
 
 impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
     pub fn new(
         id: String,
-        config: Config,
+        hooks: HooksConfig,
+        llm_config: LlmConfig,
         user_channel: T,
         agent_factory: AgentFactory,
         cancelled: Arc<AtomicBool>,
-        // TODO: we probably need a context and some kind of historic of what happended and with what model.
         context: Ctx,
     ) -> Self {
         Self {
             id,
-            config,
+            hooks,
+            llm_config,
             user_channel,
             agent_factory,
             cancelled,
@@ -66,7 +70,7 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
         }
     }
 
-    /// Start the state machine from `Plan`.
+    //TODO: maybe this should be for a single agent instead of the whole runtime
     pub fn run(mut self)
     where
         Ctx: Default,
@@ -85,13 +89,10 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
     }
 
     fn spawn_agent(&mut self, provider: &str, model: &str, agent_name: &str) {
-        match self.agent_factory.spawn(
-            self.config.llm(),
-            provider,
-            model,
-            agent_name,
-            &self.context,
-        ) {
+        match self
+            .agent_factory
+            .spawn(&self.llm_config, provider, model, agent_name, &self.context)
+        {
             Ok(agent) => {
                 // TODO: maybe we want to keep the agents in a map and have some channel to communicate with them
                 let _ = agent;
@@ -147,10 +148,9 @@ trait Step {
     fn run<T: Transport, Ctx: ContextManagement + Default>(
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
-        //TODO: we could add in the config some param to allow the user to fail when the hooks fail and some retry mechanism
-        let _before_hook = rt.config.hooks().before(Self::NAME);
+        let _before_hook = rt.hooks.before(Self::NAME);
         let result = Self::execute(rt);
-        let _after_hook = rt.config.hooks().after(Self::NAME);
+        let _after_hook = rt.hooks.after(Self::NAME);
         result
     }
 
@@ -166,6 +166,8 @@ trait Step {
         StateMachine::Continue(<Self::Err as Step>::run::<T, Ctx>)
     }
 }
+
+// TODO: create steps to generate the context dir a la sce, so we have vocabulary, and knowledge about the system
 
 /// Ask the user for their idea. Store it and move to `PlanDraft`.
 struct Plan;
@@ -198,10 +200,10 @@ impl Step for Plan {
     }
 }
 
-/// Show the user their idea and ask for approval.
+/// Once the user has sent the initial idea, we send it to the agent, the agents will generate questions, send them to the user and keep looping until the user is satisfied with the plan, maybe this could be done in the previous step actually
 struct PlanDraft;
 impl Step for PlanDraft {
-    type Ok = PlanApproved;
+    type Ok = Implement;
     type Err = Plan;
     const NAME: &'static str = "plan-draft";
 
@@ -209,7 +211,13 @@ impl Step for PlanDraft {
         rt: &mut Runtime<T, Ctx>,
     ) -> StateMachine<T, Ctx> {
         rt.write("── Plan Draft ─────────────────────────");
-        // rt.write(&format!("Your idea: \"{idea}\""));
+
+        let msg = rt.read();
+
+        rt.spawn_agent(msg.provider(), msg.model(), msg.agent_name());
+
+        //TODO: we need a loop to communicate user <-> agent until the user is satisfied
+
         rt.write("Approve this idea and proceed? (y/n): ");
 
         if rt.read_yes_no() {
@@ -219,24 +227,6 @@ impl Step for PlanDraft {
             rt.write("Let's start over.");
             Self::backtrack()
         }
-    }
-}
-
-/// Confirm the approved plan and proceed.
-struct PlanApproved;
-impl Step for PlanApproved {
-    type Ok = Implement;
-    type Err = Plan;
-    const NAME: &'static str = "plan-approved";
-
-    fn execute<T: Transport, Ctx: ContextManagement + Default>(
-        rt: &mut Runtime<T, Ctx>,
-    ) -> StateMachine<T, Ctx> {
-        rt.write("── Plan Approved ──────────────────────");
-        // rt.write(&format!("Ready to implement: \"{idea}\""));
-        rt.write("Press Enter to begin implementation...");
-        let _ = rt.read();
-        Self::advance()
     }
 }
 
@@ -298,7 +288,12 @@ impl Step for Commit {
     ) -> StateMachine<T, Ctx> {
         rt.write("── Commit ─────────────────────────────");
         rt.write("Committed! Press Enter to finish...");
-        let _ = rt.read();
+
+        //TODO: here we spawn an agent, to it can create the commit message, we'll show it to the user so it can evaluate if it make sense
+        let msg = rt.read();
+
+        rt.spawn_agent(msg.provider(), msg.model(), msg.agent_name());
+
         rt.write("Done! Thanks for using Fyah.");
         Self::advance()
     }

@@ -30,7 +30,10 @@
 | [plans/llm-config-provider-architecture.md](plans/llm-config-provider-architecture.md) | Active — LLM config, provider, agent, context architecture redesign |
 | [plans/typed-tool-dispatch.md](plans/typed-tool-dispatch.md) | Complete — typed ToolCommand enum, serde deserialization, enum dispatch, ToolRegistry, GenerateToolDef trait |
 | [plans/tool-def-macro.md](plans/tool-def-macro.md) | Complete — `#[derive(ToolDef)]` proc-macro for deriving JSON Schema + ToolDef from structs. All tasks done. |
-| [plans/agent-loop-fix.md](plans/agent-loop-fix.md) | Active — fix agent loop for multi-turn tool calling, prompt config, system prompt injection |
+| [plans/agent-loop-fix.md](plans/agent-loop-fix.md) | Superseded — replaced by unify-messages-tools plan which subsumes agent loop, prompt config, and system prompt |
+| [plans/unify-messages-tools.md](plans/unify-messages-tools.md) | Active — unify Message/Tool types across context/llm/providers, dissolve context/, Tool enum + ToolSet macro, Prompt redesign |
+| [plans/runtime-watcher-channels.md](plans/runtime-watcher-channels.md) | Active — remove Config from Runtime, channel-based fs_watcher, shared ToolRegistry, ToolsConfig in fyah.toml |
+| [plans/consolidate-tools-module.md](plans/consolidate-tools-module.md) | Complete — consolidated all tool types, dispatch, and fyah-derive into single `src/tools.rs` module |
 
 ## Decisions
 
@@ -38,3 +41,6 @@
 |----|----------|--------|
 | D01 | State machine uses typed `Step` trait with `Ok`/`Err` associated types; dispatch via `StateFn` type alias `fn(&mut Runtime) -> StateMachine`. No domain enums, no `dyn`, no `Box`. | Adopted |
 | D02 | `Step::run` returns `StateMachine<T, Ctx>` — `Continue(StateFn)` for advance, `Done` for stop. States use `<Self::Ok as Step>::run` / `<Self::Err as Step>::run` for direct dispatch. No `handler()`, no `next_step` field. | Adopted |
+| D03 | `ContextManagement` = history only. System prompt is config, not history. `Prompt` = full context window (system + messages + tools + sampling). Agent assembles Prompt. | Adopted |
+| D04 | `Tool` is an enum (Read/Write/Bash/Custom). `ToolSchema` is the wire-format struct. `#[derive(ToolSet)]` macro generates TryFrom, definitions(), Custom variant. | Adopted |
+| D05 | Message aligned with OpenAI spec: 6 variants (Developer, System, User, Assistant, Tool, Function) with `Content` type. | Adopted |

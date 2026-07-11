@@ -10,11 +10,13 @@ Implement → Test → Commit → Done`), each interacting with the user via a
 
 ## What exists now
 
-- **Runtime** (`src/runtime_trait.rs`) — sync state machine that owns the
-  config, agent factory, and cancellation flag. No state machine storage —
-  the next function pointer is a local loop variable. Dispatch uses a
-  `StateFn` type alias (`fn(&mut Runtime) -> StateMachine`) — no domain
-  enums, no `dyn`, no `Box`.
+- **Runtime** (`src/runtime.rs`) — sync state machine that holds `HooksConfig`,
+  `LlmConfig`, agent factory, cancellation flag, and watcher event receiver.
+  No state machine storage — the next function pointer is a local loop
+  variable. Dispatch uses a `StateFn` type alias
+  (`fn(&mut Runtime) -> StateMachine`) — no domain enums, no `dyn`, no `Box`.
+  The monolithic `Config` is destructured before construction — Runtime never
+  sees it.
 - **Step trait** (`src/runtime_trait.rs`) — each state is a struct implementing
   `Step`. The trait encodes transitions via associated types `type Ok` (happy
   path) and `type Err` (backtrack/retry). `run()` returns `StateMachine<T, Ctx>`
@@ -28,9 +30,11 @@ Implement → Test → Commit → Done`), each interacting with the user via a
 - **LLM Client** (`src/llm/client.rs`) — async `LlmClient` trait + OpenAI
   `Client` impl + mock support. Not yet wired into state functions.
 - **Config** (`src/config.rs`) — TOML-based config loading with merge
-  precedence (XDG → local → CLI override). LLM config at `Config.llm()`
-  returns `Option<&llm::config::Config>` with `providers`, `agents`, and
-  per-agent `ContextStrategy`.
+  precedence (XDG → local → CLI override). Sections: `[llm]` (providers,
+  agents), `[hooks]` (before/after commands per state), `[tools]` (tools
+  directory path).  `Config.source_path()` returns `Option<&Path>` — the
+  resolved filesystem path the config was loaded from.  `Config.into_parts()`
+  destructures into `(HooksConfig, LlmConfig, ToolsConfig)`.
 - **LLM Config** (`src/llm/config.rs`) — deserialization structs: `Provider`
   (name, url, api_key, models), `Model` (name + all common API parameters:
   temperature, max_tokens, top_p, frequency_penalty, presence_penalty, stop,
