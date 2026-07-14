@@ -178,7 +178,7 @@ pub fn generate_function_def_impl(
     quote! {
         impl #impl_generics crate::tools::FunctionDef for #struct_name #ty_generics #where_clause {
             fn tool() -> crate::tools::Tool {
-                crate::tools::Tool::Function {
+                crate::tools::Tool::Function(crate::tools::FunctionTool {
                     name: #tool_name,
                     description: #tool_description,
                     parameters: crate::tools::ToolParameters {
@@ -188,7 +188,7 @@ pub fn generate_function_def_impl(
                         ]),
                         required: vec![#(::std::borrow::Cow::Borrowed(#required_names)),*],
                     },
-                }
+                })
             }
         }
     }

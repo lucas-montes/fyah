@@ -100,9 +100,9 @@ impl Transport for StdinTransport {
             Err(e) => return Err(e.to_string()),
         };
         Ok(PromtpMsg::new(
-            "openai".to_string(),
-            "gpt-3.5-turbo".to_string(),
-            "openai".to_string(),
+            "phi3:mini".into(),
+            "primary".into(),
+            "ollama".into(),
             prompt,
         ))
     }

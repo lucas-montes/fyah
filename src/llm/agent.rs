@@ -44,6 +44,8 @@ impl From<&str> for Error {
     }
 }
 
+impl std::error::Error for Error {}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -146,7 +148,7 @@ fn handle_tool_call(_tool_call: &ToolCallFunction) -> Result<String, Error> {
 
 /// Errors that can occur when creating an agent from config.
 #[derive(Debug)]
-pub enum FactoryError {
+pub enum ProxyError {
     /// No agent definition with the given name exists in config.
     AgentNotFound(String),
     /// The agent's referenced model was not found in any provider.
@@ -157,7 +159,7 @@ pub enum FactoryError {
     ProviderNotFound(String),
 }
 
-impl std::fmt::Display for FactoryError {
+impl std::fmt::Display for ProxyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ProviderNotFound(name) => write!(f, "provider not found in config: {name}"),
@@ -172,45 +174,49 @@ impl std::fmt::Display for FactoryError {
     }
 }
 
-impl std::error::Error for FactoryError {}
+impl std::error::Error for ProxyError {}
 
-/// Factory for creating `Agent` instances from configuration.
-///
-/// Unit struct with no stored state — all inputs come from method arguments.
-#[derive(Debug, Default)]
-pub struct AgentFactory;
-
-impl AgentFactory {
-    pub fn spawn<T: ContextManagement>(
-        &self,
+pub trait AgentProxy {
+    fn spawn(
         config: &Config,
         provider_name: &str,
         model: &str,
         agent_name: &str,
-        runtime_context: &T,
-    ) -> Result<JoinHandle<Result<impl ContextManagement + use<T>, Error>>, FactoryError> {
+        session_context: &impl ContextManagement,
+    ) -> Result<JoinHandle<Result<impl ContextManagement + 'static, Error>>, ProxyError>;
+}
+
+#[derive(Debug, Default)]
+pub struct AgentProxyImpl;
+
+impl AgentProxy for AgentProxyImpl {
+    fn spawn(
+        config: &Config,
+        provider_name: &str,
+        model: &str,
+        agent_name: &str,
+        session_context: &impl ContextManagement,
+    ) -> Result<JoinHandle<Result<impl ContextManagement + 'static, Error>>, ProxyError> {
         let agent_cfg = config
-            .agents()
-            .iter()
-            .find(|a| a.name() == agent_name)
-            .ok_or_else(|| FactoryError::AgentNotFound(agent_name.to_string()))?;
+            .get_agent(agent_name)
+            .ok_or_else(|| ProxyError::AgentNotFound(agent_name.to_string()))?;
 
         let provider = config
             .get_provider(provider_name)
-            .ok_or_else(|| FactoryError::ProviderNotFound(provider_name.to_string()))?;
+            .ok_or_else(|| ProxyError::ProviderNotFound(provider_name.to_string()))?;
 
         let model = provider
             .models()
             .iter()
             .find(|m| m.name() == model)
-            .ok_or_else(|| FactoryError::ModelNotFound(model.to_string()))?;
+            .ok_or_else(|| ProxyError::ModelNotFound(model.to_string()))?;
 
         let api_key = provider.api_key();
 
         let client = client::Client::new(provider.url().to_string(), api_key);
 
         let mut context = SlidingWindowContext::new(model.name().to_string(), 500);
-        context.merge(runtime_context);
+        context.merge(session_context);
 
         let temperature = agent_cfg.temperature().unwrap_or(model.temperature());
 

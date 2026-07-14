@@ -3,5 +3,5 @@ mod client;
 mod config;
 mod providers;
 
-pub use agent::AgentFactory;
+pub use agent::AgentProxy;
 pub use config::Config;

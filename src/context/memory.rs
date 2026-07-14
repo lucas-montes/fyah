@@ -26,7 +26,7 @@ pub trait ContextManagement {
 }
 
 /// Placeholder context that stores nothing. Used until T05 wires real
-/// context strategies into the Runtime.
+/// context strategies into the Session.
 #[derive(Debug, Default)]
 pub struct SimpleContext;
 

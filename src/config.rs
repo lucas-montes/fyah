@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::hooks::HooksConfig;
 use crate::llm::Config as LlmConfig;
+use crate::tools::ToolsConfig;
 
 #[derive(Debug)]
 pub enum Error {
@@ -58,34 +59,13 @@ impl std::error::Error for Error {
     }
 }
 
-/// Tools directory configuration, parsed from `[tools]` in `fyah.toml`.
-#[derive(Debug, Deserialize)]
-pub struct ToolsConfig {
-    /// Directory where tool scripts are located.
-    dir: PathBuf,
-}
-
-impl ToolsConfig {
-    /// Path to the tools directory.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-}
-
-impl Default for ToolsConfig {
-    fn default() -> Self {
-        Self {
-            dir: PathBuf::from("tools"),
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     llm: LlmConfig,
     #[serde(default)]
     hooks: HooksConfig,
+    /// Tool configuration (toggles, MCP servers, custom tools).
     #[serde(default)]
     tools: ToolsConfig,
     /// The filesystem path this config was loaded from (set by `load()`).
