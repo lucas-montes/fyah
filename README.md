@@ -22,3 +22,40 @@ so I'll need at least 4 loops. One that listens for files and config changes, an
 
 
 I need to make everything more event driven so I can keep logs of the steps, things done and be able to have better info
+
+so apparently all the context is cached, meaning that all the 'prompt' struct sent to the agent is kept in cache by the server provider
+
+
+```mermaid
+sequenceDiagram
+    participant Main as main.rs
+    participant WS as Workspace
+    participant EB as EventBus
+    participant FB as FsBridge
+    participant S as Session
+    participant A as Agent
+    Main->>WS: Workspace::new(config)
+    WS->>FB: FsBridge::spawn(watch_paths)
+    Main->>WS: projection_for("primary")
+    WS-->>Main: AgentProjection
+    Main->>S: Session::new(workspace, projection)
+    S->>S: Session::run()
+
+    Note over FB: Archivo cambia en disco
+    FB->>WS: workspace.update(|s| s.tool_registry.reload(...))
+    WS->>EB: publish(ConfigReloaded)
+    WS->>EB: publish(VersionBump(42))
+
+    EB-->>S: ConfigReloaded
+    S->>WS: read step_registry actualizado
+
+    Note over S: Spawnea agente
+    S->>WS: projection_for("coder")
+    WS-->>S: AgentProjection { tools, context, ... }
+    S->>A: Agent::new(projection)
+
+    A->>A: Durante ejecución...
+    A->>WS: workspace.upgrade() → read file_index
+    A->>A: detecta workspace_version stale via event
+    A->>WS: projection fresh?
+```

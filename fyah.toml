@@ -17,11 +17,24 @@ url = "http://127.0.0.1:11434/v1"
 name = "phi3:mini"
 temperature = 0.3
 
-[[llm.agents]]
-name = "primary"
-model = "gpt-4o"
-max_iterations = 25
-system_prompt = "You are Fyah, an AI coding assistant."
-temperature = 0.3
-max_tokens = 2048
-context = { sliding_window = { max_messages = 20 } }
+[llm.agents]
+primary = { name = "primary", max_iterations = 25, system_prompt = "You are Fyah, an AI coding assistant.", temperature = 0.3, max_tokens = 2048, context = { sliding_window = { max_messages = 20 } } }
+
+[tools]
+web_search = false
+code_interpreter = true
+computer_use = false
+shell = true
+tool_search = false
+file_search = { vector_store_ids = ["vs_abc123"], max_num_results = 5 }
+
+[[tools.mcp]]
+name = "filesystem"
+server_url = "http://localhost:3100"
+server_description = "Access the local filesystem"
+
+[[tools.custom]]
+name = "read_file"
+description = "Read a file from disk"
+command = "execute_read_file"
+parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = ["path"] }

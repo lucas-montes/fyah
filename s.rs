@@ -219,7 +219,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::context::ContextManagement;
-use crate::llm::AgentFactory;
+use crate::llm::AgentProxy;
 
 use crate::transport::Transport;
 
@@ -233,30 +233,30 @@ pub enum StateMachine<T: Transport, Ctx: ContextManagement> {
 
 /// A state handler function.
 ///
-/// Each state is a plain `fn(&mut Runtime)` that inspects the runtime,
+/// Each state is a plain `fn(&mut Session)` that inspects the runtime,
 /// may interact with the user via the transport, and returns the next
 /// state to enter (or `Done` to exit the loop).
-type StateFn<T, Ctx> = fn(&mut Runtime<T, Ctx>) -> StateMachine<T, Ctx>;
+type StateFn<T, Ctx> = fn(&mut Session<T, Ctx>) -> StateMachine<T, Ctx>;
 
 /// Some kind of main structure that holds the state (aka the context) of the whole work.
 /// Holding the whole context can help to control what information pass to the agents
-pub struct Runtime<T: Transport, Ctx: ContextManagement> {
+pub struct Session<T: Transport, Ctx: ContextManagement> {
     id: String,
     config: Config,
     user_channel: T,
-    agent_factory: AgentFactory,
+    agent_factory: AgentProxy,
     next_step: Option<StateFn<T, Ctx>>,
     cancelled: Arc<AtomicBool>,
     context: Ctx,
     //TODO: needs to spwan a task to listen for config changes as in the tools got updated
 }
 
-impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
+impl<T: Transport, Ctx: ContextManagement> Session<T, Ctx> {
     pub fn new(
         id: String,
         config: Config,
         user_channel: T,
-        agent_factory: AgentFactory,
+        agent_factory: AgentProxy,
         cancelled: Arc<AtomicBool>,
         context: Ctx,
     ) -> Self {
@@ -278,11 +278,11 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
     /// flag between states transitions so Ctrl+C (wired in T05) is
     /// respected at the next safe stopping point.
     pub fn run(&mut self) {
-        info!("Runtime loop started");
+        info!("Session loop started");
 
         while let Some(state_fn) = self.next_step.take() {
             if self.cancelled.load(Ordering::Relaxed) {
-                info!("Runtime loop cancelled");
+                info!("Session loop cancelled");
                 break;
             }
             self.next_step = match state_fn(self) {
@@ -291,60 +291,60 @@ impl<T: Transport, Ctx: ContextManagement> Runtime<T, Ctx> {
             };
         }
 
-        info!("Runtime loop exited");
+        info!("Session loop exited");
     }
 }
 
 /// Initial planning state — gather the user's idea.
 fn plan_gather<T: Transport, Ctx: ContextManagement>(
-    _rt: &mut Runtime<T, Ctx>,
+    _rt: &mut Session<T, Ctx>,
 ) -> StateMachine<T, Ctx> {
     todo!("gather user idea")
 }
 
 /// Plan is being drafted by the agent.
 fn plan_draft<T: Transport, Ctx: ContextManagement>(
-    _rt: &mut Runtime<T, Ctx>,
+    _rt: &mut Session<T, Ctx>,
 ) -> StateMachine<T, Ctx> {
     todo!("draft plan")
 }
 
 /// Plan needs user feedback — may refine or be approved.
 fn plan_refine<T: Transport, Ctx: ContextManagement>(
-    _rt: &mut Runtime<T, Ctx>,
+    _rt: &mut Session<T, Ctx>,
 ) -> StateMachine<T, Ctx> {
     todo!("refine plan with user feedback")
 }
 
 /// Plan is approved and ready — transition to implementation.
 fn plan_approved<T: Transport, Ctx: ContextManagement>(
-    _rt: &mut Runtime<T, Ctx>,
+    _rt: &mut Session<T, Ctx>,
 ) -> StateMachine<T, Ctx> {
     todo!("plan approved")
 }
 
 /// Implementation step — agent produces code.
 fn implement<T: Transport, Ctx: ContextManagement>(
-    _rt: &mut Runtime<T, Ctx>,
+    _rt: &mut Session<T, Ctx>,
 ) -> StateMachine<T, Ctx> {
     todo!("implement")
 }
 
 /// Testing step — may loop back to implement on failure.
-fn test<T: Transport, Ctx: ContextManagement>(_rt: &mut Runtime<T, Ctx>) -> StateMachine<T, Ctx> {
+fn test<T: Transport, Ctx: ContextManagement>(_rt: &mut Session<T, Ctx>) -> StateMachine<T, Ctx> {
     todo!("test")
 }
 
 /// Prepare the commit (summary, diff review).
 fn commit_prepare<T: Transport, Ctx: ContextManagement>(
-    _rt: &mut Runtime<T, Ctx>,
+    _rt: &mut Session<T, Ctx>,
 ) -> StateMachine<T, Ctx> {
     todo!("prepare commit")
 }
 
 /// Wait for user confirmation before final commit.
 fn commit_confirm<T: Transport, Ctx: ContextManagement>(
-    _rt: &mut Runtime<T, Ctx>,
+    _rt: &mut Session<T, Ctx>,
 ) -> StateMachine<T, Ctx> {
     todo!("confirm commit with user")
 }
