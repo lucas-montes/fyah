@@ -1,0 +1,11 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@fyah_crates//:defs.bzl", "all_crate_deps")
+
+rust_binary(
+    name = "fyah",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/main.rs",
+    proc_macro_deps = ["//fyah-derive"],
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(normal = True),
+)

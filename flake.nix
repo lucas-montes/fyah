@@ -41,7 +41,12 @@
             sce.packages.${system}.default
             rust
             pkgs.ollama
+            pkgs.bazel
           ];
+          shellHook = ''
+            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
+            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
+          '';
         };
 
         apps = {
