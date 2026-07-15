@@ -19,11 +19,6 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Create an empty registry.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Register a compile-time known tool.
     ///
     /// Typically called with [`FunctionDef::tool()`] at startup.

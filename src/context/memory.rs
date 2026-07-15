@@ -28,15 +28,17 @@ pub trait ContextManagement {
 /// Placeholder context that stores nothing. Used until T05 wires real
 /// context strategies into the Session.
 #[derive(Debug, Default)]
-pub struct SimpleContext;
+pub struct SimpleContext(Vec<Message>);
 
 impl ContextManagement for SimpleContext {
     /// Append a message to the conversation history.
-    fn add_message(&mut self, _msg: Message) {}
+    fn add_message(&mut self, msg: Message) {
+        self.0.push(msg);
+    }
 
     /// Return the current conversation history.
     fn get_history(&self) -> &[Message] {
-        &[]
+        &self.0
     }
 
     fn get_model(&self) -> &str {
@@ -50,9 +52,11 @@ impl ContextManagement for SimpleContext {
     }
 
     /// Compact the history (truncate, summarize, etc.) to fit within limits.
-    fn compact(&mut self) {}
+    fn compact(&mut self) {
+        self.0.clear();
+    }
 
-    fn merge(&mut self, _other: &impl ContextManagement) {
+    fn merge(&mut self, other: &impl ContextManagement) {
         todo!()
     }
 }

@@ -53,7 +53,7 @@ pub struct Workspace(Arc<RwLock<WorkspaceInner>>);
 impl Workspace {
     pub fn new(config: Config) -> Self {
         let (hooks, llm_config, tools_config) = config.into_parts();
-        let mut tool_registry = ToolRegistry::new();
+        let mut tool_registry = ToolRegistry::default();
         tool_registry.reload_from_config(tools_config);
         let inner = WorkspaceInner {
             version: AtomicU16::new(0),

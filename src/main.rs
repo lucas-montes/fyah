@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .clone();
 
-    let context = SimpleContext;
+    let context = SimpleContext::default();
 
     // Extract config path before consuming config with Workspace::new.
     let config_path = config.source_path().map(|p| p.to_path_buf());
