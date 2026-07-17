@@ -1,7 +1,18 @@
+use core::fmt::{self, Debug, Display, Write as FmtWrite};
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use std::ptr::NonNull;
 
 use super::map;
+
+// ── Display helpers ──────────────────────────────────────────────────────
+
+/// Write a short node label like `N0`, `S0`, `B0`.
+fn short_id(id: u64) -> String {
+    let mut h = String::new();
+    // compact hex-ish; just print the low bits
+    write!(h, "{:x}", id).unwrap();
+    h
+}
 
 /// Unique identifier for a node in the DAG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,6 +56,24 @@ impl SessionId {
 impl BranchId {
     fn new() -> Self {
         BranchId(NEXT_BRANCH.fetch_add(1, Ordering::Relaxed) as u64)
+    }
+}
+
+impl Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "N{}", short_id(self.0))
+    }
+}
+
+impl Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "S{}", short_id(self.0))
+    }
+}
+
+impl Display for BranchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "B{}", short_id(self.0))
     }
 }
 
@@ -96,26 +125,59 @@ impl Default for NodeMetadata {
 }
 
 /// The data stored for every node in the DAG.
+///
+/// `data` is `Option<T>` — root/structural nodes carry `None`, while
+/// commit nodes carry `Some(data)`. This lets `create_session()` and
+/// `branch()` accept only names, not generic data.
 #[derive(Debug, Clone)]
 pub struct NodeRecord<T> {
     parent: Option<NodeId>,
-    data: T,
+    data: Option<T>,
     meta: NodeMetadata,
 }
 
 /// The data stored for every session.
-#[derive(Debug, Clone)]
+///
+/// `head` is an `AtomicUsize` so it can be updated in-place (via atomic store)
+/// without re-inserting into the lock-free map — which would create stale
+/// duplicate entries.
+#[derive(Debug)]
 pub struct SessionRecord {
+    pub name: String,
     root: NodeId,
-    head: NodeId,
+    head: AtomicUsize,
+}
+
+impl Clone for SessionRecord {
+    fn clone(&self) -> Self {
+        SessionRecord {
+            name: self.name.clone(),
+            root: self.root,
+            head: AtomicUsize::new(self.head.load(Ordering::Acquire)),
+        }
+    }
 }
 
 /// The data stored for every branch.
-#[derive(Debug, Clone)]
+///
+/// `head` is an `AtomicUsize` so it can be updated in-place (see `SessionRecord`).
+#[derive(Debug)]
 pub struct BranchRecord {
-    session: SessionId,
-    fork_point: NodeId,
-    head: NodeId,
+    pub name: String,
+    pub session: SessionId,
+    pub fork_point: NodeId,
+    head: AtomicUsize,
+}
+
+impl Clone for BranchRecord {
+    fn clone(&self) -> Self {
+        BranchRecord {
+            name: self.name.clone(),
+            session: self.session,
+            fork_point: self.fork_point,
+            head: AtomicUsize::new(self.head.load(Ordering::Acquire)),
+        }
+    }
 }
 
 struct HistoryInner<T> {
@@ -153,15 +215,16 @@ pub struct History<T> {
 unsafe impl<T: Send> Send for History<T> {}
 unsafe impl<T: Sync> Sync for History<T> {}
 
-impl<T> History<T> {
-    /// Create a new history with one session rooted at `root_data`.
-    pub fn new() -> Self {
+impl<T> Default for History<T> {
+    fn default() -> Self {
         let inner =
             unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(HistoryInner::default()))) };
 
         History { inner }
     }
+}
 
+impl<T> History<T> {
     // -- reads (immutable, lock-free) --
 
     /// Get a node by its ID. Returns `None` if the node doesn't exist.
@@ -193,8 +256,11 @@ impl<T> History<T> {
         path
     }
 
-    /// Create a new session with the given root data.
-    pub fn create_session(&self, root_data: T) -> Session<T> {
+    /// Create a new session with the given name.
+    ///
+    /// A root node is created as the DAG anchor (its `data` is `None` —
+    /// only commits carry data).
+    pub fn create_session(&self, name: impl Into<String>) -> Session<T> {
         let node_id = NodeId::new();
         let session_id = SessionId::new();
         // SAFETY: inner is valid. We hold a reference via `self`.
@@ -203,15 +269,16 @@ impl<T> History<T> {
                 node_id,
                 NodeRecord {
                     parent: None,
-                    data: root_data,
+                    data: None,
                     meta: NodeMetadata::default(),
                 },
             );
             self.inner.as_ref().sessions.insert(
                 session_id,
                 SessionRecord {
+                    name: name.into(),
                     root: node_id,
-                    head: node_id,
+                    head: AtomicUsize::new(node_id.0 as usize),
                 },
             );
         }
@@ -221,7 +288,7 @@ impl<T> History<T> {
         }
     }
 
-    /// Internal: insert a child node under `parent`, return its ID.
+    /// Internal: insert a commit node (data wrapped in `Some`).
     fn insert_node_impl(&self, parent: Option<NodeId>, data: T) -> NodeId {
         let id = NodeId::new();
         // SAFETY: inner is valid.
@@ -230,7 +297,7 @@ impl<T> History<T> {
                 id,
                 NodeRecord {
                     parent,
-                    data,
+                    data: Some(data),
                     meta: NodeMetadata::default(),
                 },
             );
@@ -273,6 +340,291 @@ impl<T> Drop for History<T> {
     }
 }
 
+// ── Atomic head helpers ──────────────────────────────────────────────────
+
+/// Read a session's head from its `AtomicUsize` field.
+fn session_head(srec: &SessionRecord) -> NodeId {
+    NodeId(srec.head.load(Ordering::Acquire) as u64)
+}
+
+/// Read a branch's head from its `AtomicUsize` field.
+fn branch_head(brec: &BranchRecord) -> NodeId {
+    NodeId(brec.head.load(Ordering::Acquire) as u64)
+}
+
+// Helper: (branch_id, branch_name, first_node) for rendering branch labels
+struct BranchInfo {
+    id: BranchId,
+    name: String,
+    first_node: NodeId,
+}
+
+// ── History Debug + Display ──────────────────────────────────────────────
+
+impl<T: Display> Display for History<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Snapshot the three maps into local Vecs.
+        let mut nodes_snap: Vec<(NodeId, &NodeRecord<T>)> = Vec::new();
+        let mut sessions_snap: Vec<(SessionId, &SessionRecord)> = Vec::new();
+        let mut branches_snap: Vec<(BranchId, &BranchRecord)> = Vec::new();
+
+        // SAFETY: inner is valid. References from for_each have lifetime tied to &self.
+        let inner = unsafe { self.inner.as_ref() };
+        inner.nodes.for_each(|k, v| {
+            nodes_snap.push((*k, v));
+        });
+        inner.sessions.for_each(|k, v| {
+            sessions_snap.push((*k, v));
+        });
+        inner.branches.for_each(|k, v| {
+            branches_snap.push((*k, v));
+        });
+
+        // Build children index: for each node, find nodes whose parent == it
+        let mut children: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
+        for &(id, _) in &nodes_snap {
+            children.push((id, Vec::new()));
+        }
+        for &(id, rec) in &nodes_snap {
+            if let Some(parent) = rec.parent {
+                if let Some(pos) = children.iter().position(|(c, _)| *c == parent) {
+                    children[pos].1.push(id);
+                }
+            }
+        }
+
+        // Build mapping: (branch_id, branch_name) → first_node (node directly after fork_point)
+        // Also collect branch head nodes.
+        let mut branch_infos: Vec<BranchInfo> = Vec::new();
+        for &(bid, brec) in &branches_snap {
+            let bh = branch_head(brec);
+            // Walk from head back to find the child of fork_point
+            let mut cur = bh;
+            loop {
+                let parent = nodes_snap
+                    .iter()
+                    .find(|(n, _)| *n == cur)
+                    .and_then(|(_, r)| r.parent);
+                match parent {
+                    Some(p) if p == brec.fork_point => {
+                        branch_infos.push(BranchInfo {
+                            id: bid,
+                            name: brec.name.clone(),
+                            first_node: cur,
+                        });
+                        break;
+                    }
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+        }
+
+        // Build set of all branch heads
+        let branch_heads: Vec<NodeId> = branches_snap
+            .iter()
+            .map(|(_, brec)| branch_head(brec))
+            .collect();
+
+        // Build set of branch-first node IDs (for quick lookup)
+        let is_branch_first: Vec<NodeId> = branch_infos.iter().map(|bi| bi.first_node).collect();
+
+        // ── render ──────────────────────────────────────────────────
+        writeln!(
+            f,
+            "History: {} nodes, {} sessions, {} branches",
+            nodes_snap.len(),
+            sessions_snap.len(),
+            branches_snap.len()
+        )?;
+
+        for (sid, srec) in &sessions_snap {
+            let sh = session_head(srec);
+            write!(
+                f,
+                "\n{} \"{}\" [root={}, head={}]",
+                sid, srec.name, srec.root, sh
+            )?;
+
+            // Find session root and render its tree
+            if let Some(&(root_id, _)) = nodes_snap.iter().find(|(id, _)| *id == srec.root) {
+                write!(f, "\n")?;
+                render_subtree(
+                    f,
+                    root_id,
+                    "",
+                    true,
+                    &nodes_snap,
+                    &children,
+                    &branch_infos,
+                    &is_branch_first,
+                    &branch_heads,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Walk `from` back to root, returning Vec in root→from order.
+fn ancestors_from<T>(nodes: &[(NodeId, &NodeRecord<T>)], from: NodeId) -> Vec<NodeId> {
+    let mut path = Vec::new();
+    let mut current = Some(from);
+    while let Some(id) = current {
+        path.push(id);
+        current = nodes
+            .iter()
+            .find(|(n, _)| *n == id)
+            .and_then(|(_, r)| r.parent);
+    }
+    path.reverse();
+    path
+}
+
+/// Render a subtree rooted at `id` with the given line prefix.
+///
+/// - Nodes that are the first node of a branch get a `[B0 "name"]` prefix.
+/// - Nodes that are a branch head get a ` ← head` suffix.
+fn render_subtree<T: Display>(
+    f: &mut fmt::Formatter<'_>,
+    id: NodeId,
+    prefix: &str,
+    is_last: bool,
+    nodes: &[(NodeId, &NodeRecord<T>)],
+    children: &[(NodeId, Vec<NodeId>)],
+    branch_infos: &[BranchInfo],
+    is_branch_first: &[NodeId],
+    branch_heads: &[NodeId],
+) -> fmt::Result {
+    let connector = if is_last { "└── " } else { "├── " };
+    let data_str = node_data_str(nodes, id);
+
+    // Branch label prefix [B0 "name"]
+    let mut label = String::new();
+    if let Some(pos) = is_branch_first.iter().position(|n| *n == id) {
+        let bi = &branch_infos[pos];
+        write!(label, "[{} \"{}\"]", bi.id, bi.name)?;
+    }
+
+    // Head marker suffix
+    let mut marker = String::new();
+    if branch_heads.contains(&id) {
+        marker.push_str(" ← head");
+    }
+
+    write!(f, "{}{} {} {}", prefix, connector, id, data_str)?;
+    if !label.is_empty() {
+        write!(f, " {}", label)?;
+    }
+    if !marker.is_empty() {
+        write!(f, "{}", marker)?;
+    }
+    writeln!(f)?;
+
+    // Find children of this node
+    let my_children: Vec<NodeId> = children
+        .iter()
+        .find(|(c, _)| *c == id)
+        .map(|(_, ch)| ch.clone())
+        .unwrap_or_default();
+
+    let child_prefix = if is_last {
+        format!("{}    ", prefix)
+    } else {
+        format!("{}│   ", prefix)
+    };
+
+    for (i, child_id) in my_children.iter().enumerate() {
+        let last = i == my_children.len() - 1;
+        render_subtree(
+            f,
+            *child_id,
+            &child_prefix,
+            last,
+            nodes,
+            children,
+            branch_infos,
+            is_branch_first,
+            branch_heads,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Short data representation for a node.
+///
+/// Root/structural nodes (data = `None`) display as `"."`. Commit nodes
+/// display their data via `T`'s `Display` impl.
+fn node_data_str<'a, T: Display>(nodes: &[(NodeId, &NodeRecord<T>)], id: NodeId) -> String {
+    if let Some((_, rec)) = nodes.iter().find(|(n, _)| *n == id) {
+        match &rec.data {
+            Some(d) => {
+                let mut s = String::new();
+                write!(s, "{}", d).unwrap();
+                s
+            }
+            None => ".".to_string(),
+        }
+    } else {
+        "?".to_string()
+    }
+}
+
+impl<T: Display> Display for Session<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let srec = self.history.get_session(&self.id);
+        match srec {
+            Some(s) => write!(
+                f,
+                "{} \"{}\" [root={}, head={}]",
+                self.id,
+                s.name,
+                s.root,
+                self.head()
+            ),
+            None => write!(f, "{} [detached]", self.id),
+        }
+    }
+}
+
+impl<T: Display> Display for Branch<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let brec = self.history.get_branch(&self.id);
+        match brec {
+            Some(b) => write!(
+                f,
+                "{} \"{}\" [session={}, fork={}, head={}]",
+                self.id,
+                b.name,
+                b.session,
+                b.fork_point,
+                branch_head(b)
+            ),
+            None => write!(f, "{} [detached]", self.id),
+        }
+    }
+}
+
+impl<T: Display> Debug for History<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl<T: Display> Debug for Session<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl<T: Display> Debug for Branch<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
 /// A handle to a session within a [`History`].
 ///
 /// Cheap to clone (bumps the history refcount, copies a `SessionId`).
@@ -282,14 +634,14 @@ pub struct Session<T> {
     id: SessionId,
 }
 
-impl<T: Clone> Session<T> {
+impl<T> Session<T> {
     pub fn id(&self) -> SessionId {
         self.id
     }
 
     /// Current head of this session.
     pub fn head(&self) -> NodeId {
-        self.history.get_session(&self.id).map(|s| s.head).unwrap()
+        session_head(self.history.get_session(&self.id).unwrap())
     }
 
     /// Root of this session (fixed at creation).
@@ -302,37 +654,22 @@ impl<T: Clone> Session<T> {
         self.history.get_node(id)
     }
 
-    /// Append a new message to this session's chain.
-    /// Returns the new node's ID. Advances the session head.
-    pub fn commit(&self, data: T) -> NodeId {
-        let parent = self.head();
-        let id = self.history.insert_node_impl(Some(parent), data);
-        // SAFETY: Update the session's head to the new node.
-        unsafe {
-            self.history.inner.as_ref().sessions.insert(
-                self.id,
-                SessionRecord {
-                    root: self.root(), // unchanged
-                    head: id,
-                },
-            );
-        }
-        id
-    }
-
-    /// Fork a new branch from the current head.
-    pub fn branch(&self, data: T) -> Branch<T> {
+    /// Create a new branch from the current session head.
+    ///
+    /// No node is created — the branch starts as a named pointer
+    /// to the fork_point. Only `commit()` creates data-bearing nodes.
+    pub fn branch(&self, name: impl Into<String>) -> Branch<T> {
         let fork_point = self.head();
-        let id = self.history.insert_node_impl(Some(fork_point), data);
         let branch_id = BranchId::new();
-        // SAFETY: Insert the branch record.
+        // SAFETY: head starts at fork_point; advanced atomically on commit().
         unsafe {
             self.history.inner.as_ref().branches.insert(
                 branch_id,
                 BranchRecord {
+                    name: name.into(),
                     session: self.id,
                     fork_point,
-                    head: id,
+                    head: AtomicUsize::new(fork_point.0 as usize),
                 },
             );
         }
@@ -367,14 +704,14 @@ pub struct Branch<T> {
     id: BranchId,
 }
 
-impl<T: Clone> Branch<T> {
+impl<T> Branch<T> {
     pub fn id(&self) -> BranchId {
         self.id
     }
 
     /// Current head of this branch.
     pub fn head(&self) -> NodeId {
-        self.history.get_branch(&self.id).map(|b| b.head).unwrap()
+        branch_head(self.history.get_branch(&self.id).unwrap())
     }
 
     /// The session this branch belongs to.
@@ -391,24 +728,48 @@ impl<T: Clone> Branch<T> {
     }
 
     /// Append a new message to this branch's chain.
-    /// Returns the new node's ID. Advances the branch head.
+    /// Returns the new node's ID. Advances the branch head atomically.
     pub fn commit(&self, data: T) -> NodeId {
         let parent = self.head();
         let id = self.history.insert_node_impl(Some(parent), data);
-        // SAFETY: Update the branch's head to the new node.
+        // SAFETY: Update the branch's head in-place via atomic store.
+        // This avoids re-inserting (which would create stale duplicates).
         unsafe {
-            let branch = &self.history.inner.as_ref().branches;
-            let current = branch.get(&self.id).unwrap();
+            self.history
+                .inner
+                .as_ref()
+                .branches
+                .get(&self.id)
+                .unwrap()
+                .head
+                .store(id.0 as usize, Ordering::Release);
+        }
+        id
+    }
+
+    /// Fork a new sub-branch from this branch's current head.
+    ///
+    /// No node is created — the sub-branch starts as a named pointer
+    /// to the fork_point. Only `commit()` creates data-bearing nodes.
+    pub fn branch(&self, name: impl Into<String>) -> Branch<T> {
+        let fork_point = self.head();
+        let branch_id = BranchId::new();
+        // SAFETY: head starts at fork_point; advanced atomically on commit().
+        unsafe {
             self.history.inner.as_ref().branches.insert(
-                self.id,
+                branch_id,
                 BranchRecord {
-                    session: current.session,
-                    fork_point: current.fork_point,
-                    head: id,
+                    name: name.into(),
+                    session: self.session_id(),
+                    fork_point,
+                    head: AtomicUsize::new(fork_point.0 as usize),
                 },
             );
         }
-        id
+        Branch {
+            history: self.history.clone(),
+            id: branch_id,
+        }
     }
 
     /// Walk from branch head back to root, returning node IDs in order
@@ -427,18 +788,73 @@ impl<T> Clone for Branch<T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::History;
 
-    struct TestData {
-        content: String,
+    struct TestData(String);
+    impl std::fmt::Display for TestData {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
     }
 
     #[test]
     fn test_crud() {
-        let history = History::<TestData>::new();
+        let history = History::<TestData>::default();
+        println!("Initial history: {}", history);
 
+        //── Session with a branch ──────────────────────────────────────
+        let session = history.create_session("root");
+        assert_eq!(session.head(), session.root());
+        assert_eq!(session.ancestors(), vec![session.root()]);
+
+        let branch = session.branch("branch1");
+        for i in 0..5 {
+            let v = format!("branch1 node {}", i);
+            let node_id = branch.commit(TestData(v));
+            println!("Committed to branch: {}", node_id);
+        }
+        let b2 = branch.branch("new-branch");
+        for i in 5..8 {
+            let v = format!("branch1 node {}", i);
+            let node_id = branch.commit(TestData(v));
+            println!("Committed to branch: {}", node_id);
+        }
+
+        let b3 = branch.branch("new-branch-3");
+        for i in 8..12 {
+            let v = format!("branch1 node {}", i);
+            let node_id = branch.commit(TestData(v));
+            println!("Committed to branch: {}", node_id);
+        }
+
+        for i in 0..5 {
+            let v = format!("new-branch node {}", i);
+            let node_id = b2.commit(TestData(v));
+            println!("Committed to branch: {}", node_id);
+        }
+
+        let b22 = b2.branch("new-branch");
+        for i in 0..5 {
+            let v = format!("branch-new-branch node {}", i);
+            let node_id = b22.commit(TestData(v));
+            println!("Committed to branch: {}", node_id);
+        }
+
+        for i in 5..8 {
+            let v = format!("new-branch node {}", i);
+            let node_id = b2.commit(TestData(v));
+            println!("Committed to branch: {}", node_id);
+        }
+
+        for i in 0..5 {
+            let v = format!("new-branch-3 node {}", i);
+            let node_id = b3.commit(TestData(v));
+            println!("Committed to branch: {}", node_id);
+        }
+
+
+        println!("\nFinal history:\n{}", history);
     }
 }

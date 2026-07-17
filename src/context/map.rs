@@ -1,8 +1,8 @@
+use core::fmt::{self, Debug};
 use core::hash::{Hash, Hasher};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::alloc::{self, Layout};
-
 
 struct Node<K, V> {
     /// Manual refcount. Starts at 1. Freed when it drops to 0.
@@ -115,15 +115,13 @@ impl<K, V> Bucket<K, V> {
     ///
     /// Lock-free: CAS on the bucket head. On conflict (another writer
     /// changed the head), retry with the new head as `next`.
-    fn insert(&self, key: K, value: V, hash: u64)
-    where
-        K: Clone,
-        V: Clone,
-    {
+    fn insert(&self, key: K, value: V, hash: u64) {
+        let mut key = key;
+        let mut value = value;
+
         loop {
             let head = self.head.load(Ordering::Acquire);
-            //TODO: we can be smarter here with the key and values, instead of cloning we can just move them around
-            let new_node = Node::allocate(key.clone(), value.clone(), hash, head);
+            let new_node = Node::allocate(key, value, hash, head);
             // Try to swing the head to our new node.
             // The new_node's next already points to the old head, so if
             // the CAS succeeds the chain is consistent.
@@ -133,15 +131,24 @@ impl<K, V> Bucket<K, V> {
             {
                 Ok(_) => {
                     // Node owns the cloned copies. Drop the originals.
-                    drop(key);
-                    drop(value);
+                    // drop(key);
+                    // drop(value);
                     return;
                 }
                 Err(_) => {
                     // CAS failed — another writer prepended first.
-                    // Free the node we allocated (drops its key/value clones).
-                    // Retry with the original key/value (still alive).
-                    Node::release(new_node);
+                    // Read back the key/value (they were moved into the node
+                    // on `allocate`) so they can be reused on the next retry.
+                    // Then dealloc WITHOUT calling `Node::release` — that
+                    // would read key/value AGAIN and double-free types with
+                    // `Drop` (e.g. `String`). The node was never published
+                    // (CAS failed), so no other thread can see it.
+                    (key, value) =
+                        unsafe { (ptr::read(&(*new_node).key), ptr::read(&(*new_node).value)) };
+                    // SAFETY: sole owner of this un-published node.
+                    unsafe {
+                        alloc::dealloc(new_node as *mut u8, Layout::new::<Node<K, V>>());
+                    }
                 }
             }
         }
@@ -243,9 +250,10 @@ impl<K, V> HashMap<K, V> {
     /// remains in the chain. `get()` returns the newest value.
     pub fn insert(&self, key: K, value: V)
     where
-        K: Hash + PartialEq + Clone,
-        V: Clone,
+        K: Hash + PartialEq,
     {
+        // let h = std::collections::HashMap::new();
+        // h.insert(k, v)
         let hash = Self::hash_key(&key);
         let bucket = self.bucket(hash);
         bucket.insert(key, value, hash);
@@ -302,6 +310,44 @@ impl<K, V> HashMap<K, V> {
             }
         }
         true
+    }
+
+    /// Walk every entry in the map, passing references with lifetime `'a`
+    /// tied to `&'a self`. Order is not guaranteed.
+    /// Concurrent inserts may or may not be visible.
+    ///
+    /// # Safety
+    ///
+    /// Nodes are never unlinked from the chain, so references created from
+    /// raw pointers are valid for `'a`. The `extend` helper converts the
+    /// anonymous lifetime to `'a` explicitly.
+    pub fn for_each<'a>(&'a self, mut f: impl FnMut(&'a K, &'a V)) {
+        // SAFETY: extend the anonymous lifetime to 'a. Sound because the
+        // node is in the map (alive for 'a) and never unlinked.
+        unsafe fn extend<'a, T>(p: *const T) -> &'a T {
+            // SAFETY: caller guarantees p is valid for 'a.
+            unsafe { &*p }
+        }
+        for i in 0..self.capacity {
+            let bucket = unsafe { &*self.buckets.as_ptr().add(i) };
+            let mut curr = bucket.head.load(Ordering::Acquire);
+            while !curr.is_null() {
+                unsafe {
+                    f(extend(&(*curr).key), extend(&(*curr).value));
+                    curr = (*curr).next.load(Ordering::Acquire);
+                }
+            }
+        }
+    }
+}
+
+impl<K: Debug, V: Debug> Debug for HashMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut entries = Vec::new();
+        self.for_each(|k, v| entries.push((k, v)));
+        f.debug_map()
+            .entries(entries.iter().map(|(k, v)| (*k, *v)))
+            .finish()
     }
 }
 
