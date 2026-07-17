@@ -11,7 +11,10 @@ temperature = 0.7
 max_tokens = 4096
 
 [llm.providers.ollama]
-url = "http://127.0.0.1:11434/v1"
+api_key = "ollama" #Required but ignored apparently
+url = "http://127.0.0.1:11434/api/chat" #Ollama
+# url = "http://127.0.0.1:11434/v1/chat/completions" #OpenAI
+# url = "http://127.0.0.1:11434/v1/messages" #Anthropic
 
 [[llm.providers.ollama.models]]
 name = "phi3:mini"
