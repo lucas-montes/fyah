@@ -1,5 +1,3 @@
-use tokio::task::JoinHandle;
-
 use crate::context::{ContextManagement, Message, SlidingWindowContext, ToolCallFunction};
 
 use super::{
@@ -105,6 +103,8 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
     async fn run(mut self) -> Result<Ctx, Error> {
         let mut tool_calls_messages = Vec::new();
 
+        //TODO: we probably need to add hooks
+
         loop {
             let prompt = (&self.context).into();
             let mut response = self.client.chat_completion(&prompt).await?;
@@ -134,7 +134,7 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
                 }
 
                 self.context.add_message(choice.message());
-                // prompt.messages.append(&mut tool_calls_messages);
+                self.context.append_messages(&mut tool_calls_messages);
             }
         }
 
@@ -183,11 +183,12 @@ pub trait AgentProxy {
         model: &str,
         agent_name: &str,
         session_context: &impl ContextManagement,
-    ) -> Result<JoinHandle<Result<impl ContextManagement + 'static, Error>>, ProxyError>;
+    ) -> Result<impl Future<Output = Result<impl ContextManagement + 'static, Error>>, ProxyError>;
 }
 
 #[derive(Debug, Default)]
 pub struct AgentProxyImpl;
+//TODO: we could have a map or something to reuse clients
 
 impl AgentProxy for AgentProxyImpl {
     fn spawn(
@@ -196,7 +197,8 @@ impl AgentProxy for AgentProxyImpl {
         model: &str,
         agent_name: &str,
         session_context: &impl ContextManagement,
-    ) -> Result<JoinHandle<Result<impl ContextManagement + 'static, Error>>, ProxyError> {
+    ) -> Result<impl Future<Output = Result<impl ContextManagement + 'static, Error>>, ProxyError> {
+        //TODO: we probably need to add hooks
         let agent_cfg = config
             .get_agent(agent_name)
             .ok_or_else(|| ProxyError::AgentNotFound(agent_name.to_string()))?;
@@ -216,7 +218,7 @@ impl AgentProxy for AgentProxyImpl {
         let client = client::Client::new(provider.url().to_string(), api_key);
 
         let mut context = SlidingWindowContext::new(model.name().to_string(), 500);
-        context.merge(session_context);
+        context.populate_from(session_context);
 
         let temperature = agent_cfg.temperature().unwrap_or(model.temperature());
 
@@ -228,6 +230,6 @@ impl AgentProxy for AgentProxyImpl {
             temperature,
         };
 
-        Ok(tokio::spawn(agent.run()))
+        Ok(agent.run())
     }
 }

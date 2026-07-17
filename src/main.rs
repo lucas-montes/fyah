@@ -13,6 +13,7 @@ mod context;
 mod hooks;
 mod llm;
 mod session;
+mod steps;
 mod tools;
 mod transport;
 mod workspace;
@@ -29,6 +30,7 @@ use uuid::Uuid;
 
 use crate::context::SimpleContext;
 use crate::llm::agent::AgentProxyImpl;
+use crate::steps::Plan;
 use crate::workspace::{FsBridge, Workspace};
 use crate::{config::Config, session::Session, transport::StdinTransport};
 
@@ -90,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .expect("tokio runtime");
 
-    Session::new(
+    let session = Session::new(
         Uuid::now_v7().to_string(),
         transport,
         AgentProxyImpl,
@@ -98,8 +100,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         context,
         workspace,
         runtime,
-    )
-    .run();
+    );
+
+    session.run::<Plan>();
 
     info!("Fyah stopped");
     // Use exit(0) to terminate the process immediately rather than letting
