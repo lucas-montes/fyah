@@ -1,4 +1,7 @@
-use crate::context::{ContextManagement, Message, SlidingWindowContext, ToolCallFunction};
+use crate::{
+    context::{ContextManagement, Message, SlidingWindowContext, ToolCallFunction},
+    llm::client::{ChatResponse, ChatResponseChoice},
+};
 
 use super::{
     client::{self, LlmClient},
@@ -80,13 +83,53 @@ impl Error {
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Agent — the reasoning loop
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Outcome of a single agent step.
+pub enum StepOutcome {
+    /// Agent produced messages with tool calls — caller should execute tools.
+    ToolCalls(Vec<Message>),
+    /// Agent produced a final response — done.
+    Final(Vec<Message>),
+    /// Agent was cancelled.
+    Cancelled,
+}
+
+/// The core reasoning loop.
+pub trait AgentRuntime<Cl: LlmClient, Ctx: ContextManagement> {
+    /// Execute one turn:
+    ///   1. Build ContextDraft from context
+    ///   2. Run the ContextPipeline
+    ///   3. Convert processed draft → provider request (via From blanket)
+    ///   4. Send via client
+    ///   5. Parse response → Vec<Message> (via From blanket on response)
+    ///   6. Return outcome
+    fn step<'a>(
+        &'a mut self,
+        // cancel: &'a CancellationToken,
+    ) -> impl Future<Output = Result<StepOutcome, AgentError>>;
+
+    /// Consume the agent and return accumulated context.
+    fn finish(self: Box<Self>) -> Ctx;
+}
+
+#[derive(Debug)]
+pub enum AgentError {
+    // Client(ClientError),
+    // Stage(StageError),
+    // Cancelled,
+    // ToolExecution(String),
+}
+
 /// A configured LLM agent ready to process prompts.
 ///
 /// Generic over `Ctx: ContextManagement` for the conversation history store.
 /// Client is the concrete production reqwest-based implementation.
 #[derive(Debug)]
 pub struct Agent<Client: LlmClient, Ctx: ContextManagement> {
-    /// Conversation history store.
+    /// Conversation history store + files + tools + hooks
     context: Ctx,
     /// LLM API client (url + api_key + model).
     client: Client,
@@ -104,6 +147,7 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
         let mut tool_calls_messages = Vec::new();
 
         //TODO: we probably need to add hooks
+        //TODO: how to correctly stop this mid-way?
 
         loop {
             let prompt = (&self.context).into();
@@ -124,6 +168,7 @@ impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
                 }
 
                 if let Some(tool_calls) = tool_calls {
+                    //TODO: add some filter to avoid calling tools we don't allow like running rm -rf /
                     for tool_call in tool_calls {
                         let (tool_call_id, tool_call_function) = tool_call.split();
 
@@ -197,7 +242,8 @@ impl AgentProxy for AgentProxyImpl {
         model: &str,
         agent_name: &str,
         session_context: &impl ContextManagement,
-    ) -> Result<impl Future<Output = Result<impl ContextManagement + 'static, Error>>, ProxyError> {
+    ) -> Result<impl Future<Output = Result<impl ContextManagement + 'static, Error>>, ProxyError>
+    {
         //TODO: we probably need to add hooks
         let agent_cfg = config
             .get_agent(agent_name)

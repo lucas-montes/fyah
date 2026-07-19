@@ -8,6 +8,7 @@
 // tool calling) is expected until wiring tasks are implemented.
 #![allow(dead_code)]
 
+mod agent_traces;
 mod config;
 mod context;
 mod hooks;
@@ -26,10 +27,15 @@ use std::sync::{Arc, OnceLock};
 use clap::Parser;
 use tokio::runtime;
 use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
 use crate::context::SimpleContext;
-use crate::llm::agent::AgentProxyImpl;
+use crate::llm::AgentProxyImpl;
 use crate::steps::Plan;
 use crate::workspace::{FsBridge, Workspace};
 use crate::{config::Config, session::Session, transport::StdinTransport};
@@ -49,10 +55,24 @@ pub struct Cli {
 static CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
+    let agent_file = tracing_appender::rolling::never(".agent-traces", "traces.ndjson");
+    let (agent_writer, _agent_guard) = tracing_appender::non_blocking(agent_file);
+    let agent_layer = tracing_subscriber::fmt::layer()
+        .json()
         .with_target(false)
+        .with_writer(agent_writer)
+        .with_filter(filter_fn(|meta| meta.target() == "agent_trace"));
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+
+    // App logs to stdout (compact, DEBUG max, excludes agent traces)
+    let app_layer = tracing_subscriber::fmt::layer()
         .compact()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_filter(filter_fn(|meta| meta.target() != "agent_trace"))
+        .with_filter(env_filter);
+    tracing_subscriber::registry()
+        .with(agent_layer)
+        .with(app_layer)
         .init();
 
     let cli = Cli::parse();
