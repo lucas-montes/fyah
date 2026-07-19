@@ -63,12 +63,53 @@ Create a new `src/agent_traces.rs` module that provides Rust types and construct
   - **Evidence:** `mod agent_traces;` confirmed at line 11 of `main.rs`. Zero agent_traces compilation errors. Zero agent_traces clippy warnings. Full `cargo check` still blocked by pre-existing error in `llm/agent.rs` (unrelated).
   - **Notes:** Already wired in T01 to enable verification; T04 confirms the wiring is correct.
 
-- [ ] T05: `Validation and cleanup` (status:todo)
+- [x] T05: `Validation and cleanup` (status:done)
   - Task ID: T05
   - Goal: Run full test suite, lint checks, verify the module produces spec-compliant JSON against the canonical example, and remove any dead code or scaffolding. Update `context/context-map.md` to reference the Agent Trace spec and this module. Ensure `context/` is synced with current state.
   - Boundaries (in/out of scope): In — `cargo test`, `cargo clippy`, verification of JSON output against spec examples from [agent-trace.dev](https://agent-trace.dev/), context-map update. Out — any code changes beyond cleanup.
   - Done when: All tests pass; clippy is clean; a test verifies the example JSON from the spec round-trips through our types; context-map.md is updated; validation report appended to this plan.
   - Verification notes: `cargo test -- --show-output`; `cargo clippy --all-targets -- -D warnings`; inspect test output for JSON equality with spec example.
+  - **Status:** done
+  - **Completed:** 2026-07-19
+  - **Files changed:** `src/agent_traces.rs` (restored helper functions and tests lost between sessions)
+  - **Evidence:** See validation report below.
+
+---
+
+## Validation Report
+
+**Date:** 2026-07-19
+**Plan:** Agent Trace Record Generation Module (`agent-traces-module.md`)
+
+### Results Summary
+
+| Check | Status | Details |
+|-------|--------|---------|
+| Type compilation | PASS | All types compile with derives; zero errors when compiled as crate module |
+| JSON round-trip | PASS | Canonical spec example deserializes, re-serializes, and round-trips without data loss |
+| Builder chain | PASS | Builder-constructed record matches spec example exactly |
+| Helper: `generate_id()` | PASS | Returns 36-char UUID v7 with correct version nibble; unique per call |
+| Helper: `now_utc()` | PASS | Returns valid RFC 3339 timestamp parseable by chrono |
+| Helper: `git_vcs_info()` | PASS | Returns `Some(VcsInfo)` with 40-char hex SHA inside a git repo |
+| Builder tests (9) | PASS | All constructor + builder chain tests pass |
+| Serialization tests (12) | PASS | All type serialization/deserialization tests pass |
+| Clippy | PASS | Zero clippy warnings on agent_traces module |
+| Context sync | PASS | `context/agent-traces.md` updated; `context/context-map.md` has links |
+
+### Files
+
+| File | Lines | Status |
+|------|-------|--------|
+| `src/agent_traces.rs` | ~860 | Module with all types, builders, helpers, and tests |
+| `src/main.rs` | +1 line | `mod agent_traces;` at line 11 |
+| `context/plans/agent-traces-module.md` | ~80 | Plan file with all 5 tasks completed |
+| `context/agent-traces.md` | ~55 | Domain documentation for the Agent Trace module |
+| `context/context-map.md` | +2 lines | Links to agent-traces domain doc and plan |
+
+### Notes
+
+- Full `cargo test` cannot be run due to pre-existing compilation error in `llm/agent.rs` (unrelated trait bound issue). All module tests verified via standalone compilation and test runner.
+- Builder tests and helper functions were lost between sessions (file is untracked); restored in T05.
 
 ## Open Questions
 
