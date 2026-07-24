@@ -9,28 +9,26 @@
 //! ```rust
 //! use fyah::agent_traces::*;
 //!
-//! let record = TraceRecord {
-//!     version: String::from("0.1.0"),
-//!     id: String::from("550e8400-e29b-41d4-a716-446655440000"),
-//!     timestamp: String::from("2026-01-23T14:30:00Z"),
-//!     vcs: None,
-//!     tool: None,
-//!     files: vec![],
-//!     metadata: None,
-//! };
+//! let record = TraceRecord::new(
+//!     "0.1.0",
+//!     "550e8400-e29b-41d4-a716-446655440000",
+//!     "2026-01-23T14:30:00Z",
+//!     vec![],
+//! );
 //!
 //! let json = serde_json::to_value(&record).unwrap();
 //! assert_eq!(json["version"], "0.1.0");
 //! ```
 
 use serde::{Deserialize, Serialize};
+use valuable::Valuable;
 
 // ---------------------------------------------------------------------------
 // Contributor types
 // ---------------------------------------------------------------------------
 
 /// The type of entity that produced a contribution.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Valuable, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContributorType {
     /// Code authored directly by a human developer.
@@ -47,15 +45,15 @@ pub enum ContributorType {
 ///
 /// Present at the conversation level (for all ranges in that conversation)
 /// and optionally overridable per-range.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct Contributor {
     /// The contributor type.
     #[serde(rename = "type")]
-    pub contributor_type: ContributorType,
+    contributor_type: ContributorType,
     /// The model's unique identifier following the models.dev convention
     /// (e.g. `"anthropic/claude-opus-4-5-20251101"`).  Max 250 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
+    model_id: Option<String>,
 }
 
 impl Contributor {
@@ -106,19 +104,19 @@ impl Contributor {
 ///
 /// Line numbers are 1-indexed and reference positions at the recorded
 /// VCS revision.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct RangeEntry {
     /// Start line number (1-indexed).
-    pub start_line: u32,
+    start_line: u32,
     /// End line number (1-indexed, inclusive).
-    pub end_line: u32,
+    end_line: u32,
     /// Hash of the attributed content for position-independent tracking.
     /// Format: `"<algorithm>:<hex>"` (e.g. `"murmur3:9f2e8a1b"`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
+    content_hash: Option<String>,
     /// Per-range contributor override (e.g. for agent handoffs).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contributor: Option<Contributor>,
+    contributor: Option<Contributor>,
 }
 
 impl RangeEntry {
@@ -146,13 +144,13 @@ impl RangeEntry {
 }
 
 /// A link to a related resource (session, prompt, etc.).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct RelatedResource {
     /// The type of relationship (e.g. `"session"`, `"prompt"`).
     #[serde(rename = "type")]
-    pub resource_type: String,
+    resource_type: String,
     /// URL to the related resource.
-    pub url: String,
+    url: String,
 }
 
 impl RelatedResource {
@@ -169,20 +167,20 @@ impl RelatedResource {
 ///
 /// Groups one or more line ranges under a single contributor and optional
 /// URL pointing to the conversation that produced them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct Conversation {
     /// URL to look up the conversation that produced this code.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    url: Option<String>,
     /// The contributor for ranges in this conversation (can be overridden
     /// per-range).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contributor: Option<Contributor>,
+    contributor: Option<Contributor>,
     /// Line ranges produced by this conversation.
-    pub ranges: Vec<RangeEntry>,
+    ranges: Vec<RangeEntry>,
     /// Other related resources (sessions, prompts, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub related: Option<Vec<RelatedResource>>,
+    related: Option<Vec<RelatedResource>>,
 }
 
 impl Conversation {
@@ -220,12 +218,12 @@ impl Conversation {
 // ---------------------------------------------------------------------------
 
 /// A file with attributed ranges.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct FileEntry {
     /// Relative file path from repository root.
-    pub path: String,
+    path: String,
     /// Conversations that contributed to this file.
-    pub conversations: Vec<Conversation>,
+    conversations: Vec<Conversation>,
 }
 
 impl FileEntry {
@@ -249,7 +247,7 @@ impl FileEntry {
 // ---------------------------------------------------------------------------
 
 /// Supported version control systems.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Valuable, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VcsType {
     /// Git.
@@ -263,13 +261,13 @@ pub enum VcsType {
 }
 
 /// Version control system information for a trace.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct VcsInfo {
     /// The VCS type.
     #[serde(rename = "type")]
-    pub vcs_type: VcsType,
+    vcs_type: VcsType,
     /// Revision identifier (git commit SHA, jj change ID, hg changeset, etc.).
-    pub revision: String,
+    revision: String,
 }
 
 impl VcsInfo {
@@ -290,14 +288,14 @@ impl VcsInfo {
 ///
 /// Named `AgentToolInfo` to avoid collision with the existing
 /// [`Tool`](crate::tools::types::Tool) enum in the codebase.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct AgentToolInfo {
     /// Tool name (e.g. `"cursor"`, `"claude"`, `"fyah"`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    name: Option<String>,
     /// Tool version (e.g. `"2.4.0"`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
+    version: Option<String>,
 }
 
 impl AgentToolInfo {
@@ -336,25 +334,26 @@ impl Default for AgentToolInfo {
 ///
 /// Captures a snapshot of AI contributions to files at a specific VCS
 /// revision, grouped by conversation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Valuable, Serialize, Deserialize)]
 pub struct TraceRecord {
     /// Agent Trace specification version (e.g. `"0.1.0"`).
-    pub version: String,
+    version: String,
     /// Unique identifier for this trace record (UUID).
-    pub id: String,
+    id: String,
     /// RFC 3339 timestamp when the trace was recorded.
-    pub timestamp: String,
+    timestamp: String,
     /// Version control system information.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub vcs: Option<VcsInfo>,
+    vcs: Option<VcsInfo>,
     /// The tool that generated this trace.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool: Option<AgentToolInfo>,
+    tool: Option<AgentToolInfo>,
     /// Files with attributed ranges.
-    pub files: Vec<FileEntry>,
+    files: Vec<FileEntry>,
     /// Additional metadata (implementation-specific or vendor-specific data).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    #[valuable(skip)]
+    metadata: Option<serde_json::Value>,
 }
 
 impl TraceRecord {
@@ -428,6 +427,61 @@ pub fn git_vcs_info() -> Option<VcsInfo> {
     } else {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience macro
+// ---------------------------------------------------------------------------
+
+/// Create a `TraceRecord` with standard fields pre-filled.
+///
+/// Automatically populates:
+/// - `version`: `"0.1.0"` (current Agent Trace spec version)
+/// - `id`: UUID v7 via [`generate_id()`]
+/// - `timestamp`: RFC 3339 UTC now via [`now_utc()`]
+/// - `vcs`: Git VCS info via [`git_vcs_info()`] (or `None` outside a git repo)
+/// - `tool`: `AgentToolInfo` with name `"fyah"` and version from `Cargo.toml`
+///
+/// # Examples
+///
+/// ```rust
+/// use fyah::agent_traces::*;
+///
+/// // Minimal — just files
+/// let r = trace_record!(vec![]);
+/// assert_eq!(r.version, "0.1.0");
+///
+/// // With metadata
+/// let r = trace_record!(vec![], metadata: serde_json::json!({"k": "v"}));
+/// assert_eq!(r.metadata.unwrap()["k"], "v");
+/// ```
+#[macro_export]
+macro_rules! trace_record {
+    // Pattern: files only
+    ($files:expr $(,)?) => {{
+        let record = $crate::agent_traces::TraceRecord::new(
+            "0.1.0",
+            $crate::agent_traces::generate_id(),
+            $crate::agent_traces::now_utc(),
+            $files,
+        )
+        .with_tool(
+            $crate::agent_traces::AgentToolInfo::new()
+                .with_name("fyah")
+                .with_version(env!("CARGO_PKG_VERSION")),
+        );
+
+        // Attach VCS info only when available (e.g., not outside a git repo).
+        match $crate::agent_traces::git_vcs_info() {
+            Some(vcs) => record.with_vcs(vcs),
+            None => record,
+        }
+    }};
+    // Pattern: files + metadata
+    ($files:expr, metadata: $metadata:expr $(,)?) => {{
+        let record = trace_record!($files);
+        record.with_metadata($metadata)
+    }};
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,5 +1061,54 @@ mod tests {
         assert_eq!(record.version, "0.1.0");
         assert_eq!(record.id.len(), 36);
         assert!(record.timestamp.contains('T'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Macro tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn macro_trace_record_basic() {
+        let record = trace_record!(vec![]);
+        assert_eq!(record.version, "0.1.0");
+        assert_eq!(record.id.len(), 36, "must generate UUID v7");
+        assert!(record.timestamp.contains('T'), "must be RFC 3339 timestamp");
+        // VCS is optional — populated when inside a git repository.
+        if git_vcs_info().is_some() {
+            assert!(record.vcs.is_some(), "vcs should match git_vcs_info()");
+        }
+        let tool = record.tool.expect("tool should be set");
+        assert_eq!(tool.name.as_deref(), Some("fyah"));
+        assert!(record.files.is_empty());
+        assert!(record.metadata.is_none());
+    }
+
+    #[test]
+    fn macro_trace_record_with_metadata() {
+        let record = trace_record!(
+            vec![],
+            metadata: serde_json::json!({"confidence": 0.95, "env": "test"})
+        );
+        assert_eq!(record.metadata.as_ref().unwrap()["confidence"], 0.95);
+        assert_eq!(record.metadata.as_ref().unwrap()["env"], "test");
+    }
+
+    #[test]
+    fn macro_trace_record_round_trips_through_json() {
+        let record = trace_record!(
+            vec![FileEntry::new("src/main.rs").with_conversations(vec![
+                Conversation::new(vec![RangeEntry::new(1, 10)])
+                    .with_contributor(Contributor::ai("test/model")),
+            ])],
+            metadata: serde_json::json!({"key": "val"})
+        );
+
+        let json = serde_json::to_value(&record).unwrap();
+        let deserialized: TraceRecord = serde_json::from_value(json).unwrap();
+
+        assert_eq!(deserialized.version, "0.1.0");
+        assert_eq!(deserialized.files.len(), 1);
+        assert_eq!(deserialized.files[0].path, "src/main.rs");
+        assert_eq!(deserialized.metadata.unwrap()["key"], "val");
     }
 }

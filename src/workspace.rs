@@ -11,7 +11,7 @@ use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
 
 use crate::config::Config;
 use crate::hooks::HooksConfig;
-use crate::llm::Config as LlmConfig;
+use crate::llm::{Config as LlmConfig, ProviderRegistry};
 use crate::tools::ToolRegistry;
 
 /// Events emitted by the filesystem watcher.
@@ -24,6 +24,8 @@ pub enum WatchedEvent {
     /// A tool file was removed from the tools directory.
     ToolRemoved(PathBuf),
 }
+
+//TODO: add an event for when the context dir content changes, so we can update the context in the workspace
 
 /// Map a notify event to a [`WatchedEvent`] based on the watched paths.
 fn classify_event(
@@ -47,19 +49,24 @@ fn classify_event(
     None
 }
 
-#[derive(Clone)]
+//TODO: create a Workpsace builder, this structure will be used to gather all the information about the workspace, such as the hooks to be executed, the llm configuration, the tools available in this workspace, the sessions that have been created and the files that are being used in this workspace. This structure will be shared between threads and will be updated by the filesystem watcher when changes are detected in the configuration file or in the tools directory.
+// we can drive the workspace from the configuration file, use a pipeline or some type thing to update so we can have a dynamic version of it.
+
+#[derive(Debug, Clone)]
 pub struct Workspace(Arc<RwLock<WorkspaceInner>>);
 
 impl Workspace {
     pub fn new(config: Config) -> Self {
         let (hooks, llm_config, tools_config) = config.into_parts();
         let mut tool_registry = ToolRegistry::default();
+        let providers = ProviderRegistry::default(); //TODO: populate and add the reload logic
         tool_registry.reload_from_config(tools_config);
         let inner = WorkspaceInner {
             version: AtomicU16::new(0),
             hooks,
             llm_config,
             tool_registry,
+            providers,
             files: Vec::new(),
             sessions: HashMap::new(),
             context: HashMap::new(),
@@ -75,12 +82,17 @@ impl std::ops::Deref for Workspace {
     }
 }
 
+/// Structure that holds all the information about the workspace. The workspace information needed are hooks to be executed, llm related configuration such as
+/// available models or providers. The tools available declared in the configuration file. The workspace also has information about the sessions that occured in this
+/// workspace. I also keeps track of the files that are being used in this workspace and the context of the SCE.
+#[derive(Debug)]
 pub struct WorkspaceInner {
     version: AtomicU16,
     hooks: HooksConfig,
     llm_config: LlmConfig,
     /// Shared tools available in this workpspace
     tool_registry: ToolRegistry,
+    providers: ProviderRegistry,
     files: Vec<PathBuf>,
     sessions: HashMap<String, PathBuf>, // TODO: find a why to save the sessions' state to disk and have the path here
     context: HashMap<String, HashMap<String, Vec<PathBuf>>>, // SCE context
@@ -106,6 +118,10 @@ impl WorkspaceInner {
 
     pub fn hooks(&self) -> &HooksConfig {
         &self.hooks
+    }
+
+    pub fn providers(&self) -> &ProviderRegistry {
+        &self.providers
     }
 }
 
@@ -201,6 +217,15 @@ fn watcher_loop(
         eprintln!("fs_watcher: failed to watch config: {e}");
         return;
     }
+
+    // We assume the config is at the root of the workspace, at the same level as the context dir
+    config_path.parent().as_mut().map(|p| {
+        // Whatch the files in the context of sce, idk how we could dynamically get this path
+        p.join("context");
+        if let Err(e) = debouncer.watch(p, RecursiveMode::Recursive) {
+            eprintln!("fs_watcher: failed to watch config parent: {e}");
+        }
+    });
 
     for result in debouncer_rx {
         if stop_rx.try_recv().is_ok() {

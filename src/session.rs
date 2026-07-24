@@ -1,14 +1,11 @@
+use std::fmt::Display;
 use std::sync::Arc;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-
-use tracing::info;
-
-use crate::context::ContextManagement;
-use crate::hooks::HooksConfig;
-use crate::llm::AgentProxy;
-use crate::llm::agent::{self, ProxyError};
+use crate::context::SessionContext;
+use crate::llm::spawn;
+use crate::llm::{AgentError, };
 use crate::workspace::Workspace;
 use crate::workspace::WorkspaceInner;
 use tokio::task::JoinError;
@@ -18,9 +15,8 @@ use crate::transport::Transport;
 
 #[derive(Debug)]
 pub enum SpawnError {
-    Proxy(ProxyError),
     Join(JoinError),
-    Agent(agent::Error),
+    Agent(AgentError),
 }
 
 impl std::fmt::Display for SpawnError {
@@ -43,11 +39,6 @@ impl std::error::Error for SpawnError {
     }
 }
 
-impl From<ProxyError> for SpawnError {
-    fn from(e: ProxyError) -> Self {
-        SpawnError::Proxy(e)
-    }
-}
 
 impl From<JoinError> for SpawnError {
     fn from(e: JoinError) -> Self {
@@ -55,8 +46,8 @@ impl From<JoinError> for SpawnError {
     }
 }
 
-impl From<agent::Error> for SpawnError {
-    fn from(e: agent::Error) -> Self {
+impl From<AgentError> for SpawnError {
+    fn from(e: AgentError) -> Self {
         SpawnError::Agent(e)
     }
 }
@@ -64,33 +55,30 @@ impl From<agent::Error> for SpawnError {
 //TODO: maybe we need a runtime to drive the agent/s so they follow the steps that we want and this in a deterministic way. And another layer that bridges context agregation, agents orchestration, users communication and the fs_watcher so the 'knowledge' is updated
 
 //TODO: do we need this runtime? we need a way to manage agents and let the user send promts, that's all. However the back and forth between the agent and user is fairly common
-pub struct Session<T: Transport, Ctx: ContextManagement, Ap: AgentProxy> {
+pub struct Session<T, Message: Display> {
     id: String,
     user_channel: T,
-    agents: Ap,
     cancelled: Arc<AtomicBool>,
     //TODO: maybe this context should be a bit different, we could have a map that stores context from different agents
-    context: Ctx,
+    context: SessionContext<Message>,
     /// Shared state: config, tools, and filesystem bridge.
     workspace: Workspace,
-    //TODO: mayeb context and workspace should be a big crdt what we send messages to to update the state?
     runtime: tokio::runtime::Runtime,
 }
 
-impl<T: Transport, Ctx: ContextManagement, Ap: AgentProxy> Session<T, Ctx, Ap> {
+impl<T, Message: Display  > Session<T,  Message> {
     pub fn new(
         id: String,
         user_channel: T,
-        agents: Ap,
         cancelled: Arc<AtomicBool>,
-        context: Ctx,
+        context: SessionContext<Message>,
         workspace: Workspace,
         runtime: tokio::runtime::Runtime,
     ) -> Self {
         Self {
             id,
             user_channel,
-            agents,
+
             cancelled,
             context,
             workspace,
@@ -114,7 +102,7 @@ impl<T: Transport, Ctx: ContextManagement, Ap: AgentProxy> Session<T, Ctx, Ap> {
     ) -> Result<(), SpawnError> {
         let agent_context = {
             let workspace = self.workspace.read().unwrap();
-            let handle = Ap::spawn(
+            let handle = spawn(
                 workspace.llm_config(),
                 provider,
                 model,
@@ -128,7 +116,7 @@ impl<T: Transport, Ctx: ContextManagement, Ap: AgentProxy> Session<T, Ctx, Ap> {
     }
 
     /// Write a message to the user (ignores I/O errors).
-    pub fn write(&mut self, msg: &str) {
+    pub fn write(&mut self, msg: &str) where T: Transport {
         let _ = self.user_channel.write(msg.to_owned().into());
     }
 

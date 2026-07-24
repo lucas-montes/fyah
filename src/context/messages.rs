@@ -1,81 +1,34 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "role", rename_all = "lowercase")]
-pub enum Message {
-    User {
-        content: String,
-    },
-    Assistant {
-        content: Option<String>, //TODO: change to String? this should always be full?
-        tool_calls: Option<Vec<ToolCall>>,
-    },
-    Tool {
-        tool_call_id: String,
-        content: String,
-    },
-}
-
-impl Message {
-    /// Total length of text content across all fields (for rough token estimation).
-    pub fn content_len(&self) -> usize {
-        match self {
-            Message::User { content } => content.len(),
-            Message::Assistant {
-                content,
-                tool_calls,
-            } => {
-                let c = content.as_ref().map(|s| s.len()).unwrap_or(0);
-                let t = tool_calls
-                    .as_ref()
-                    .map(|calls| calls.iter().map(|tc| tc.estimate_len()).sum())
-                    .unwrap_or(0);
-                c + t
-            }
-            Message::Tool { content, .. } => content.len(),
-        }
-    }
-
-    pub fn new_user(content: String) -> Self {
-        Message::User { content }
-    }
-
-    pub fn new_tool(tool_call_id: String, content: String) -> Self {
-        Message::Tool {
-            tool_call_id,
-            content,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+/// A tool call returned by an LLM in wire format.
+///
+/// This is distinct from [`ContentBlock::ToolCall`](crate::core::message::ContentBlock::ToolCall)
+/// — this struct is the raw deserialization format from OpenAI-compatible APIs.
+/// Conversion to the canonical representation happens in provider implementations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    id: String,
+    /// Unique identifier for this tool call (used to correlate results).
+    pub id: String,
     #[serde(rename = "type")]
     _tool_type: String,
-    function: ToolCallFunction,
+    /// The function name and arguments to invoke.
+    pub function: ToolCallFunction,
 }
 
 impl ToolCall {
+    /// Split this tool call into its ID and function descriptor.
     pub fn split(&self) -> (String, &ToolCallFunction) {
         (self.id.to_owned(), &self.function)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// The function name and arguments portion of a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallFunction {
-    name: String,
-    // TODO: this can be a json
-    arguments: String,
-}
-
-impl ToolCall {
-    fn estimate_len(&self) -> usize {
-        self.id.len()
-            + self._tool_type.len()
-            + self.function.name.len()
-            + self.function.arguments.len()
-    }
+    /// The function/tool name to invoke.
+    pub name: String,
+    /// Raw JSON argument string (parsed by the tool registry).
+    pub arguments: String,
 }
 
 impl ToolCallFunction {
@@ -87,10 +40,12 @@ impl ToolCallFunction {
         }
     }
 
+    /// The tool/function name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Parse the arguments string as JSON.
     pub fn function_args(&self) -> Result<serde_json::Value, serde_json::Error> {
         serde_json::from_str(&self.arguments)
     }

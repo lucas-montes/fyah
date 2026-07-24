@@ -34,6 +34,8 @@ uuid = { version = "1.23.3", features = ["v7"] }
 notify = { version = "9.0.0-rc.4", features = ["serde"] }
 notify-types = "2.1"
 notify-debouncer-full = "0.8.0-rc.2"
+valuable = { version = "0.1.1", features = ["derive"] }
+valuable-serde = "0.1.1"
 
 [workspace.lints.clippy]
 all = { level = "deny" }

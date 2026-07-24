@@ -6,18 +6,19 @@
 
 // Binary crate: dead code from pre-wired features (LLM client, context strategies,
 // tool calling) is expected until wiring tasks are implemented.
-#![allow(dead_code)]
 
 mod agent_traces;
 mod config;
 mod context;
 mod hooks;
 mod llm;
+mod runtime;
 mod session;
 mod steps;
 mod tools;
 mod transport;
 mod workspace;
+mod map;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -25,7 +26,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
 use clap::Parser;
-use tokio::runtime;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
@@ -34,8 +34,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use crate::context::SimpleContext;
-use crate::llm::AgentProxyImpl;
+use crate::context::SessionContext;
 use crate::steps::Plan;
 use crate::workspace::{FsBridge, Workspace};
 use crate::{config::Config, session::Session, transport::StdinTransport};
@@ -94,28 +93,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .clone();
 
-    let context = SimpleContext::default();
-
     // Extract config path before consuming config with Workspace::new.
     let config_path = config.source_path().map(|p| p.to_path_buf());
 
     // Create Workspace (consumes Config, populates ToolRegistry internally).
     let workspace = Workspace::new(config);
 
+    //TODO: maybe we need two different workspaces? one that holds all the actual workspace info and another focused on stuff for the agent
+
     // Spawn the background filesystem watcher (FsBridge).
     // FsBridge::spawn handles missing/dead config_path internally —
     // if it can't watch, it logs a warning and returns a no-op bridge.
     let _fs_bridge = config_path.map(|path| FsBridge::spawn(workspace.clone(), path));
 
-    let runtime = runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
 
+    // TODO: We need to also pass a storage interface
+
+
+    //TODO: we should get the context from the workspace
+    let context = SessionContext::default();
+
     let session = Session::new(
         Uuid::now_v7().to_string(),
         transport,
-        AgentProxyImpl,
         cancelled,
         context,
         workspace,

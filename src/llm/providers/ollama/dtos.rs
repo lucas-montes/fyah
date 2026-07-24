@@ -7,24 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `POST /api/chat` request body.
-///
-/// All optional fields default to `None` (omitted from JSON via `skip_serializing_if`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct ChatRequest {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Config {
     /// Model name (required).
     model: String,
-
-    /// Chat history as an array of message objects (required).
-    messages: Vec<ChatMessage>,
-
-    /// Optional list of function tools the model may call during the chat.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
-
-    /// Format to return a response in — `"json"` or a JSON schema object.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<Format>,
 
     /// Runtime options that control text generation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,7 +18,7 @@ struct ChatRequest {
 
     /// Whether to stream the response (default: `true`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
+    stream: Option<bool>, //default to true
 
     /// When set, returns separate thinking output in addition to content.
     /// Can be a boolean (`true`/`false`) or a string (`"high"`, `"medium"`, `"low"`, `"max"`).
@@ -50,11 +36,37 @@ struct ChatRequest {
     /// Number of most likely tokens to return at each token position.
     #[serde(skip_serializing_if = "Option::is_none")]
     top_logprobs: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<Format>,
 }
 
 /// A single message in the chat history.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct ChatMessage {
+#[derive(Debug, Serialize)]
+pub struct ChatRequest<'a> {
+    messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ToolDefinition>>,
+    #[serde(flatten)]
+    config: &'a Config,
+}
+
+impl<'a> ChatRequest<'a> {
+    pub fn new(
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        config: &'a Config,
+    ) -> Self {
+        Self {
+            messages,
+            tools,
+            config,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Message {
     /// Author of the message: `system`, `user`, `assistant`, or `tool`.
     role: MessageRole,
 
@@ -71,7 +83,7 @@ struct ChatMessage {
 }
 
 /// Role of a message author.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MessageRole {
     System,
@@ -81,13 +93,13 @@ enum MessageRole {
 }
 
 /// A tool call produced by the model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ToolCall {
     function: ToolCallFunction,
 }
 
 /// Function details within a tool call.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ToolCallFunction {
     /// Name of the function to call.
     name: String,
@@ -102,7 +114,7 @@ struct ToolCallFunction {
 }
 
 /// A tool definition exposed to the model (in the request).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ToolDefinition {
     /// Always `"function"` for function-type tools.
     #[serde(rename = "type")]
@@ -113,7 +125,7 @@ struct ToolDefinition {
 }
 
 /// Function definition within a tool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct FunctionDef {
     /// Function name exposed to the model.
     name: String,
@@ -127,7 +139,7 @@ struct FunctionDef {
 }
 
 /// Format control — either the string `"json"` or a JSON schema object.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Format {
     /// Simple `"json"` mode.
@@ -137,14 +149,14 @@ enum Format {
 }
 
 /// The string `"json"` used to request JSON mode.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum JsonMode {
     Json,
 }
 
 /// Thinking level — controls the amount of reasoning the model exposes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum ThinkLevel {
     /// Boolean toggle: `true` / `false`.
@@ -153,7 +165,7 @@ enum ThinkLevel {
     Level(ThinkLevelStr),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ThinkLevelStr {
     High,
@@ -163,7 +175,7 @@ enum ThinkLevelStr {
 }
 
 /// Keep-alive duration — either a string like `"5m"` or a number (seconds/0 to unload).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum KeepAlive {
     Duration(String),
@@ -171,7 +183,7 @@ enum KeepAlive {
 }
 
 /// Runtime options that control text generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ModelOptions {
     /// Random seed used for reproducible outputs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,7 +219,7 @@ struct ModelOptions {
 }
 
 /// Stop sequences — either a single string or an array of strings.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Stop {
     Single(String),
@@ -219,8 +231,8 @@ enum Stop {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// `POST /api/chat` response body (non-streaming).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct ChatResponse {
+#[derive(Debug, Deserialize)]
+pub struct ChatResponse {
     /// Model name used to generate this message.
     model: String,
 
@@ -267,7 +279,7 @@ struct ChatResponse {
 }
 
 /// The assistant's response message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ResponseMessage {
     /// Always `"assistant"` for model responses.
     role: String,
@@ -295,7 +307,7 @@ struct ResponseMessage {
 /// SSE streaming event (`application/x-ndjson`).
 ///
 /// Each line is a separate JSON object, with `done: true` on the final event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ChatStreamEvent {
     /// Model name used for this stream event.
     model: String,
@@ -311,7 +323,7 @@ struct ChatStreamEvent {
 }
 
 /// Partial message content within a streaming event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct StreamMessage {
     /// Role of the message for this chunk.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,7 +351,7 @@ struct StreamMessage {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Log probability information for a generated token.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Logprob {
     /// The text representation of the token.
     token: String,
@@ -356,7 +368,7 @@ struct Logprob {
 }
 
 /// Log probability information for a single token alternative.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct TokenLogprob {
     /// The text representation of the token.
     token: String,
@@ -368,3 +380,33 @@ struct TokenLogprob {
     #[serde(skip_serializing_if = "Option::is_none")]
     bytes: Option<Vec<u32>>,
 }
+
+// ── ChatResponse trait impl ─────────────────────────────────────────────────
+
+// impl crate::llm::client::ChatResponse for ChatResponse {
+//     fn message(self) -> Message {
+//         let mut blocks: Vec<ContentBlock> = Vec::new();
+//         if !self.message.content.is_empty() {
+//             blocks.push(ContentBlock::Text(self.message.content));
+//         }
+//         if let Some(tool_calls) = self.message.tool_calls {
+//             for tc in tool_calls {
+//                 let arguments = tc.function.arguments.unwrap_or(serde_json::Value::Null);
+//                 blocks.push(ContentBlock::ToolCall {
+//                     id: String::new(),
+//                     name: tc.function.name,
+//                     arguments,
+//                 });
+//             }
+//         }
+//         Message::new(Role::Assistant, blocks)
+//     }
+
+//     fn tool_calls(&self) -> Option<&Vec<crate::context::ToolCall>> {
+//         None
+//     }
+
+//     fn content(&self) -> Option<&String> {
+//         Some(&self.message.content)
+//     }
+// }

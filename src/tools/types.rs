@@ -36,21 +36,21 @@ pub trait FunctionDef {
 /// Used as the payload of [`Tool::Function`] and also reused in
 /// [`CustomToolConfig`](crate::tools::config::CustomToolConfig) via
 /// `#[serde(flatten)]`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionTool {
     /// The function name (e.g. `"read_file"`).
-    name: Cow<'static, str>,
+    pub(crate) name: Cow<'static, str>,
     /// Explains the function's purpose.
-    description: Cow<'static, str>,
+    pub(crate) description: Cow<'static, str>,
     /// JSON Schema describing the function's parameters.
-    parameters: ToolParameters,
+    pub(crate) parameters: ToolParameters,
 }
 
 /// A file-search tool definition.
 ///
 /// Used as the payload of [`Tool::FileSearch`] and also in
 /// `[tools]` configuration.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSearchTool {
     /// Which vector stores to search.
     vector_store_ids: Vec<String>,
@@ -68,7 +68,7 @@ pub struct FileSearchTool {
 /// - The `label` field serializes as `"server_label"` (wire format) but also
 ///   accepts `"name"` in TOML config via `#[serde(alias)]`.
 /// - `server_description` is omitted from JSON when `None`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
     /// A label to identify the server.
     /// Serialized as `"server_label"` in JSON; accepts `"name"` in TOML.
@@ -98,7 +98,7 @@ pub struct McpTool {
 /// {"type": "web_search"}
 /// {"type": "code_interpreter"}
 /// ```
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Tool {
     /// A function the model may call — JSON Schema for the arguments.
@@ -123,7 +123,7 @@ pub enum Tool {
 ///
 /// String fields (except map keys) use [`Cow<'static, str>`] since most
 /// values are statically known (e.g. `"object"` for `param_type`).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolParameters {
     /// The schema type — always `"object"`.
     #[serde(rename = "type")]
@@ -139,7 +139,7 @@ pub struct ToolParameters {
 /// Both fields use [`Cow<'static, str>`] since `property_type` is always
 /// a static string like `"string"` or `"integer"`, and descriptions are
 /// often doc-comment literals from the derive macro.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolProperty {
     /// The JSON Schema type (e.g. `"string"`, `"integer"`).
     #[serde(rename = "type")]

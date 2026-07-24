@@ -1,24 +1,27 @@
+use std::{
+    collections::VecDeque,
+    fmt::{Debug, Display},
+};
+
+use serde::{Serialize, de::DeserializeOwned};
+
 use crate::{
-    context::{ContextManagement, Message, SlidingWindowContext, ToolCallFunction},
-    llm::client::{ChatResponse, ChatResponseChoice},
+    context::{AgentContext, SessionContext, ToolCallFunction},
+    core::message::Message,
+    llm::middlewares::{ContextBuilder, ContextCompaction, PromptBuilder, ToolsFilter},
 };
 
 use super::{
     client::{self, LlmClient},
     config::Config,
+    providers::DynProvider,
 };
 
 #[derive(Debug)]
 pub enum Error {
-    Client(client::Error),
+    Client(String),
     Context(String),
     ToolCall(String),
-}
-
-impl From<client::Error> for Error {
-    fn from(err: client::Error) -> Self {
-        Error::Client(err)
-    }
 }
 
 impl From<serde_json::Error> for Error {
@@ -83,44 +86,23 @@ impl Error {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Agent — the reasoning loop
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// Outcome of a single agent step.
-pub enum StepOutcome {
-    /// Agent produced messages with tool calls — caller should execute tools.
-    ToolCalls(Vec<Message>),
-    /// Agent produced a final response — done.
-    Final(Vec<Message>),
-    /// Agent was cancelled.
-    Cancelled,
+impl Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("max_iterations", &self.max_iterations)
+            .field("prompt_builder", &"PromptBuilder")
+            .field("provider", &"Provider")
+            .finish()
+    }
 }
 
-/// The core reasoning loop.
-pub trait AgentRuntime<Cl: LlmClient, Ctx: ContextManagement> {
-    /// Execute one turn:
-    ///   1. Build ContextDraft from context
-    ///   2. Run the ContextPipeline
-    ///   3. Convert processed draft → provider request (via From blanket)
-    ///   4. Send via client
-    ///   5. Parse response → Vec<Message> (via From blanket on response)
-    ///   6. Return outcome
-    fn step<'a>(
-        &'a mut self,
-        // cancel: &'a CancellationToken,
-    ) -> impl Future<Output = Result<StepOutcome, AgentError>>;
-
-    /// Consume the agent and return accumulated context.
-    fn finish(self: Box<Self>) -> Ctx;
-}
-
-#[derive(Debug)]
-pub enum AgentError {
-    // Client(ClientError),
-    // Stage(StageError),
-    // Cancelled,
-    // ToolExecution(String),
+struct AgentConfig {
+    max_iterations: u32,
+    prompt_builder: Box<dyn PromptBuilder>,
+    context_builder: Box<dyn ContextBuilder>,
+    context_compaction: Box<dyn ContextCompaction>,
+    tools_filter: Box<dyn ToolsFilter<String>>,
+    provider: Box<dyn DynProvider>,
 }
 
 /// A configured LLM agent ready to process prompts.
@@ -128,59 +110,69 @@ pub enum AgentError {
 /// Generic over `Ctx: ContextManagement` for the conversation history store.
 /// Client is the concrete production reqwest-based implementation.
 #[derive(Debug)]
-pub struct Agent<Client: LlmClient, Ctx: ContextManagement> {
+pub struct Agent<Client: LlmClient> {
     /// Conversation history store + files + tools + hooks
-    context: Ctx,
-    /// LLM API client (url + api_key + model).
+    context: AgentContext,
     client: Client,
-    /// Maximum iterations for the agent loop.
-    max_iterations: u32,
-    /// Optional system prompt.
-    system_prompt: Option<String>,
-    /// Effective temperature (model default overridden by agent config).
-    temperature: f64,
+    config: AgentConfig, //TODO: how to make this hot-reloadable?
 }
 
-impl<Client: LlmClient, Ctx: ContextManagement> Agent<Client, Ctx> {
+impl<Client: LlmClient> Agent<Client> {
     //TODO: we should check how to leverage more lifetimes as we only want to reference the context of the runtime and have some more information
-    async fn run(mut self) -> Result<Ctx, Error> {
-        let mut tool_calls_messages = Vec::new();
+    async fn run(mut self) -> Result<AgentContext, Error> {
+        let mut tool_calls_messages = VecDeque::new();
 
         //TODO: we probably need to add hooks
         //TODO: how to correctly stop this mid-way?
 
-        loop {
-            let prompt = (&self.context).into();
-            let mut response = self.client.chat_completion(&prompt).await?;
+        for _ in 0..self.config.max_iterations {
+            let prompt = self.config.prompt_builder.build(&self.context);
+            let request = self.client.create_request(reqwest::Method::POST, self.config.provider.url());
+            let request = self
+                .config
+                .provider
+                .create_request(&prompt, request);
 
-            if let Some(choice) = response.next_choice() {
-                let tool_calls = choice.tool_calls();
+            let response = Client::send_request(request)
+                .await
+                .map_err(|e| Error::Client(e.to_string()))?;
 
-                //NOTE: this is the idea? can it be empty?
-                if tool_calls.is_none_or(|t| t.is_empty()) {
-                    println!(
-                        "{}",
-                        choice.content().expect(
-                            "I think that we should expect a content as the tool calls is empty"
-                        )
-                    );
-                    break;
-                }
+            let response = self
+                .config
+                .provider
+                .parse_response(response.as_ref())
+                .map_err(|e| Error::Client(e.to_string()))?;
 
-                if let Some(tool_calls) = tool_calls {
-                    //TODO: add some filter to avoid calling tools we don't allow like running rm -rf /
-                    for tool_call in tool_calls {
-                        let (tool_call_id, tool_call_function) = tool_call.split();
+            let tool_calls = response.tool_calls();
 
-                        let result = handle_tool_call(&tool_call_function)?;
-
-                        tool_calls_messages.push(Message::new_tool(tool_call_id, result));
-                    }
-                }
-
-                self.context.add_message(choice.message());
-                self.context.append_messages(&mut tool_calls_messages);
+            //NOTE: this is the idea? can it be empty?
+            if tool_calls.is_none_or(|t| t.is_empty()) {
+                println!(
+                    "{}",
+                    response.content().expect(
+                        "I think that we should expect a content as the tool calls is empty"
+                    )
+                );
+                break;
             }
+
+            if let Some(tool_calls) = tool_calls {
+                //TODO: add some filter to avoid calling tools we don't allow like running rm -rf /
+                for tool_call in tool_calls {
+                    let (tool_call_id, tool_call_function) = tool_call.split();
+
+                    let result = handle_tool_call(&tool_call_function)?;
+
+                    tool_calls_messages.push_back(Message::tool(tool_call_id, result));
+                }
+            }
+
+            tool_calls_messages.push_front(response);
+            self.config
+                .context_builder
+                .handle_new_messages(&mut tool_calls_messages, &mut self.context);
+            self.config.context_compaction.compact(&mut self.context);
+            //TODO:
         }
 
         Ok(self.context)
@@ -221,61 +213,53 @@ impl std::fmt::Display for ProxyError {
 
 impl std::error::Error for ProxyError {}
 
-pub trait AgentProxy {
-    fn spawn(
-        config: &Config,
-        provider_name: &str,
-        model: &str,
-        agent_name: &str,
-        session_context: &impl ContextManagement,
-    ) -> Result<impl Future<Output = Result<impl ContextManagement + 'static, Error>>, ProxyError>;
-}
+pub fn spawn(
+    llm_config: &Config,
+    provider_name: &str,
+    model: &str,
+    agent_name: &str,
+    session_context: &SessionContext,
+) -> Result<impl Future<Output = Result<AgentContext, Error>>, ProxyError> {
+    //TODO: we probably need to add hooks
+    let agent_cfg = llm_config
+        .get_agent(agent_name)
+        .ok_or_else(|| ProxyError::AgentNotFound(agent_name.to_string()))?;
 
-#[derive(Debug, Default)]
-pub struct AgentProxyImpl;
-//TODO: we could have a map or something to reuse clients
+    let provider_cfg = llm_config
+        .get_provider(provider_name)
+        .ok_or_else(|| ProxyError::ProviderNotFound(provider_name.to_string()))?;
 
-impl AgentProxy for AgentProxyImpl {
-    fn spawn(
-        config: &Config,
-        provider_name: &str,
-        model: &str,
-        agent_name: &str,
-        session_context: &impl ContextManagement,
-    ) -> Result<impl Future<Output = Result<impl ContextManagement + 'static, Error>>, ProxyError>
-    {
-        //TODO: we probably need to add hooks
-        let agent_cfg = config
-            .get_agent(agent_name)
-            .ok_or_else(|| ProxyError::AgentNotFound(agent_name.to_string()))?;
+    let model = llm_config
+        .get_model(model)
+        .ok_or_else(|| ProxyError::ModelNotFound(model.to_string()))?;
 
-        let provider = config
-            .get_provider(provider_name)
-            .ok_or_else(|| ProxyError::ProviderNotFound(provider_name.to_string()))?;
+    let api_key = provider_cfg.api_key();
 
-        let model = provider
-            .models()
-            .iter()
-            .find(|m| m.name() == model)
-            .ok_or_else(|| ProxyError::ModelNotFound(model.to_string()))?;
+    let client = client::Client::default();
 
-        let api_key = provider.api_key();
+    let provider = session_context
+        .providers()
+        .build(agent_name, provider_cfg, model)
+        .map_err(|err| ProxyError::ProviderNotFound(err.to_string()))?;
 
-        let client = client::Client::new(provider.url().to_string(), api_key);
+    let config = AgentConfig {
+        max_iterations: agent_cfg.max_iterations(),
+        prompt_builder: agent_cfg.prompt_builder().build(),
+        context_builder: agent_cfg.context_builder().build(),
+        context_compaction: agent_cfg.context_compaction().build(),
+        tools_filter: agent_cfg.tools_filter().build(),
+        provider,
+    };
 
-        let mut context = SlidingWindowContext::new(model.name().to_string(), 500);
-        context.populate_from(session_context);
+    let context = config
+        .context_builder
+        .populate_from_session(&session_context);
 
-        let temperature = agent_cfg.temperature().unwrap_or(model.temperature());
+    let agent = Agent {
+        context,
+        client,
+        config,
+    };
 
-        let agent = Agent {
-            context,
-            client,
-            max_iterations: agent_cfg.max_iterations(),
-            system_prompt: agent_cfg.system_prompt().map(String::from),
-            temperature,
-        };
-
-        Ok(agent.run())
-    }
+    Ok(agent.run())
 }

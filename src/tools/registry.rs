@@ -1,4 +1,3 @@
-use crate::context::ContextManagement;
 use crate::tools::config::ToolsConfig;
 use crate::tools::types::Tool;
 
@@ -34,17 +33,5 @@ impl ToolRegistry {
     /// are automatically dropped on the next call.
     pub fn reload_from_config(&mut self, cfg: ToolsConfig) {
         self.config_tools = cfg.into_tools();
-    }
-
-    /// Return all tools available for a given context.
-    ///
-    /// Currently returns references to the union of built-in and config
-    /// tools (identity). The `_ctx` parameter is reserved for per-agent
-    /// filtering in future iterations.
-    pub fn for_context(&self, _ctx: &impl ContextManagement) -> Vec<&Tool> {
-        let mut all = Vec::with_capacity(self.builtins.len() + self.config_tools.len());
-        all.extend(self.builtins.iter());
-        all.extend(self.config_tools.iter());
-        all
     }
 }

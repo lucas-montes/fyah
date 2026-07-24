@@ -61,7 +61,7 @@ impl std::error::Error for Error {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(flatten)]
     llm: LlmConfig,
     #[serde(default)]
     hooks: HooksConfig,

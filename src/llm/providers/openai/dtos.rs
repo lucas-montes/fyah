@@ -7,25 +7,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `POST /v1/chat/completions` request body.
-///
-/// All optional fields default to `None` (omitted from JSON via `skip_serializing_if`).
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct ChatRequest {
-    // ── Required ──
+pub struct Config {
     model: String,
-    messages: Vec<Message>,
-
     // ── Sampling ──
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f64>,
 
-    // ── Token limits ──
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u32>,
 
@@ -60,10 +50,6 @@ struct ChatRequest {
     modalities: Option<Vec<Modality>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     audio: Option<AudioParams>,
-
-    // ── Tools ──
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<Tool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,12 +86,34 @@ struct ChatRequest {
     verbosity: Option<Verbosity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     web_search_options: Option<WebSearchOptions>,
+}
 
-    // ── Deprecated ──
+/// `POST /v1/chat/completions` request body.
+///
+/// All optional fields default to `None` (omitted from JSON via `skip_serializing_if`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChatRequest<'a>  {
+    #[serde(flatten)]
+    config: &'a Config,
+
+    messages: Vec<Message>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
-    function_call: Option<FunctionCallControl>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    functions: Option<Vec<FunctionDef>>,
+    tools: Option<Vec<Tool>>,
+}
+impl<'a> ChatRequest<'a> {
+    pub fn new(
+        messages: Vec<Message>,
+        tools: Option<Vec<Tool>>,
+        config: &'a Config,
+    ) -> Self {
+        Self {
+            messages,
+            tools,
+            config,
+        }
+    }
 }
 
 // ── Messages ──
@@ -608,7 +616,7 @@ enum FunctionCallMode {
 
 /// `POST /v1/chat/completions` response body.
 #[derive(Debug, Serialize, Deserialize)]
-struct ChatResponse {
+pub struct ChatResponse {
     id: String,
     object: String,
     created: u64,
@@ -866,4 +874,42 @@ struct DeltaFunctionCall {
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     arguments: Option<String>,
+}
+
+// ── ChatResponse trait impl ─────────────────────────────────────────────────
+
+impl crate::llm::client::ChatResponse for ChatResponse {
+    fn message(self) -> crate::core::message::Message {
+        let choice = match self.choices.into_iter().next() {
+            Some(c) => c,
+            None => return crate::core::message::Message::assistant(""),
+        };
+        let msg = choice.message;
+        let mut blocks: Vec<crate::core::message::ContentBlock> = Vec::new();
+        if let Some(text) = msg.content {
+            if !text.is_empty() {
+                blocks.push(crate::core::message::ContentBlock::Text(text));
+            }
+        }
+        for tc in msg.tool_calls {
+            if let ToolCallKind::Function { function } = tc.kind {
+                let arguments: serde_json::Value =
+                    serde_json::from_str(&function.arguments).unwrap_or(serde_json::Value::Null);
+                blocks.push(crate::core::message::ContentBlock::ToolCall {
+                    id: tc.id,
+                    name: function.name,
+                    arguments,
+                });
+            }
+        }
+        crate::core::message::Message::new(crate::core::message::Role::Assistant, blocks)
+    }
+
+    fn tool_calls(&self) -> Option<&Vec<crate::context::ToolCall>> {
+        None
+    }
+
+    fn content(&self) -> Option<&String> {
+        self.choices.first()?.message.content.as_ref()
+    }
 }

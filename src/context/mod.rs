@@ -1,7 +1,9 @@
 mod history;
-mod memory;
+mod map;
+mod dtos;
 mod messages;
 
-pub use history::History;
-pub use memory::{ContextManagement, SimpleContext, SlidingWindowContext};
-pub use messages::{Message, ToolCall, ToolCallFunction};
+
+pub use dtos::{SessionContext, AgentContext};
+pub use messages::{ToolCall, ToolCallFunction};
+pub use history::{History, Branch, NodeId};

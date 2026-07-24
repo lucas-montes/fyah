@@ -2,13 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// <https://platform.claude.com/docs/en/api/messages/create>
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct CreateMessageRequest {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Config {
     model: String,
     max_tokens: u32,
-    messages: Vec<MessageInput>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<PromptContent>,
@@ -32,36 +30,58 @@ struct CreateMessageRequest {
     metadata: Option<RequestMetadata>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<ToolChoice>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// <https://platform.claude.com/docs/en/api/messages/create>
+
+#[derive(Debug, Serialize)]
+pub struct ChatRequest<'a> {
+    messages: Vec<MessageInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ToolDefinition>>,
+    #[serde(flatten)]
+    config: &'a Config,
+}
+
+impl<'a> ChatRequest<'a> {
+    pub fn new(
+        messages: Vec<MessageInput>,
+        tools: Option< Vec<ToolDefinition>>,
+        config: &'a Config,
+    ) -> Self {
+        Self {
+            messages,
+            tools,
+            config,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MessageInput {
     role: MessageRole,
     content: MessageContent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum PromptContent {
     Text(String),
     Blocks(Vec<MessageContentBlock>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum MessageContent {
     Text(String),
     Blocks(Vec<MessageContentBlock>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MessageContentBlock {
     Text {
@@ -90,7 +110,7 @@ enum MessageContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ImageSource {
     #[serde(rename = "type")]
     kind: String,
@@ -98,7 +118,7 @@ struct ImageSource {
     data: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MessageRole {
     User,
@@ -106,7 +126,7 @@ enum MessageRole {
     System,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RequestMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     user_id: Option<String>,
@@ -115,7 +135,7 @@ struct RequestMetadata {
     extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolDefinition {
     name: String,
 
@@ -126,7 +146,7 @@ struct ToolDefinition {
     input_schema: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ToolChoice {
     Auto,
@@ -134,14 +154,14 @@ enum ToolChoice {
     Tool { name: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ThinkingConfig {
     Enabled { budget_tokens: u32 },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct CreateMessageResponse {
+#[derive(Debug, Deserialize)]
+pub struct ChatResponse {
     id: String,
 
     #[serde(rename = "type")]
@@ -160,7 +180,60 @@ struct CreateMessageResponse {
     usage: Usage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// impl crate::llm::client::ChatResponse for CreateMessageResponse {
+//     fn message(self) -> Message {
+//         let blocks: Vec<ContentBlock> = self
+//             .content
+//             .into_iter()
+//             .filter_map(|block| match block {
+//                 MessageContentBlock::Text { text } => Some(ContentBlock::Text(text)),
+//                 MessageContentBlock::ToolUse { id, name, input } => Some(ContentBlock::ToolCall {
+//                     id,
+//                     name,
+//                     arguments: input,
+//                 }),
+//                 MessageContentBlock::ToolResult {
+//                     tool_use_id,
+//                     content,
+//                     is_error,
+//                 } => {
+//                     let content_str = match content {
+//                         Value::String(s) => s,
+//                         other => other.to_string(),
+//                     };
+//                     Some(ContentBlock::ToolResult {
+//                         id: tool_use_id,
+//                         content: content_str,
+//                         is_error: is_error.unwrap_or(false),
+//                     })
+//                 }
+//                 MessageContentBlock::Thinking {
+//                     thinking,
+//                     signature,
+//                 } => Some(ContentBlock::Thinking {
+//                     content: thinking,
+//                     signature: Some(signature),
+//                 }),
+//                 MessageContentBlock::RedactedThinking { .. }
+//                 | MessageContentBlock::Image { .. } => None,
+//             })
+//             .collect();
+//         Message::new(Role::Assistant, blocks)
+//     }
+
+//     fn tool_calls(&self) -> Option<&Vec<ToolCall>> {
+//         None
+//     }
+
+//     fn content(&self) -> Option<&String> {
+//         self.content.iter().find_map(|block| match block {
+//             MessageContentBlock::Text { text } => Some(text),
+//             _ => None,
+//         })
+//     }
+// }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StopReason {
     EndTurn,
@@ -170,7 +243,7 @@ enum StopReason {
     PauseTurn,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Usage {
     input_tokens: u32,
     output_tokens: u32,
