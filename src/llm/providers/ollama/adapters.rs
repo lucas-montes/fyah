@@ -1,16 +1,14 @@
 use std::error::Error;
 use std::fmt;
 
-use serde_json::json;
+use reqwest::RequestBuilder;
 
-use crate::core::message::{ContentBlock, Message, Role};
+use super::dtos::{ChatRequest, ChatResponse, Config};
+use crate::context::{Message, Prompt};
 use crate::llm::config;
 use crate::llm::providers::ProviderFactory;
-use super::dtos::{ChatRequest, ChatResponse, Config};
-use crate::llm::providers::ports::{
-    ConfigError, DynProvider, Provider,
-};
-use crate::tools::Tool;
+use crate::llm::providers::ports::{DynProvider, Provider};
+use crate::llm::providers::registry::Error as RegistryError;
 
 #[derive(Debug)]
 pub enum OllamaError {
@@ -58,39 +56,62 @@ pub struct OllamaFormat {
 }
 
 impl<'a> Provider<'a> for OllamaFormat {
-    type Prompt = ChatRequest;
+    type Prompt = ChatRequest<'a>;
     type Response = ChatResponse;
     type Config = Config;
     type Error = OllamaError;
 
     fn from_config(url: String, api_key: &str, config: Self::Config) -> Self {
         let auth = format!("Bearer {api_key}");
-        Self {
-            config,
-            url,
-            auth
-        }
+        Self { config, url, auth }
+    }
+
+    fn url(&self) -> &str {
+        &self.url
     }
 
     fn create_request(
         &self,
         prompt: Self::Prompt,
         request_builder: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder
-    {
+    ) -> reqwest::RequestBuilder {
         request_builder
-            .url(&self.url)
             .header("Authorization", &self.auth)
             .json(&prompt)
     }
 
+    fn build_prompt(&self, prompt: &'a Prompt) -> Self::Prompt {
+        todo!()
+    }
+}
 
-    fn build_prompt(&self, messages: &[Message], tools: &[Tool]) -> Self::Prompt {
+// ── DynProvider (type-erased) ─────────────────────────────
 
+impl DynProvider for OllamaFormat {
+    fn url(&self) -> &str {
+        Provider::url(self)
     }
 
+    fn create_request<'a>(
+        &'a self,
+        prompt: &'a Prompt,
+        request_builder: RequestBuilder,
+    ) -> RequestBuilder {
+        let wire_prompt = Provider::build_prompt(self, prompt);
+        Provider::create_request(self, wire_prompt, request_builder)
+    }
 
+    fn parse_response(
+        &self,
+        response: &[u8],
+    ) -> Result<Message, crate::llm::providers::ports::Error> {
+        Provider::parse_response(self, response)
+            .map_err(|e| crate::llm::providers::ports::Error::Provider(e.to_string()))
+            .map(Into::into)
+    }
 }
+
+// ── Factory ───────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct OllamaFactory;
@@ -104,8 +125,15 @@ impl ProviderFactory for OllamaFactory {
         &self,
         provider: &config::Provider,
         model: &config::Model,
-    ) -> Result<Box<dyn DynProvider>, Box<dyn Error + Send + Sync>> {
-        let config = OllamaConfig::from_toml(provider, model)?;
-        Ok(Box::new(OllamaFormat::from_config(config)))
+    ) -> Result<Box<dyn DynProvider>, RegistryError> {
+        let cfg = match model {
+            config::Model::Ollama(cfg) => (*cfg).clone(),
+            _ => return Err(RegistryError::UnknownProvider("ollama".into())),
+        };
+        Ok(Box::new(OllamaFormat::from_config(
+            provider.url().to_string(),
+            provider.api_key().unwrap_or(""),
+            cfg,
+        )))
     }
 }

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Model name (required).
     model: String,
@@ -139,7 +139,7 @@ struct FunctionDef {
 }
 
 /// Format control — either the string `"json"` or a JSON schema object.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Format {
     /// Simple `"json"` mode.
@@ -149,23 +149,21 @@ enum Format {
 }
 
 /// The string `"json"` used to request JSON mode.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum JsonMode {
     Json,
 }
 
 /// Thinking level — controls the amount of reasoning the model exposes.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum ThinkLevel {
-    /// Boolean toggle: `true` / `false`.
     Bool(bool),
-    /// String level: `"high"`, `"medium"`, `"low"`, `"max"`.
     Level(ThinkLevelStr),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ThinkLevelStr {
     High,
@@ -175,7 +173,7 @@ enum ThinkLevelStr {
 }
 
 /// Keep-alive duration — either a string like `"5m"` or a number (seconds/0 to unload).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum KeepAlive {
     Duration(String),
@@ -183,7 +181,7 @@ enum KeepAlive {
 }
 
 /// Runtime options that control text generation.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModelOptions {
     /// Random seed used for reproducible outputs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,7 +217,7 @@ struct ModelOptions {
 }
 
 /// Stop sequences — either a single string or an array of strings.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Stop {
     Single(String),
@@ -379,6 +377,43 @@ struct TokenLogprob {
     /// The raw byte representation of the token.
     #[serde(skip_serializing_if = "Option::is_none")]
     bytes: Option<Vec<u32>>,
+}
+
+use crate::context::{ContentBlock, Message as ContextMessage, ToolCall as ContextToolCall};
+
+impl From<ChatResponse> for ContextMessage {
+    fn from(response: ChatResponse) -> Self {
+        let mut content = Vec::new();
+        if !response.message.content.is_empty() {
+            content.push(ContentBlock::Text(response.message.content));
+        }
+        if let Some(thinking) = response.message.thinking {
+            if !thinking.is_empty() {
+                content.push(ContentBlock::Thinking {
+                    content: thinking,
+                    signature: None,
+                });
+            }
+        }
+        let tool_calls = response
+            .message
+            .tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tc| {
+                let arguments = tc.function.arguments.unwrap_or(serde_json::Value::Null);
+                ContextToolCall {
+                    id: String::new(),
+                    name: tc.function.name,
+                    arguments,
+                }
+            })
+            .collect();
+        ContextMessage::Assistant {
+            content,
+            tool_calls,
+        }
+    }
 }
 
 // ── ChatResponse trait impl ─────────────────────────────────────────────────

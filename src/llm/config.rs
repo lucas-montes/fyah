@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-
-use super::middlewares::{ContextBuilderCfg, ContextCompactionCfg, PromptBuilderCfg, ToolsFilterCfg,};
+use super::middlewares::{
+    ContextBuilderCfg, ContextCompactionCfg, PromptBuilderCfg, ToolsFilterCfg,
+};
 
 use super::providers::{AnthropicConfig, OllamaConfig, OpenAIConfig};
 

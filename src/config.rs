@@ -10,6 +10,7 @@
 //! TODO: at some point read .github, .opencode and all the specific configs
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::hooks::HooksConfig;
@@ -59,6 +60,57 @@ impl std::error::Error for Error {
     }
 }
 
+// ─── Workflow / step config ──────────────────────────────────
+
+/// Deserialized from `[workflow]` in `fyah.toml`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowConfig {
+    pub initial: String,
+    pub max_iterations: Option<u32>,
+    /// Map of step name → step definition.
+    /// In TOML: `[workflow.steps.plan]`, `[workflow.steps.implement]`, etc.
+    #[serde(default)]
+    pub steps: HashMap<String, StepDef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StepDef {
+    /// If `None` and the step name matches a built-in, the built-in is used.
+    /// If `None` and no built-in matches, the step is skipped.
+    pub backend: Option<BackendDef>,
+    /// Empty or missing → treated as `Done` (terminal).
+    pub on_success: Option<String>,
+    /// Empty or missing → treated as `Done` (terminal).
+    pub on_failure: Option<String>,
+    pub description: Option<String>,
+    /// Per-step timeout in seconds (applied by the backend where possible).
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum BackendDef {
+    #[serde(rename = "command")]
+    Command {
+        command: String,
+        shell: Option<String>,
+    },
+    #[serde(rename = "script")]
+    Script { interpreter: String, source: String },
+    #[serde(rename = "wasm")]
+    Wasm {
+        module: PathBuf,
+        function: Option<String>,
+    },
+    #[serde(rename = "native")]
+    Native {
+        path: PathBuf,
+        function: Option<String>,
+    },
+}
+
+// ─── Main config ─────────────────────────────────────────────
+
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     #[serde(flatten)]
@@ -68,6 +120,9 @@ pub struct Config {
     /// Tool configuration (toggles, MCP servers, custom tools).
     #[serde(default)]
     tools: ToolsConfig,
+    /// Workflow / state-machine step definitions.
+    #[serde(default)]
+    workflow: Option<WorkflowConfig>,
     /// The filesystem path this config was loaded from (set by `load()`).
     #[serde(skip)]
     path: Option<PathBuf>,
@@ -86,16 +141,20 @@ impl Config {
         &self.tools
     }
 
+    pub fn workflow(&self) -> Option<&WorkflowConfig> {
+        self.workflow.as_ref()
+    }
+
     /// The filesystem path this config was loaded from, if any.
     pub fn source_path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
-    /// Consume `Config` and return its three inner parts.
+    /// Consume `Config` and return its inner parts.
     ///
-    /// Order: `(hooks, llm_config, tools_config)`.
-    pub fn into_parts(self) -> (HooksConfig, LlmConfig, ToolsConfig) {
-        (self.hooks, self.llm, self.tools)
+    /// Order: `(hooks, llm_config, tools_config, workflow_config)`.
+    pub fn into_parts(self) -> (HooksConfig, LlmConfig, ToolsConfig, Option<WorkflowConfig>) {
+        (self.hooks, self.llm, self.tools, self.workflow)
     }
     /// Load and merge config from all sources in precedence order.
     ///
@@ -144,6 +203,58 @@ impl Config {
         config.path = resolved_path;
 
         Ok(config)
+    }
+}
+
+impl Default for WorkflowConfig {
+    /// Default workflow: Plan → Implement → Test → Commit → Done.
+    fn default() -> Self {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "plan".into(),
+            StepDef {
+                backend: None,
+                on_success: Some("implement".into()),
+                on_failure: Some("plan".into()),
+                description: None,
+                timeout_secs: None,
+            },
+        );
+        steps.insert(
+            "implement".into(),
+            StepDef {
+                backend: None,
+                on_success: Some("test".into()),
+                on_failure: Some("plan".into()),
+                description: None,
+                timeout_secs: None,
+            },
+        );
+        steps.insert(
+            "test".into(),
+            StepDef {
+                backend: None,
+                on_success: Some("commit".into()),
+                on_failure: Some("implement".into()),
+                description: None,
+                timeout_secs: None,
+            },
+        );
+        steps.insert(
+            "commit".into(),
+            StepDef {
+                backend: None,
+                on_success: Some("done".into()),
+                on_failure: Some("implement".into()),
+                description: None,
+                timeout_secs: None,
+            },
+        );
+        WorkflowConfig {
+            initial: "plan".into(),
+            max_iterations: None,
+            steps,
+        }
     }
 }
 

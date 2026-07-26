@@ -1,10 +1,7 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
-use futures::{FutureExt, TryFutureExt};
+use futures::TryFutureExt;
 use reqwest::RequestBuilder;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use tracing::debug;
 
 #[derive(Debug)]
 pub enum Error {
@@ -13,11 +10,27 @@ pub enum Error {
     Parse(String),
 }
 
+impl std::error::Error for Error {}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::RequestFailed(e) => write!(f, "request failed: {e:?}"),
+            Error::Api { code, message } => {
+                write!(f, "api error: code: {code}, message: {message}")
+            }
+            Error::Parse(e) => write!(f, "parse error: {e:?}"),
+        }
+    }
+}
+
 /// Abstraction over LLM chat completion providers.
 pub trait LlmClient: std::fmt::Debug {
     fn create_request(&self, method: reqwest::Method, url: &str) -> RequestBuilder;
 
-    fn send_request(request: RequestBuilder) -> impl futures::Future<Output = Result<impl AsRef<[u8]>, Error>> {
+    fn send_request(
+        request: RequestBuilder,
+    ) -> impl futures::Future<Output = Result<impl AsRef<[u8]>, Error>> {
         request
             .send()
             .map_err(|e| Error::RequestFailed(e.to_string()))

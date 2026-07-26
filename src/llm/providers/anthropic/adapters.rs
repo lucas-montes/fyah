@@ -1,12 +1,14 @@
 use std::fmt;
 
-use serde_json::json;
+use reqwest::RequestBuilder;
 
-use crate::core::message::{ContentBlock, Message, Role};
+use crate::context::{Message, Prompt};
 use crate::llm::config;
 use crate::llm::providers::ProviderFactory;
-use crate::llm::providers::{ports::{DynProvider, Provider}, registry::Error as RegistryError};
-use crate::tools::Tool;
+use crate::llm::providers::{
+    ports::{DynProvider, Provider},
+    registry::Error as RegistryError,
+};
 
 use super::dtos::{ChatRequest, ChatResponse, Config};
 
@@ -63,30 +65,55 @@ impl<'a> Provider<'a> for AnthropicFormat {
 
     fn from_config(url: String, api_key: &str, config: Self::Config) -> Self {
         let auth = format!("Bearer {api_key}");
-        Self {
-            config,
-            url,
-            auth
-        }
+        Self { config, url, auth }
+    }
+
+    fn url(&self) -> &str {
+        &self.url
     }
 
     fn create_request(
         &self,
         prompt: Self::Prompt,
         request_builder: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder
-    {
+    ) -> reqwest::RequestBuilder {
         request_builder
-            .url(&self.url)
             .header("Authorization", &self.auth)
             .json(&prompt)
     }
 
-    fn build_prompt(&self, message: &Message) -> Self::Prompt {
-        ChatRequest::new(messages, tools, &self.config)
+    fn build_prompt(&self, prompt: &'a Prompt) -> Self::Prompt {
+        todo!()
+    }
+}
+
+// ── DynProvider (type-erased) ─────────────────────────────
+
+impl DynProvider for AnthropicFormat {
+    fn url(&self) -> &str {
+        Provider::url(self)
     }
 
+    fn create_request<'a>(
+        &'a self,
+        prompt: &'a Prompt,
+        request_builder: RequestBuilder,
+    ) -> RequestBuilder {
+        let wire_prompt = Provider::build_prompt(self, prompt);
+        Provider::create_request(self, wire_prompt, request_builder)
+    }
+
+    fn parse_response(
+        &self,
+        response: &[u8],
+    ) -> Result<Message, crate::llm::providers::ports::Error> {
+        Provider::parse_response(self, response)
+            .map_err(|e| crate::llm::providers::ports::Error::Provider(e.to_string()))
+            .map(Into::into)
+    }
 }
+
+// ── Factory ───────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct AnthropicFactory;
@@ -101,7 +128,14 @@ impl ProviderFactory for AnthropicFactory {
         provider: &config::Provider,
         model: &config::Model,
     ) -> Result<Box<dyn DynProvider>, RegistryError> {
-        let config = Config::from_toml(provider, model)?;
-        Ok(Box::new(AnthropicFormat::from_config(config)))
+        let cfg = match model {
+            config::Model::Anthropic(cfg) => (*cfg).clone(),
+            _ => return Err(RegistryError::UnknownProvider("anthropic".into())),
+        };
+        Ok(Box::new(AnthropicFormat::from_config(
+            provider.url().to_string(),
+            provider.api_key().unwrap_or(""),
+            cfg,
+        )))
     }
 }

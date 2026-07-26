@@ -6,8 +6,7 @@ use std::{
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    context::{AgentContext, SessionContext, ToolCallFunction},
-    core::message::Message,
+    context::{AgentContext, ContentBlock, Message, Prompt, SessionContext, ToolCall},
     llm::middlewares::{ContextBuilder, ContextCompaction, PromptBuilder, ToolsFilter},
 };
 
@@ -126,48 +125,46 @@ impl<Client: LlmClient> Agent<Client> {
         //TODO: how to correctly stop this mid-way?
 
         for _ in 0..self.config.max_iterations {
-            let prompt = self.config.prompt_builder.build(&self.context);
-            let request = self.client.create_request(reqwest::Method::POST, self.config.provider.url());
+            let prompt: Prompt = self.config.prompt_builder.build(&self.context);
             let request = self
-                .config
-                .provider
-                .create_request(&prompt, request);
+                .client
+                .create_request(reqwest::Method::POST, self.config.provider.url());
+            let request = self.config.provider.create_request(&prompt, request);
 
-            let response = Client::send_request(request)
+            let raw = Client::send_request(request)
                 .await
                 .map_err(|e| Error::Client(e.to_string()))?;
 
-            let response = self
+            let msg: Message = self
                 .config
                 .provider
-                .parse_response(response.as_ref())
+                .parse_response(raw.as_ref())
                 .map_err(|e| Error::Client(e.to_string()))?;
 
-            let tool_calls = response.tool_calls();
+            let tool_calls = msg.tool_calls();
 
-            //NOTE: this is the idea? can it be empty?
-            if tool_calls.is_none_or(|t| t.is_empty()) {
-                println!(
-                    "{}",
-                    response.content().expect(
-                        "I think that we should expect a content as the tool calls is empty"
-                    )
-                );
+            if tool_calls.is_empty() {
+                if let Some(content) = msg.content() {
+                    for block in content {
+                        if let ContentBlock::Text(text) = block {
+                            println!("{text}");
+                        }
+                    }
+                }
                 break;
             }
 
-            if let Some(tool_calls) = tool_calls {
-                //TODO: add some filter to avoid calling tools we don't allow like running rm -rf /
-                for tool_call in tool_calls {
-                    let (tool_call_id, tool_call_function) = tool_call.split();
+            for tc in tool_calls {
+                let result = handle_tool_call(tc)?;
 
-                    let result = handle_tool_call(&tool_call_function)?;
-
-                    tool_calls_messages.push_back(Message::tool(tool_call_id, result));
-                }
+                tool_calls_messages.push_back(Message::Tool {
+                    tool_call_id: tc.id.clone(),
+                    content: vec![ContentBlock::Text(result)],
+                    is_error: false,
+                });
             }
 
-            tool_calls_messages.push_front(response);
+            tool_calls_messages.push_front(msg);
             self.config
                 .context_builder
                 .handle_new_messages(&mut tool_calls_messages, &mut self.context);
@@ -179,7 +176,7 @@ impl<Client: LlmClient> Agent<Client> {
     }
 }
 
-fn handle_tool_call(_tool_call: &ToolCallFunction) -> Result<String, Error> {
+fn handle_tool_call(_tool_call: &ToolCall) -> Result<String, Error> {
     Ok("tool call result placeholder".to_string())
 }
 
@@ -238,6 +235,7 @@ pub fn spawn(
     let client = client::Client::default();
 
     let provider = session_context
+        .providers()
         .providers()
         .build(agent_name, provider_cfg, model)
         .map_err(|err| ProxyError::ProviderNotFound(err.to_string()))?;

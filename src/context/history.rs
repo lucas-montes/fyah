@@ -647,6 +647,12 @@ pub struct Session<T> {
     id: SessionId,
 }
 
+impl<T> Default for Session<T> {
+    fn default() -> Self {
+        History::<T>::default().create_session("default")
+    }
+}
+
 impl<T> Session<T> {
     pub fn id(&self) -> SessionId {
         self.id
@@ -703,6 +709,14 @@ impl<T> Clone for Session<T> {
 pub struct Branch<T> {
     history: History<T>,
     id: BranchId,
+}
+
+impl<T> Default for Branch<T> {
+    fn default() -> Self {
+        let history = History::<T>::default();
+        let session = history.create_session("default");
+        session.branch("default")
+    }
 }
 
 impl<T> Branch<T> {

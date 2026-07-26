@@ -57,7 +57,7 @@ pub struct Workspace(Arc<RwLock<WorkspaceInner>>);
 
 impl Workspace {
     pub fn new(config: Config) -> Self {
-        let (hooks, llm_config, tools_config) = config.into_parts();
+        let (hooks, llm_config, tools_config, _workflow) = config.into_parts();
         let mut tool_registry = ToolRegistry::default();
         let providers = ProviderRegistry::default(); //TODO: populate and add the reload logic
         tool_registry.reload_from_config(tools_config);
@@ -72,6 +72,12 @@ impl Workspace {
             context: HashMap::new(),
         };
         Workspace(Arc::new(RwLock::new(inner)))
+    }
+}
+
+impl Default for Workspace {
+    fn default() -> Self {
+        Workspace(Arc::new(RwLock::new(WorkspaceInner::default())))
     }
 }
 
@@ -98,12 +104,27 @@ pub struct WorkspaceInner {
     context: HashMap<String, HashMap<String, Vec<PathBuf>>>, // SCE context
 }
 
+impl Default for WorkspaceInner {
+    fn default() -> Self {
+        WorkspaceInner {
+            version: AtomicU16::new(0),
+            hooks: HooksConfig::default(),
+            llm_config: LlmConfig::default(),
+            tool_registry: ToolRegistry::default(),
+            providers: ProviderRegistry::default(),
+            files: Vec::new(),
+            sessions: HashMap::new(),
+            context: HashMap::new(),
+        }
+    }
+}
+
 impl WorkspaceInner {
     /// Re-load config from disk and update the tool registry.
     pub fn reload_config(&mut self, config_path: &std::path::Path) {
         match Config::load(Some(config_path.to_path_buf())) {
             Ok(config) => {
-                let (_, _, tools_config) = config.into_parts();
+                let (_, _, tools_config, _) = config.into_parts();
                 self.tool_registry.reload_from_config(tools_config);
             }
             Err(e) => {

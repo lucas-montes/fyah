@@ -1,9 +1,7 @@
-mod history;
-mod map;
 mod dtos;
-mod messages;
+mod history;
+mod message;
 
-
-pub use dtos::{SessionContext, AgentContext};
-pub use messages::{ToolCall, ToolCallFunction};
-pub use history::{History, Branch, NodeId};
+pub use dtos::{AgentContext, SessionContext};
+pub use history::{Branch, History, Session};
+pub use message::{ContentBlock, Message, Prompt, ToolCall};

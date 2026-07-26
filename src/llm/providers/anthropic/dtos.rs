@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     model: String,
     max_tokens: u32,
@@ -50,7 +49,7 @@ pub struct ChatRequest<'a> {
 impl<'a> ChatRequest<'a> {
     pub fn new(
         messages: Vec<MessageInput>,
-        tools: Option< Vec<ToolDefinition>>,
+        tools: Option<Vec<ToolDefinition>>,
         config: &'a Config,
     ) -> Self {
         Self {
@@ -178,6 +177,47 @@ pub struct ChatResponse {
     stop_sequence: Option<String>,
 
     usage: Usage,
+}
+
+use crate::context::{ContentBlock, Message, ToolCall};
+
+impl From<ChatResponse> for Message {
+    fn from(response: ChatResponse) -> Self {
+        let mut content = Vec::new();
+        let mut tool_calls = Vec::new();
+        for block in response.content {
+            match block {
+                MessageContentBlock::Text { text } => {
+                    content.push(ContentBlock::Text(text));
+                }
+                MessageContentBlock::ToolUse { id, name, input } => {
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments: input,
+                    });
+                }
+                MessageContentBlock::ToolResult { .. } => {}
+                MessageContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    content.push(ContentBlock::Thinking {
+                        content: thinking,
+                        signature: Some(signature),
+                    });
+                }
+                MessageContentBlock::RedactedThinking { data } => {
+                    content.push(ContentBlock::RedactedThinking { data });
+                }
+                MessageContentBlock::Image { .. } => {}
+            }
+        }
+        Message::Assistant {
+            content,
+            tool_calls,
+        }
+    }
 }
 
 // impl crate::llm::client::ChatResponse for CreateMessageResponse {

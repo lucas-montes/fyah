@@ -8,17 +8,20 @@
 // tool calling) is expected until wiring tasks are implemented.
 
 mod agent_traces;
+mod backends;
 mod config;
 mod context;
 mod hooks;
 mod llm;
+mod map;
 mod runtime;
 mod session;
 mod steps;
 mod tools;
 mod transport;
 mod workspace;
-mod map;
+
+mod rewrite;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -34,8 +37,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use crate::context::SessionContext;
-use crate::steps::Plan;
+use crate::context::{Branch, History, Message, SessionContext};
+use crate::runtime::Workflow;
 use crate::workspace::{FsBridge, Workspace};
 use crate::{config::Config, session::Session, transport::StdinTransport};
 
@@ -93,7 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .clone();
 
-    // Extract config path before consuming config with Workspace::new.
+    // Extract workflow config and config path before consuming config.
+    let workflow_config = config.workflow().cloned().unwrap_or_default();
     let config_path = config.source_path().map(|p| p.to_path_buf());
 
     // Create Workspace (consumes Config, populates ToolRegistry internally).
@@ -113,11 +117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // TODO: We need to also pass a storage interface
 
+    let conversation = History::<Message>::default().create_session("main");
+    let _branch = conversation.branch("main");
+    let context = SessionContext::new(workspace.clone(), conversation);
 
-    //TODO: we should get the context from the workspace
-    let context = SessionContext::default();
-
-    let session = Session::new(
+    let mut session = Session::new(
         Uuid::now_v7().to_string(),
         transport,
         cancelled,
@@ -126,7 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime,
     );
 
-    session.run::<Plan>();
+    let mut workflow =
+        Workflow::from_config(workflow_config).expect("valid workflow configuration");
+    workflow.run(&mut session);
 
     info!("Fyah stopped");
     // Use exit(0) to terminate the process immediately rather than letting

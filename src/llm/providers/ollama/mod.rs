@@ -1,2 +1,2 @@
-pub mod dtos;
 pub mod adapters;
+pub mod dtos;

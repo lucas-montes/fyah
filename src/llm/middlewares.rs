@@ -2,14 +2,15 @@ use std::{collections::VecDeque, fmt::Display};
 
 use serde::Deserialize;
 
-use crate::{context::{AgentContext, SessionContext}, core::message::Message};
-
+use crate::{
+    context::{AgentContext, SessionContext},
+    context::{Message, Prompt},
+};
 
 pub struct DefaultPromptBuilder;
 
 impl PromptBuilder for DefaultPromptBuilder {
-    fn build(&self, context: &AgentContext) -> Message {
-        // Implement the default prompt building logic here
+    fn build(&self, context: &AgentContext) -> Prompt {
         todo!()
     }
 }
@@ -74,9 +75,7 @@ impl ContextBuilderCfg {
 pub struct DefaultContextCompaction;
 
 impl ContextCompaction for DefaultContextCompaction {
-    fn compact(&self, context: &mut AgentContext) {
-
-    }
+    fn compact(&self, context: &mut AgentContext) {}
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -102,9 +101,7 @@ impl ContextCompactionCfg {
 pub struct DefaultToolsFilter;
 
 impl<Tool> ToolsFilter<Tool> for DefaultToolsFilter {
-    fn filter(&self, tool_calls: &Vec<Tool>) {
-
-    }
+    fn filter(&self, tool_calls: &Vec<Tool>) {}
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -128,12 +125,12 @@ impl ToolsFilterCfg {
 }
 
 pub trait PromptBuilder {
-    fn build(&self, context: &AgentContext) -> Message;
+    fn build(&self, context: &AgentContext) -> Prompt;
 }
 
 pub trait ContextBuilder {
     fn append_to_session(&self, session_context: &mut SessionContext, agent_context: AgentContext);
-    fn populate_from_session(&self, session_context: &SessionContext)->AgentContext;
+    fn populate_from_session(&self, session_context: &SessionContext) -> AgentContext;
     fn handle_new_messages(&self, messages: &mut VecDeque<Message>, context: &mut AgentContext);
 }
 

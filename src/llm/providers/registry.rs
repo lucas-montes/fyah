@@ -22,7 +22,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Constructs a [`DynProvider`] from TOML configuration.
-pub trait ProviderFactory: Debug {
+pub trait ProviderFactory: Debug + Send + Sync {
     fn provider_name(&self) -> &str;
 
     fn build(&self, provider: &Provider, model: &Model) -> Result<Box<dyn DynProvider>, Error>;

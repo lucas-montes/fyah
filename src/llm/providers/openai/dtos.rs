@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     model: String,
     // ── Sampling ──
@@ -93,7 +93,7 @@ pub struct Config {
 /// All optional fields default to `None` (omitted from JSON via `skip_serializing_if`).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ChatRequest<'a>  {
+pub struct ChatRequest<'a> {
     #[serde(flatten)]
     config: &'a Config,
 
@@ -103,11 +103,7 @@ pub struct ChatRequest<'a>  {
     tools: Option<Vec<Tool>>,
 }
 impl<'a> ChatRequest<'a> {
-    pub fn new(
-        messages: Vec<Message>,
-        tools: Option<Vec<Tool>>,
-        config: &'a Config,
-    ) -> Self {
+    pub fn new(messages: Vec<Message>, tools: Option<Vec<Tool>>, config: &'a Config) -> Self {
         Self {
             messages,
             tools,
@@ -126,7 +122,7 @@ impl<'a> ChatRequest<'a> {
 /// {"role": "assistant", "content": null, "tool_calls": [...]}
 /// {"role": "tool", "content": "result", "tool_call_id": "call_1"}
 /// ```
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 enum Message {
     Developer {
@@ -172,7 +168,7 @@ enum Message {
 ///
 /// `#[serde(untagged)]` means it serializes as a bare string when `Text`,
 /// and as a JSON array when `Parts`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Content {
     Text(String),
@@ -180,7 +176,7 @@ enum Content {
 }
 
 /// A single content part within a message — tagged by `type`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentPart {
     Text { text: String },
@@ -191,7 +187,7 @@ enum ContentPart {
 }
 
 /// Image URL reference (URL or base64).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ImageUrl {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,7 +195,7 @@ struct ImageUrl {
 }
 
 /// Image detail level.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ImageDetail {
     Auto,
@@ -208,14 +204,14 @@ enum ImageDetail {
 }
 
 /// Base64-encoded audio input.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct InputAudio {
     data: String,
     format: AudioFormat,
 }
 
 /// Audio encoding format.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AudioFormat {
     Wav,
@@ -223,7 +219,7 @@ enum AudioFormat {
 }
 
 /// File input data.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FileData {
     #[serde(skip_serializing_if = "Option::is_none")]
     file_data: Option<String>,
@@ -234,13 +230,13 @@ struct FileData {
 }
 
 /// Reference to a previous audio response.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AudioReference {
     id: String,
 }
 
 /// A tool call within an assistant message.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct ToolCall {
     id: String,
@@ -249,7 +245,7 @@ struct ToolCall {
 }
 
 /// What kind of tool call — function or custom.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ToolCallKind {
     #[serde(rename = "function")]
@@ -259,7 +255,7 @@ enum ToolCallKind {
 }
 
 /// Function call details.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCallFunction {
     name: String,
     /// JSON-stringified arguments.
@@ -267,7 +263,7 @@ struct ToolCallFunction {
 }
 
 /// Custom tool call details.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolCallCustom {
     name: String,
     input: String,
@@ -275,7 +271,7 @@ struct ToolCallCustom {
 
 // ── Stop sequences ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum StopSequence {
     Single(String),
@@ -284,7 +280,7 @@ enum StopSequence {
 
 // ── Stream options ──
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,7 +291,7 @@ struct StreamOptions {
 
 // ── Response format / Structured Outputs ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseFormat {
     #[serde(rename = "text")]
@@ -306,7 +302,7 @@ enum ResponseFormat {
     JsonSchema { json_schema: JsonSchema },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonSchema {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -319,7 +315,7 @@ struct JsonSchema {
 
 // ── Modalities ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Modality {
     Text,
@@ -328,13 +324,13 @@ enum Modality {
 
 // ── Audio output parameters ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AudioParams {
     format: OutputAudioFormat,
     voice: Voice,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum OutputAudioFormat {
     Wav,
@@ -345,14 +341,14 @@ enum OutputAudioFormat {
     Pcm16,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Voice {
     Builtin(BuiltinVoice),
     Custom { id: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BuiltinVoice {
     Alloy,
@@ -372,7 +368,7 @@ enum BuiltinVoice {
 
 // ── Tools ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Tool {
     #[serde(rename = "function")]
@@ -382,7 +378,7 @@ enum Tool {
 }
 
 /// JSON Schema function definition.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FunctionDef {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -394,7 +390,7 @@ struct FunctionDef {
 }
 
 /// Custom tool definition.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CustomToolDef {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,7 +399,7 @@ struct CustomToolDef {
     format: Option<CustomToolFormat>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CustomToolFormat {
     #[serde(rename = "text")]
@@ -412,13 +408,13 @@ enum CustomToolFormat {
     Grammar { grammar: GrammarDef },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GrammarDef {
     definition: String,
     syntax: GrammarSyntax,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum GrammarSyntax {
     Lark,
@@ -427,7 +423,7 @@ enum GrammarSyntax {
 
 // ── Tool choice ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum ToolChoice {
     Mode(ToolChoiceMode),
@@ -435,7 +431,7 @@ enum ToolChoice {
     Allowed(ToolChoiceAllowed),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ToolChoiceMode {
     None,
@@ -443,39 +439,39 @@ enum ToolChoiceMode {
     Required,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolChoiceNamed {
     #[serde(rename = "type")]
     type_: ToolChoiceNamedType,
     function: ToolChoiceFunction,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ToolChoiceNamedType {
     Function,
     Custom,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolChoiceFunction {
     name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolChoiceAllowed {
     #[serde(rename = "type")]
     type_: String, // always "allowed_tools"
     allowed_tools: AllowedToolsConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AllowedToolsConfig {
     mode: AllowedToolsMode,
     tools: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AllowedToolsMode {
     Auto,
@@ -484,7 +480,7 @@ enum AllowedToolsMode {
 
 // ── Reasoning effort ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ReasoningEffort {
     None,
@@ -497,7 +493,7 @@ enum ReasoningEffort {
 
 // ── Predicted Outputs ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct PredictionContent {
     #[serde(rename = "type")]
@@ -505,7 +501,7 @@ struct PredictionContent {
     content: PredictionText,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum PredictionText {
     Text(String),
@@ -514,14 +510,14 @@ enum PredictionText {
 
 // ── Moderation config ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModerationConfig {
     model: String,
 }
 
 // ── Service tier ──
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ServiceTier {
     Auto,
@@ -534,12 +530,12 @@ enum ServiceTier {
 // ── Metadata ──
 
 /// Set of 16 key-value pairs (max 64 char keys, max 512 char values).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Metadata(std::collections::HashMap<String, String>);
 
 // ── Cache retention ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CacheRetention {
     InMemory,
@@ -549,7 +545,7 @@ enum CacheRetention {
 
 // ── Verbosity ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Verbosity {
     Low,
@@ -559,7 +555,7 @@ enum Verbosity {
 
 // ── Web search ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WebSearchOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     search_context_size: Option<SearchContextSize>,
@@ -567,7 +563,7 @@ struct WebSearchOptions {
     user_location: Option<UserLocation>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SearchContextSize {
     Low,
@@ -575,14 +571,14 @@ enum SearchContextSize {
     High,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserLocation {
     #[serde(rename = "type")]
     type_: String, // always "approximate"
     approximate: ApproximateLocation,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApproximateLocation {
     #[serde(skip_serializing_if = "Option::is_none")]
     city: Option<String>,
@@ -596,14 +592,14 @@ struct ApproximateLocation {
 
 // ── Deprecated function_call control ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum FunctionCallControl {
     Mode(FunctionCallMode),
     Named { name: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FunctionCallMode {
     None,
@@ -615,7 +611,7 @@ enum FunctionCallMode {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// `POST /v1/chat/completions` response body.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     id: String,
     object: String,
@@ -633,7 +629,7 @@ pub struct ChatResponse {
 }
 
 /// A single completion choice.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Choice {
     index: u32,
     finish_reason: FinishReason,
@@ -643,7 +639,7 @@ struct Choice {
 }
 
 /// Why generation stopped.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FinishReason {
     Stop,
@@ -656,7 +652,7 @@ enum FinishReason {
 }
 
 /// The assistant message returned in the response.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResponseMessage {
     role: String,
     #[serde(default)]
@@ -674,14 +670,14 @@ struct ResponseMessage {
 }
 
 /// URL citation annotation (from web search).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Annotation {
     #[serde(rename = "type")]
     type_: String, // always "url_citation"
     url_citation: UrlCitation,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UrlCitation {
     end_index: u32,
     start_index: u32,
@@ -690,7 +686,7 @@ struct UrlCitation {
 }
 
 /// Audio output data.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResponseAudio {
     id: String,
     data: String,
@@ -699,7 +695,7 @@ struct ResponseAudio {
 }
 
 /// Token usage statistics.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Usage {
     prompt_tokens: u32,
     completion_tokens: u32,
@@ -711,7 +707,7 @@ struct Usage {
 }
 
 /// Breakdown of completion tokens.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CompletionTokensDetails {
     #[serde(default)]
     reasoning_tokens: Option<u32>,
@@ -724,7 +720,7 @@ struct CompletionTokensDetails {
 }
 
 /// Breakdown of prompt tokens.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: Option<u32>,
@@ -733,7 +729,7 @@ struct PromptTokensDetails {
 }
 
 /// Log probability data.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Logprobs {
     #[serde(default)]
     content: Vec<TokenLogprob>,
@@ -742,7 +738,7 @@ struct Logprobs {
 }
 
 /// Log probability for a single token position.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenLogprob {
     token: String,
     #[serde(default)]
@@ -752,7 +748,7 @@ struct TokenLogprob {
 }
 
 /// One of the top-k most likely tokens at a position.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TopLogprob {
     token: String,
     #[serde(default)]
@@ -761,21 +757,21 @@ struct TopLogprob {
 }
 
 /// Top-level moderation container (has input and output).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModerationBody {
     input: ModerationSegment,
     output: ModerationSegment,
 }
 
 /// One side of moderation (input or output) — either results or an error.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum ModerationSegment {
     Results(ModerationResults),
     Error(ModerationError),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModerationResults {
     #[serde(rename = "type")]
     type_: String, // always "moderation_results"
@@ -783,7 +779,7 @@ struct ModerationResults {
     results: Vec<ModerationItem>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModerationItem {
     flagged: bool,
     categories: std::collections::HashMap<String, bool>,
@@ -794,7 +790,7 @@ struct ModerationItem {
     model: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModerationError {
     #[serde(rename = "type")]
     type_: String, // always "error"
@@ -807,7 +803,7 @@ struct ModerationError {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// SSE streaming chunk (`object: "chat.completion.chunk"`).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatChunk {
     id: String,
     object: String,
@@ -822,7 +818,7 @@ struct ChatChunk {
 }
 
 /// A single streaming choice.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChunkChoice {
     index: u32,
     delta: Delta,
@@ -833,7 +829,7 @@ struct ChunkChoice {
 }
 
 /// Content delta in a streaming chunk.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Delta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role: Option<String>,
@@ -848,7 +844,7 @@ struct Delta {
 }
 
 /// A tool call delta within a streaming chunk.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeltaToolCall {
     index: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -859,7 +855,7 @@ struct DeltaToolCall {
     function: Option<DeltaToolCallFunction>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeltaToolCallFunction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -868,7 +864,7 @@ struct DeltaToolCallFunction {
 }
 
 /// Function call delta (deprecated).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeltaFunctionCall {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -876,40 +872,51 @@ struct DeltaFunctionCall {
     arguments: Option<String>,
 }
 
-// ── ChatResponse trait impl ─────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// Conversion to unified Message
+// ═════════════════════════════════════════════════════════════════════════════
 
-impl crate::llm::client::ChatResponse for ChatResponse {
-    fn message(self) -> crate::core::message::Message {
-        let choice = match self.choices.into_iter().next() {
-            Some(c) => c,
-            None => return crate::core::message::Message::assistant(""),
-        };
-        let msg = choice.message;
-        let mut blocks: Vec<crate::core::message::ContentBlock> = Vec::new();
-        if let Some(text) = msg.content {
+use crate::context::{ContentBlock, Message as ContextMessage, ToolCall as ContextToolCall};
+
+impl From<ChatResponse> for ContextMessage {
+    fn from(response: ChatResponse) -> Self {
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
+            .expect("ChatResponse must have at least one choice");
+        let mut content = Vec::new();
+        if let Some(text) = choice.message.content {
             if !text.is_empty() {
-                blocks.push(crate::core::message::ContentBlock::Text(text));
+                content.push(ContentBlock::Text(text));
             }
         }
-        for tc in msg.tool_calls {
-            if let ToolCallKind::Function { function } = tc.kind {
-                let arguments: serde_json::Value =
-                    serde_json::from_str(&function.arguments).unwrap_or(serde_json::Value::Null);
-                blocks.push(crate::core::message::ContentBlock::ToolCall {
+        if let Some(refusal) = choice.message.refusal {
+            if !refusal.is_empty() {
+                content.push(ContentBlock::Text(refusal));
+            }
+        }
+        let tool_calls = choice
+            .message
+            .tool_calls
+            .into_iter()
+            .map(|tc| {
+                let (name, arguments_str) = match tc.kind {
+                    ToolCallKind::Function { function } => (function.name, function.arguments),
+                    ToolCallKind::Custom { custom } => (custom.name, custom.input),
+                };
+                let arguments =
+                    serde_json::from_str(&arguments_str).unwrap_or(serde_json::Value::Null);
+                ContextToolCall {
                     id: tc.id,
-                    name: function.name,
+                    name,
                     arguments,
-                });
-            }
+                }
+            })
+            .collect();
+        ContextMessage::Assistant {
+            content,
+            tool_calls,
         }
-        crate::core::message::Message::new(crate::core::message::Role::Assistant, blocks)
-    }
-
-    fn tool_calls(&self) -> Option<&Vec<crate::context::ToolCall>> {
-        None
-    }
-
-    fn content(&self) -> Option<&String> {
-        self.choices.first()?.message.content.as_ref()
     }
 }

@@ -1,13 +1,13 @@
-use std::fmt::Display;
 use std::sync::Arc;
 
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use crate::context::SessionContext;
+use crate::llm::AgentError;
+use crate::llm::ProxyError;
 use crate::llm::spawn;
-use crate::llm::{AgentError, };
 use crate::workspace::Workspace;
 use crate::workspace::WorkspaceInner;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::task::JoinError;
 
 use crate::transport::PromtpMsg;
@@ -15,6 +15,7 @@ use crate::transport::Transport;
 
 #[derive(Debug)]
 pub enum SpawnError {
+    Proxy(Box<dyn std::error::Error + Send + Sync>),
     Join(JoinError),
     Agent(AgentError),
 }
@@ -32,13 +33,12 @@ impl std::fmt::Display for SpawnError {
 impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SpawnError::Proxy(e) => Some(e),
+            SpawnError::Proxy(e) => Some(&**e),
             SpawnError::Join(e) => Some(e),
             SpawnError::Agent(_) => None,
         }
     }
 }
-
 
 impl From<JoinError> for SpawnError {
     fn from(e: JoinError) -> Self {
@@ -52,26 +52,32 @@ impl From<AgentError> for SpawnError {
     }
 }
 
+impl From<ProxyError> for SpawnError {
+    fn from(e: ProxyError) -> Self {
+        SpawnError::Proxy(Box::new(e))
+    }
+}
+
 //TODO: maybe we need a runtime to drive the agent/s so they follow the steps that we want and this in a deterministic way. And another layer that bridges context agregation, agents orchestration, users communication and the fs_watcher so the 'knowledge' is updated
 
 //TODO: do we need this runtime? we need a way to manage agents and let the user send promts, that's all. However the back and forth between the agent and user is fairly common
-pub struct Session<T, Message: Display> {
+pub struct Session<T> {
     id: String,
     user_channel: T,
     cancelled: Arc<AtomicBool>,
     //TODO: maybe this context should be a bit different, we could have a map that stores context from different agents
-    context: SessionContext<Message>,
+    context: SessionContext,
     /// Shared state: config, tools, and filesystem bridge.
     workspace: Workspace,
     runtime: tokio::runtime::Runtime,
 }
 
-impl<T, Message: Display  > Session<T,  Message> {
+impl<T: Transport> Session<T> {
     pub fn new(
         id: String,
         user_channel: T,
         cancelled: Arc<AtomicBool>,
-        context: SessionContext<Message>,
+        context: SessionContext,
         workspace: Workspace,
         runtime: tokio::runtime::Runtime,
     ) -> Self {
@@ -116,7 +122,10 @@ impl<T, Message: Display  > Session<T,  Message> {
     }
 
     /// Write a message to the user (ignores I/O errors).
-    pub fn write(&mut self, msg: &str) where T: Transport {
+    pub fn write(&mut self, msg: &str)
+    where
+        T: Transport,
+    {
         let _ = self.user_channel.write(msg.to_owned().into());
     }
 

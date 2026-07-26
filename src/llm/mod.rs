@@ -1,9 +1,9 @@
 mod agent;
 mod client;
 mod config;
-mod providers;
 mod middlewares;
+mod providers;
 
-pub use agent::{Error as AgentError, spawn};
+pub use agent::{Error as AgentError, ProxyError, spawn};
 pub use config::Config;
 pub use providers::ProviderRegistry;
