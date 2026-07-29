@@ -21,9 +21,6 @@ impl ToolRegistry {
     /// Register a compile-time known tool.
     ///
     /// Typically called with [`FunctionDef::tool()`] at startup.
-    pub fn register_builtin(&mut self, tool: Tool) {
-        self.builtins.push(tool);
-    }
 
     /// Rebuild `config_tools` from a parsed [`ToolsConfig`].
     ///

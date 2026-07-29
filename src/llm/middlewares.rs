@@ -1,16 +1,13 @@
-use std::{collections::VecDeque, fmt::Display};
+use std::collections::VecDeque;
 
 use serde::Deserialize;
 
-use crate::{
-    context::{AgentContext, SessionContext},
-    context::{Message, Prompt},
-};
+use crate::context::{AgentContext, Message, Prompt, SessionContext};
 
 pub struct DefaultPromptBuilder;
 
 impl PromptBuilder for DefaultPromptBuilder {
-    fn build(&self, context: &AgentContext) -> Prompt {
+    fn build(&self, _context: &AgentContext) -> Prompt {
         todo!()
     }
 }
@@ -26,7 +23,7 @@ impl PromptBuilderCfg {
     pub fn build(&self) -> Box<dyn PromptBuilder> {
         match self {
             PromptBuilderCfg::Default => Box::new(DefaultPromptBuilder),
-            PromptBuilderCfg::Custom(name) => {
+            PromptBuilderCfg::Custom(_name) => {
                 // Here you would implement logic to create a custom prompt builder based on the name
                 // For now, we'll just return the default as a placeholder
                 Box::new(DefaultPromptBuilder)
@@ -38,16 +35,20 @@ impl PromptBuilderCfg {
 pub struct DefaultContextBuilder;
 
 impl ContextBuilder for DefaultContextBuilder {
-    fn append_to_session(&self, session_context: &mut SessionContext, agent_context: AgentContext) {
+    fn append_to_session(
+        &self,
+        _session_context: &mut SessionContext,
+        _agent_context: AgentContext,
+    ) {
         // Implement the default logic to append context to the session
     }
 
-    fn populate_from_session(&self, session_context: &SessionContext) -> AgentContext {
+    fn populate_from_session(&self, _session_context: &SessionContext) -> AgentContext {
         // Implement the default logic to populate context from the session
         AgentContext::default()
     }
 
-    fn handle_new_messages(&self, messages: &mut VecDeque<Message>, context: &mut AgentContext) {
+    fn handle_new_messages(&self, _messages: &mut VecDeque<Message>, _context: &mut AgentContext) {
         // Implement the default logic to handle new messages and update the context
     }
 }
@@ -63,7 +64,7 @@ impl ContextBuilderCfg {
     pub fn build(&self) -> Box<dyn ContextBuilder> {
         match self {
             ContextBuilderCfg::Default => Box::new(DefaultContextBuilder),
-            ContextBuilderCfg::Custom(name) => {
+            ContextBuilderCfg::Custom(_name) => {
                 // Here you would implement logic to create a custom context builder based on the name
                 // For now, we'll just return the default as a placeholder
                 Box::new(DefaultContextBuilder)
@@ -75,7 +76,7 @@ impl ContextBuilderCfg {
 pub struct DefaultContextCompaction;
 
 impl ContextCompaction for DefaultContextCompaction {
-    fn compact(&self, context: &mut AgentContext) {}
+    fn compact(&self, _context: &mut AgentContext) {}
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -89,7 +90,7 @@ impl ContextCompactionCfg {
     pub fn build(&self) -> Box<dyn ContextCompaction> {
         match self {
             ContextCompactionCfg::Default => Box::new(DefaultContextCompaction),
-            ContextCompactionCfg::Custom(name) => {
+            ContextCompactionCfg::Custom(_name) => {
                 // Here you would implement logic to create a custom context compaction based on the name
                 // For now, we'll just return the default as a placeholder
                 Box::new(DefaultContextCompaction)
@@ -101,7 +102,7 @@ impl ContextCompactionCfg {
 pub struct DefaultToolsFilter;
 
 impl<Tool> ToolsFilter<Tool> for DefaultToolsFilter {
-    fn filter(&self, tool_calls: &Vec<Tool>) {}
+    fn filter(&self, _tool_calls: &Vec<Tool>) {}
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -115,7 +116,7 @@ impl ToolsFilterCfg {
     pub fn build<Tool>(&self) -> Box<dyn ToolsFilter<Tool>> {
         match self {
             ToolsFilterCfg::Default => Box::new(DefaultToolsFilter),
-            ToolsFilterCfg::Custom(name) => {
+            ToolsFilterCfg::Custom(_name) => {
                 // Here you would implement logic to create a custom tools filter based on the name
                 // For now, we'll just return the default as a placeholder
                 Box::new(DefaultToolsFilter)

@@ -1,4 +1,4 @@
-//! Transport trait — abstract task input / event output.
+//! Async Transport trait — abstract task input / event output.
 //!
 //! A `Transport` represents a bidirectional communication channel between the
 //! outside world and the runtime. The trait decouples how tasks are
@@ -6,113 +6,143 @@
 //!
 //! # Transport implementations
 //!
-//! - [`StdinTransport`] — reads lines from stdin / writes strings to stdout.
+//! - [`StdinTransport`] — background tokio task reads stdin via
+//!   `tokio::io::stdin()` and pushes [`UserMessage`]s into an mpsc channel;
+//!   `read()` pulls from the receiver. `write()` writes to stdout.
 
-use std::io::Write;
+use std::time::SystemTime;
 
-/// A user task string, typically read from an input transport.
-pub struct PromtpMsg {
-    model: String,
-    agent: String,
-    provider: String,
-    prompt: String,
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+// ─── UserMessage ───────────────────────────────────────
+
+/// A single user input message with a timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserMessage {
+    text: String,
+    timestamp: SystemTime,
 }
 
-impl PromtpMsg {
-    pub fn new(model: String, agent: String, provider: String, prompt: String) -> Self {
+impl UserMessage {
+    pub fn new(text: String) -> Self {
         Self {
-            model,
-            agent,
-            provider,
-            prompt,
+            text,
+            timestamp: SystemTime::now(),
         }
     }
 
-    pub fn prompt(&self) -> &str {
-        &self.prompt
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub fn agent_name(&self) -> &str {
-        &self.agent
-    }
-
-    pub fn provider(&self) -> &str {
-        &self.provider
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
-/// A response event string, typically written to an output transport.
-pub struct PromtpResp(String);
+// ─── Transport trait ───────────────────────────────────
 
-impl PromtpResp {
-    pub const fn as_bytes(&self) -> &[u8] {
-        self.0.as_bytes()
-    }
-}
-
-impl From<String> for PromtpResp {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-/// Abstract transport for task input and event output.
+/// Abstract async transport for task input and event output.
 pub trait Transport {
-    /// Read the next user task.
+    /// Read the next user message.
     ///
-    /// Returns `Ok("")` on EOF (clean close), `Ok(line)` on input, or
+    /// Returns `Ok(Some(msg))` on input, `Ok(None)` on clean EOF, or
     /// `Err(reason)` on I/O error.
-    fn read(&mut self) -> Result<PromtpMsg, String>;
+    async fn read(&mut self) -> Result<Option<UserMessage>, String>;
 
-    /// Write a single response event back to the caller.
-    fn write(&mut self, event: PromtpResp) -> Result<(), String>;
+    /// Write a single response string back to the caller.
+    async fn write(&mut self, msg: &str) -> Result<(), String>;
 }
 
-/// A stdin/stdout transport using standard-library blocking I/O.
-///
-/// Because `read(stdin)` may block indefinitely during shutdown, the caller
-/// should terminate the process via `std::process::exit(0)` after the
-/// runtime loop finishes.
-pub struct StdinTransport;
+// ─── StdinTransport ────────────────────────────────────
 
-impl Default for StdinTransport {
-    fn default() -> Self {
-        Self
+/// A stdin/stdout transport using async I/O with a background reader.
+///
+/// `new(cancel)` spawns a background tokio task that reads lines from stdin
+/// and pushes [`UserMessage`]s into an internal mpsc channel.  `read()`
+/// pulls buffered messages from the receiver.  `write()` writes to
+/// `tokio::io::stdout()`.
+///
+/// When the transport is dropped the background task is aborted.
+pub struct StdinTransport {
+    rx: mpsc::Receiver<UserMessage>,
+    _cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl StdinTransport {
+    /// Create a new `StdinTransport` and spawn a background stdin reader.
+    ///
+    /// The reader runs until:
+    /// - EOF on stdin (returns `Ok(None)` from `read()`)
+    /// - the `CancellationToken` is cancelled
+    /// - the transport is dropped (aborts the task)
+    /// - an I/O error occurs
+    pub fn new(cancel: CancellationToken) -> Self {
+        let (tx, rx) = mpsc::channel(128);
+        let bg_cancel = cancel.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+            let mut line = String::new();
+
+            loop {
+                tokio::select! {
+                    _ = bg_cancel.cancelled() => {
+                        break;
+                    }
+                    result = reader.read_line(&mut line) => {
+                        match result {
+                            Ok(0) => break,  // EOF
+                            Ok(_) => {
+                                // Trim trailing newline
+                                let trimmed = line.trim_end_matches('\n')
+                                    .trim_end_matches('\r')
+                                    .to_string();
+                                let msg = UserMessage::new(trimmed);
+                                line.clear();
+                                if tx.send(msg).await.is_err() {
+                                    break;  // receiver dropped
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("stdin read error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            rx,
+            _cancel: cancel,
+            handle,
+        }
+    }
+}
+
+impl Drop for StdinTransport {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
 impl Transport for StdinTransport {
-    fn read(&mut self) -> Result<PromtpMsg, String> {
-        // Flush stdout so any prompt appears before blocking on stdin.
-        let _ = std::io::stdout().flush();
-
-        let mut line = String::new();
-        let prompt = match std::io::stdin().read_line(&mut line) {
-            Ok(0) => line, // EOF
-            Ok(_) => line
-                .trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_string(),
-            Err(e) => return Err(e.to_string()),
-        };
-        Ok(PromtpMsg::new(
-            "phi3:mini".into(),
-            "primary".into(),
-            "ollama".into(),
-            prompt,
-        ))
+    async fn read(&mut self) -> Result<Option<UserMessage>, String> {
+        match self.rx.recv().await {
+            Some(msg) => Ok(Some(msg)),
+            None => Ok(None),
+        }
     }
 
-    fn write(&mut self, event: PromtpResp) -> Result<(), String> {
-        let mut stdout = std::io::stdout();
+    async fn write(&mut self, msg: &str) -> Result<(), String> {
+        let mut stdout = tokio::io::stdout();
         stdout
-            .write_all(event.as_bytes())
+            .write_all(msg.as_bytes())
+            .await
             .map_err(|e| e.to_string())?;
-        stdout.write_all(b"\n").map_err(|e| e.to_string())?;
-        stdout.flush().map_err(|e| e.to_string())
+        stdout.write_all(b"\n").await.map_err(|e| e.to_string())?;
+        stdout.flush().await.map_err(|e| e.to_string())
     }
 }

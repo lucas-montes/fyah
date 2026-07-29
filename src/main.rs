@@ -1,46 +1,40 @@
 //! Fyah — AI agent harness.
 //!
 //! Root entry point. Loads config, creates the Session state machine, and
-//! runs the interactive session loop.  Ctrl+C is handled by the Session
-//! (via `ctrlc` crate) for graceful cancellation between state transitions.
+//! runs the interactive session loop.  Ctrl+C is handled via
+//! `tokio::signal::ctrl_c()` for graceful cancellation between state
+//! transitions.
 
 // Binary crate: dead code from pre-wired features (LLM client, context strategies,
 // tool calling) is expected until wiring tasks are implemented.
 
-mod agent_traces;
-mod backends;
 mod config;
 mod context;
-mod hooks;
 mod llm;
 mod map;
 mod runtime;
 mod session;
-mod steps;
 mod tools;
 mod transport;
 mod workspace;
 
-mod rewrite;
-
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock};
 
 use clap::Parser;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use uuid::Uuid;
 
-use crate::context::{Branch, History, Message, SessionContext};
+use crate::context::{History, Message, SessionContext};
 use crate::runtime::Workflow;
+use crate::session::{Session, load_snapshot};
 use crate::workspace::{FsBridge, Workspace};
-use crate::{config::Config, session::Session, transport::StdinTransport};
+use crate::{config::Config, transport::StdinTransport};
 
 #[derive(Debug, Parser)]
 #[command(name = "Fyah", author, version, about)]
@@ -50,15 +44,11 @@ pub struct Cli {
     config: Option<PathBuf>,
 }
 
-/// Global cancellation flag, set by Ctrl+C.
-///
-/// Registered once via `OnceLock` so `ctrlc::set_handler` is only called
-/// a single time per process.  Every `Session` shares the same `Arc`.
-static CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Start the loggers, one for the regular logs for the app and the agent_ for the agentraces
+fn start_loggers() -> WorkerGuard {
+    //TODO: i think I wanted to use this one as a wal for the agent traces
     let agent_file = tracing_appender::rolling::never(".agent-traces", "traces.ndjson");
-    let (agent_writer, _agent_guard) = tracing_appender::non_blocking(agent_file);
+    let (agent_writer, agent_guard) = tracing_appender::non_blocking(agent_file);
     let agent_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_target(false)
@@ -77,24 +67,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(app_layer)
         .init();
 
+    agent_guard
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _agent_guard = start_loggers();
+
     let cli = Cli::parse();
 
     debug!(config = ?cli.config, "starting Fyah");
     let config = Config::load(cli.config)?;
     debug!(?config, "config loaded");
 
-    let transport = StdinTransport;
-    let cancelled = CANCEL
-        .get_or_init(|| {
-            let flag: Arc<AtomicBool> = Arc::default();
-            ctrlc::set_handler({
-                let flag = flag.clone();
-                move || flag.store(true, Ordering::Relaxed)
-            })
-            .expect("ctrlc handler");
-            flag
-        })
-        .clone();
+    // Create the cancellation token and wire Ctrl+C.
+    let cancel = CancellationToken::new();
+    tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Ctrl+C received — cancelling");
+            cancel.cancel();
+        }
+    });
+
+    //TODO: the main issue here currenlty is that we are creating and hardcoding to many things such as the session name and snapshot,
+    // we need to load all of this dynamically
+
+    //TODO: later on depending on the config we could change what transport to use
+    let transport = StdinTransport::new(cancel.clone());
 
     // Extract workflow config and config path before consuming config.
     let workflow_config = config.workflow().cloned().unwrap_or_default();
@@ -103,39 +104,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create Workspace (consumes Config, populates ToolRegistry internally).
     let workspace = Workspace::new(config);
 
-    //TODO: maybe we need two different workspaces? one that holds all the actual workspace info and another focused on stuff for the agent
+    // Build the workflow from the config definition.
+    let mut workflow =
+        Workflow::from_config(workflow_config).expect("valid workflow configuration");
+
+    // Attempt to restore workflow cursor from a prior snapshot.
+    // if let Some(snapshot) = load_snapshot(".session-snapshot.json") {
+    //     tracing::info!(
+    //         "restoring workflow from snapshot (step: {})",
+    //         snapshot.workflow.current
+    //     );
+    //     workflow.current = snapshot.workflow.current;
+    //     workflow.history = snapshot.workflow.history;
+    // }
 
     // Spawn the background filesystem watcher (FsBridge).
     // FsBridge::spawn handles missing/dead config_path internally —
     // if it can't watch, it logs a warning and returns a no-op bridge.
+    //TODO: currently the fs_bridge listens to changes in the config to know if something needs to update, the config however could be sent from anywhere (a cli argument pointing somwhere else)
+    // How should we handle the lack of config? do we just listen to the current repo?
     let _fs_bridge = config_path.map(|path| FsBridge::spawn(workspace.clone(), path));
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-
-    // TODO: We need to also pass a storage interface
-
-    let conversation = History::<Message>::default().create_session("main");
-    let _branch = conversation.branch("main");
+    //TODO: we need to have a way to load the sessions histories dynamically
+    let history = History::<Message>::default();
+    let conversation = history.create_session("main");
     let context = SessionContext::new(workspace.clone(), conversation);
+    let mut session = Session::new(transport, cancel, context);
 
-    let mut session = Session::new(
-        Uuid::now_v7().to_string(),
-        transport,
-        cancelled,
-        context,
-        workspace,
-        runtime,
-    );
-
-    let mut workflow =
-        Workflow::from_config(workflow_config).expect("valid workflow configuration");
-    workflow.run(&mut session);
+    crate::runtime::run(&mut session, &mut workflow).await;
 
     info!("Fyah stopped");
-    // Use exit(0) to terminate the process immediately rather than letting
-    // the process linger with a thread stuck on `read(stdin)`.
-    std::process::exit(0);
+    Ok(())
 }

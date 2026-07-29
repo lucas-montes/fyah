@@ -77,52 +77,9 @@ impl Display for BranchId {
     }
 }
 
-//TODO: check <https://agent-trace.dev/> for actual information
-#[derive(Debug, Clone)]
-pub enum AgentTrace {
-    Thought {
-        content: String,
-    },
-    ToolCall {
-        name: String,
-        arguments: String,
-    },
-    ToolResult {
-        tool_call_id: String,
-        content: String,
-    },
-    Observation {
-        content: String,
-    },
-    Error {
-        message: String,
-    },
-}
-
 /// Metadata attached to every node (commit).
 #[derive(Debug, Clone)]
-pub struct NodeMetadata {
-    timestamp: std::time::Instant,
-    traces: Vec<AgentTrace>,
-}
-
-impl NodeMetadata {
-    pub fn new(traces: Vec<AgentTrace>) -> Self {
-        NodeMetadata {
-            timestamp: std::time::Instant::now(),
-            traces,
-        }
-    }
-}
-
-impl Default for NodeMetadata {
-    fn default() -> Self {
-        NodeMetadata {
-            timestamp: std::time::Instant::now(),
-            traces: Vec::new(),
-        }
-    }
-}
+pub struct NodeMetadata;
 
 /// The data stored for every node in the DAG.
 ///
@@ -143,7 +100,7 @@ pub struct NodeRecord<T> {
 /// branches created from this session.
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
-    pub name: String,
+    name: String,
 }
 
 /// The data stored for every branch.
@@ -154,9 +111,9 @@ pub struct SessionRecord {
 /// sentinel); see [`branch_head`].
 #[derive(Debug)]
 pub struct BranchRecord {
-    pub name: String,
-    pub session: SessionId,
-    pub fork_point: Option<NodeId>,
+    name: String,
+    session: SessionId,
+    fork_point: Option<NodeId>,
     head: AtomicUsize,
 }
 
@@ -276,7 +233,7 @@ impl<T> History<T> {
                 NodeRecord {
                     parent,
                     data: Some(data),
-                    meta: NodeMetadata::default(),
+                    meta: NodeMetadata,
                 },
             );
         }
@@ -487,19 +444,6 @@ impl<T: Display> Display for History<T> {
 }
 
 /// Walk `from` back to root, returning Vec in root→from order.
-fn ancestors_from<T>(nodes: &[(NodeId, &NodeRecord<T>)], from: NodeId) -> Vec<NodeId> {
-    let mut path = Vec::new();
-    let mut current = Some(from);
-    while let Some(id) = current {
-        path.push(id);
-        current = nodes
-            .iter()
-            .find(|(n, _)| *n == id)
-            .and_then(|(_, r)| r.parent);
-    }
-    path.reverse();
-    path
-}
 
 /// Render a subtree rooted at `id` with the given line prefix.
 ///
@@ -858,39 +802,39 @@ mod tests {
         let branch = session.branch("branch1");
         for i in 0..5 {
             let v = format!("branch1 node {}", i);
-            let node_id = branch.commit(TestData(v));
+            let _node_id = branch.commit(TestData(v));
         }
         let b2 = branch.branch("new-branch");
         for i in 5..8 {
             let v = format!("branch1 node {}", i);
-            let node_id = branch.commit(TestData(v));
+            let _node_id = branch.commit(TestData(v));
         }
 
         let b3 = branch.branch("new-branch-3");
         for i in 8..12 {
             let v = format!("branch1 node {}", i);
-            let node_id = branch.commit(TestData(v));
+            let _node_id = branch.commit(TestData(v));
         }
 
         for i in 0..5 {
             let v = format!("new-branch node {}", i);
-            let node_id = b2.commit(TestData(v));
+            let _node_id = b2.commit(TestData(v));
         }
 
         let b22 = b2.branch("new-branch");
         for i in 0..5 {
             let v = format!("branch-new-branch node {}", i);
-            let node_id = b22.commit(TestData(v));
+            let _node_id = b22.commit(TestData(v));
         }
 
         for i in 5..8 {
             let v = format!("new-branch node {}", i);
-            let node_id = b2.commit(TestData(v));
+            let _node_id = b2.commit(TestData(v));
         }
 
         for i in 0..5 {
             let v = format!("new-branch-3 node {}", i);
-            let node_id = b3.commit(TestData(v));
+            let _node_id = b3.commit(TestData(v));
         }
 
         println!("\nFinal history:\n{}", history);

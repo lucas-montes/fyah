@@ -415,33 +415,3 @@ impl From<ChatResponse> for ContextMessage {
         }
     }
 }
-
-// ── ChatResponse trait impl ─────────────────────────────────────────────────
-
-// impl crate::llm::client::ChatResponse for ChatResponse {
-//     fn message(self) -> Message {
-//         let mut blocks: Vec<ContentBlock> = Vec::new();
-//         if !self.message.content.is_empty() {
-//             blocks.push(ContentBlock::Text(self.message.content));
-//         }
-//         if let Some(tool_calls) = self.message.tool_calls {
-//             for tc in tool_calls {
-//                 let arguments = tc.function.arguments.unwrap_or(serde_json::Value::Null);
-//                 blocks.push(ContentBlock::ToolCall {
-//                     id: String::new(),
-//                     name: tc.function.name,
-//                     arguments,
-//                 });
-//             }
-//         }
-//         Message::new(Role::Assistant, blocks)
-//     }
-
-//     fn tool_calls(&self) -> Option<&Vec<crate::context::ToolCall>> {
-//         None
-//     }
-
-//     fn content(&self) -> Option<&String> {
-//         Some(&self.message.content)
-//     }
-// }

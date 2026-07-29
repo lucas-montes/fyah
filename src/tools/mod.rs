@@ -12,20 +12,13 @@
 //! Data-carrying Tool variants use the same named structs as config, avoiding
 //! duplication between wire format and TOML configuration.
 
-// Re-exports are consumed by the derive macro (`crate::tools::*` in generated
-// code) and by ToolRegistry (T02). Suppress unused warnings until T02 wires
-// the registry.
+// Re-exports are consumed by the `#[derive(FunctionDef)]` proc-macro
+// generated code (`crate::tools::*` paths). Keep even if currently unused.
 
 mod config;
 mod registry;
 mod types;
 
-// These re-exports are consumed by the `#[derive(FunctionDef)]` proc-macro
-// generated code (`crate::tools::*` paths). Keep even if currently unused.
-
-pub use config::{CustomToolConfig, ToolsConfig};
+pub use config::ToolsConfig;
 pub use registry::ToolRegistry;
-
-pub use types::{
-    FileSearchTool, FunctionDef, FunctionTool, McpTool, Tool, ToolParameters, ToolProperty,
-};
+pub use types::{FunctionDef, FunctionTool, Tool, ToolParameters, ToolProperty};

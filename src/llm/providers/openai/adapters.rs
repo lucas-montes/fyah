@@ -81,7 +81,7 @@ impl<'a> Provider<'a> for OpenAIFormat {
             .json(&prompt)
     }
 
-    fn build_prompt(&self, prompt: &'a Prompt) -> Self::Prompt {
+    fn build_prompt(&self, _prompt: &'a Prompt) -> Self::Prompt {
         todo!()
     }
 }

@@ -220,59 +220,6 @@ impl From<ChatResponse> for Message {
     }
 }
 
-// impl crate::llm::client::ChatResponse for CreateMessageResponse {
-//     fn message(self) -> Message {
-//         let blocks: Vec<ContentBlock> = self
-//             .content
-//             .into_iter()
-//             .filter_map(|block| match block {
-//                 MessageContentBlock::Text { text } => Some(ContentBlock::Text(text)),
-//                 MessageContentBlock::ToolUse { id, name, input } => Some(ContentBlock::ToolCall {
-//                     id,
-//                     name,
-//                     arguments: input,
-//                 }),
-//                 MessageContentBlock::ToolResult {
-//                     tool_use_id,
-//                     content,
-//                     is_error,
-//                 } => {
-//                     let content_str = match content {
-//                         Value::String(s) => s,
-//                         other => other.to_string(),
-//                     };
-//                     Some(ContentBlock::ToolResult {
-//                         id: tool_use_id,
-//                         content: content_str,
-//                         is_error: is_error.unwrap_or(false),
-//                     })
-//                 }
-//                 MessageContentBlock::Thinking {
-//                     thinking,
-//                     signature,
-//                 } => Some(ContentBlock::Thinking {
-//                     content: thinking,
-//                     signature: Some(signature),
-//                 }),
-//                 MessageContentBlock::RedactedThinking { .. }
-//                 | MessageContentBlock::Image { .. } => None,
-//             })
-//             .collect();
-//         Message::new(Role::Assistant, blocks)
-//     }
-
-//     fn tool_calls(&self) -> Option<&Vec<ToolCall>> {
-//         None
-//     }
-
-//     fn content(&self) -> Option<&String> {
-//         self.content.iter().find_map(|block| match block {
-//             MessageContentBlock::Text { text } => Some(text),
-//             _ => None,
-//         })
-//     }
-// }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StopReason {

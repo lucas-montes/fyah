@@ -21,9 +21,9 @@ pub enum ContentBlock {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

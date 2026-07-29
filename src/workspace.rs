@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU16;
 use std::sync::mpsc;
@@ -10,7 +9,6 @@ use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
 
 use crate::config::Config;
-use crate::hooks::HooksConfig;
 use crate::llm::{Config as LlmConfig, ProviderRegistry};
 use crate::tools::ToolRegistry;
 
@@ -57,19 +55,16 @@ pub struct Workspace(Arc<RwLock<WorkspaceInner>>);
 
 impl Workspace {
     pub fn new(config: Config) -> Self {
-        let (hooks, llm_config, tools_config, _workflow) = config.into_parts();
+        let (llm_config, tools_config, _workflow) = config.into_parts();
         let mut tool_registry = ToolRegistry::default();
         let providers = ProviderRegistry::default(); //TODO: populate and add the reload logic
         tool_registry.reload_from_config(tools_config);
         let inner = WorkspaceInner {
             version: AtomicU16::new(0),
-            hooks,
+
             llm_config,
             tool_registry,
             providers,
-            files: Vec::new(),
-            sessions: HashMap::new(),
-            context: HashMap::new(),
         };
         Workspace(Arc::new(RwLock::new(inner)))
     }
@@ -94,27 +89,19 @@ impl std::ops::Deref for Workspace {
 #[derive(Debug)]
 pub struct WorkspaceInner {
     version: AtomicU16,
-    hooks: HooksConfig,
     llm_config: LlmConfig,
     /// Shared tools available in this workpspace
     tool_registry: ToolRegistry,
     providers: ProviderRegistry,
-    files: Vec<PathBuf>,
-    sessions: HashMap<String, PathBuf>, // TODO: find a why to save the sessions' state to disk and have the path here
-    context: HashMap<String, HashMap<String, Vec<PathBuf>>>, // SCE context
 }
 
 impl Default for WorkspaceInner {
     fn default() -> Self {
         WorkspaceInner {
             version: AtomicU16::new(0),
-            hooks: HooksConfig::default(),
             llm_config: LlmConfig::default(),
             tool_registry: ToolRegistry::default(),
             providers: ProviderRegistry::default(),
-            files: Vec::new(),
-            sessions: HashMap::new(),
-            context: HashMap::new(),
         }
     }
 }
@@ -124,7 +111,7 @@ impl WorkspaceInner {
     pub fn reload_config(&mut self, config_path: &std::path::Path) {
         match Config::load(Some(config_path.to_path_buf())) {
             Ok(config) => {
-                let (_, _, tools_config, _) = config.into_parts();
+                let (_, tools_config, _) = config.into_parts();
                 self.tool_registry.reload_from_config(tools_config);
             }
             Err(e) => {
@@ -135,10 +122,6 @@ impl WorkspaceInner {
 
     pub fn llm_config(&self) -> &LlmConfig {
         &self.llm_config
-    }
-
-    pub fn hooks(&self) -> &HooksConfig {
-        &self.hooks
     }
 
     pub fn providers(&self) -> &ProviderRegistry {

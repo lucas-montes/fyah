@@ -5,15 +5,9 @@
 //! [`CustomToolConfig`] embeds [`FunctionTool`] via `#[serde(flatten)]` so the
 //! TOML stays flat while reusing the same parameter schema.
 
-use std::path::Path;
-
 use serde::Deserialize;
 
-use super::{
-    Tool,
-    types::{FileSearchTool, FunctionTool, McpTool},
-};
-
+use super::types::{FileSearchTool, FunctionTool, McpTool, Tool};
 /// Configuration for a custom function tool.
 ///
 /// Embedds [`FunctionTool`] via `#[serde(flatten)]` so `name`, `description`,
@@ -92,11 +86,5 @@ impl ToolsConfig {
             tools.push(Tool::Function(custom.function));
         }
         tools
-    }
-
-    pub fn dir(&self) -> &Path {
-        todo!(
-            "remove this, and instead of looking at the tools dir, we'll simply check the config to see what is enabled there"
-        )
     }
 }

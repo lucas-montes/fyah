@@ -1,9 +1,6 @@
-use std::{
-    collections::VecDeque,
-    fmt::{Debug, Display},
-};
+use std::{collections::VecDeque, fmt::Debug};
 
-use serde::{Serialize, de::DeserializeOwned};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     context::{AgentContext, ContentBlock, Message, Prompt, SessionContext, ToolCall},
@@ -118,61 +115,85 @@ pub struct Agent<Client: LlmClient> {
 
 impl<Client: LlmClient> Agent<Client> {
     //TODO: we should check how to leverage more lifetimes as we only want to reference the context of the runtime and have some more information
-    async fn run(mut self) -> Result<AgentContext, Error> {
+    async fn run(mut self, cancel: CancellationToken) -> Result<AgentContext, Error> {
         let mut tool_calls_messages = VecDeque::new();
 
         //TODO: we probably need to add hooks
-        //TODO: how to correctly stop this mid-way?
 
         for _ in 0..self.config.max_iterations {
-            let prompt: Prompt = self.config.prompt_builder.build(&self.context);
-            let request = self
-                .client
-                .create_request(reqwest::Method::POST, self.config.provider.url());
-            let request = self.config.provider.create_request(&prompt, request);
-
-            let raw = Client::send_request(request)
-                .await
-                .map_err(|e| Error::Client(e.to_string()))?;
-
-            let msg: Message = self
-                .config
-                .provider
-                .parse_response(raw.as_ref())
-                .map_err(|e| Error::Client(e.to_string()))?;
-
-            let tool_calls = msg.tool_calls();
-
-            if tool_calls.is_empty() {
-                if let Some(content) = msg.content() {
-                    for block in content {
-                        if let ContentBlock::Text(text) = block {
-                            println!("{text}");
-                        }
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("agent cancelled");
+                    return Err(Error::Client("agent cancelled".into()));
+                }
+                result = self.iterate(&mut tool_calls_messages) => {
+                    match result {
+                        Ok(true) => break,       // terminal response, no tool calls
+                        Ok(false) => {}            // continue loop
+                        Err(e) => return Err(e),
                     }
                 }
-                break;
             }
-
-            for tc in tool_calls {
-                let result = handle_tool_call(tc)?;
-
-                tool_calls_messages.push_back(Message::Tool {
-                    tool_call_id: tc.id.clone(),
-                    content: vec![ContentBlock::Text(result)],
-                    is_error: false,
-                });
-            }
-
-            tool_calls_messages.push_front(msg);
-            self.config
-                .context_builder
-                .handle_new_messages(&mut tool_calls_messages, &mut self.context);
-            self.config.context_compaction.compact(&mut self.context);
-            //TODO:
         }
 
         Ok(self.context)
+    }
+
+    /// Run a single agent iteration: build prompt, send request, parse response,
+    /// handle tool calls, and update context.
+    ///
+    /// Returns `Ok(true)` if the response had no tool calls (terminal — break outer loop),
+    /// `Ok(false)` if the loop should continue, or `Err` on failure.
+    async fn iterate(
+        &mut self,
+        tool_calls_messages: &mut VecDeque<Message>,
+    ) -> Result<bool, Error> {
+        let prompt: Prompt = self.config.prompt_builder.build(&self.context);
+        let request = self
+            .client
+            .create_request(reqwest::Method::POST, self.config.provider.url());
+        let request = self.config.provider.create_request(&prompt, request);
+
+        let raw = Client::send_request(request)
+            .await
+            .map_err(|e| Error::Client(e.to_string()))?;
+
+        let msg: Message = self
+            .config
+            .provider
+            .parse_response(raw.as_ref())
+            .map_err(|e| Error::Client(e.to_string()))?;
+
+        let tool_calls = msg.tool_calls();
+
+        if tool_calls.is_empty() {
+            if let Some(content) = msg.content() {
+                for block in content {
+                    if let ContentBlock::Text(text) = block {
+                        println!("{text}");
+                    }
+                }
+            }
+            return Ok(true);
+        }
+
+        for tc in tool_calls {
+            let result = handle_tool_call(tc)?;
+
+            tool_calls_messages.push_back(Message::Tool {
+                tool_call_id: tc.id.clone(),
+                content: vec![ContentBlock::Text(result)],
+                is_error: false,
+            });
+        }
+
+        tool_calls_messages.push_front(msg);
+        self.config
+            .context_builder
+            .handle_new_messages(tool_calls_messages, &mut self.context);
+        self.config.context_compaction.compact(&mut self.context);
+
+        Ok(false)
     }
 }
 
@@ -216,7 +237,8 @@ pub fn spawn(
     model: &str,
     agent_name: &str,
     session_context: &SessionContext,
-) -> Result<impl Future<Output = Result<AgentContext, Error>>, ProxyError> {
+    cancel: CancellationToken,
+) -> Result<impl Future<Output = Result<AgentContext, Error>> + use<>, ProxyError> {
     //TODO: we probably need to add hooks
     let agent_cfg = llm_config
         .get_agent(agent_name)
@@ -230,7 +252,7 @@ pub fn spawn(
         .get_model(model)
         .ok_or_else(|| ProxyError::ModelNotFound(model.to_string()))?;
 
-    let api_key = provider_cfg.api_key();
+    let _api_key = provider_cfg.api_key();
 
     let client = client::Client::default();
 
@@ -259,5 +281,5 @@ pub fn spawn(
         config,
     };
 
-    Ok(agent.run())
+    Ok(agent.run(cancel))
 }

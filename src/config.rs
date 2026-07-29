@@ -13,7 +13,6 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::hooks::HooksConfig;
 use crate::llm::Config as LlmConfig;
 use crate::tools::ToolsConfig;
 
@@ -65,26 +64,26 @@ impl std::error::Error for Error {
 /// Deserialized from `[workflow]` in `fyah.toml`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkflowConfig {
-    pub initial: String,
-    pub max_iterations: Option<u32>,
+    pub(crate) initial: String,
+    pub(crate) max_iterations: Option<u32>,
     /// Map of step name → step definition.
     /// In TOML: `[workflow.steps.plan]`, `[workflow.steps.implement]`, etc.
     #[serde(default)]
-    pub steps: HashMap<String, StepDef>,
+    pub(crate) steps: HashMap<String, StepDef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StepDef {
     /// If `None` and the step name matches a built-in, the built-in is used.
     /// If `None` and no built-in matches, the step is skipped.
-    pub backend: Option<BackendDef>,
+    pub(crate) backend: Option<BackendDef>,
     /// Empty or missing → treated as `Done` (terminal).
-    pub on_success: Option<String>,
+    pub(crate) on_success: Option<String>,
     /// Empty or missing → treated as `Done` (terminal).
-    pub on_failure: Option<String>,
-    pub description: Option<String>,
+    pub(crate) on_failure: Option<String>,
+    pub(crate) description: Option<String>,
     /// Per-step timeout in seconds (applied by the backend where possible).
-    pub timeout_secs: Option<u64>,
+    pub(crate) timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,8 +114,6 @@ pub enum BackendDef {
 pub struct Config {
     #[serde(flatten)]
     llm: LlmConfig,
-    #[serde(default)]
-    hooks: HooksConfig,
     /// Tool configuration (toggles, MCP servers, custom tools).
     #[serde(default)]
     tools: ToolsConfig,
@@ -129,18 +126,6 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn hooks(&self) -> &HooksConfig {
-        &self.hooks
-    }
-
-    pub fn llm(&self) -> &LlmConfig {
-        &self.llm
-    }
-
-    pub fn tools(&self) -> &ToolsConfig {
-        &self.tools
-    }
-
     pub fn workflow(&self) -> Option<&WorkflowConfig> {
         self.workflow.as_ref()
     }
@@ -152,9 +137,9 @@ impl Config {
 
     /// Consume `Config` and return its inner parts.
     ///
-    /// Order: `(hooks, llm_config, tools_config, workflow_config)`.
-    pub fn into_parts(self) -> (HooksConfig, LlmConfig, ToolsConfig, Option<WorkflowConfig>) {
-        (self.hooks, self.llm, self.tools, self.workflow)
+    /// Order: `(llm_config, tools_config, workflow_config)`.
+    pub fn into_parts(self) -> (LlmConfig, ToolsConfig, Option<WorkflowConfig>) {
+        (self.llm, self.tools, self.workflow)
     }
     /// Load and merge config from all sources in precedence order.
     ///

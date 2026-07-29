@@ -1,17 +1,25 @@
-use std::sync::Arc;
+//! Async Session — runtime context shared across workflow steps.
+//!
+//! The [`Session`] holds the transport, workspace, context context, and
+//! cancellation token.  Steps access I/O through `session.transport` directly.
+//!
+//! Snapshot types ([`WorkflowSnapshot`], [`SessionSnapshot`]) support saving
+//! and restoring workflow state to/from `.session-snapshot.json`.
+
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::context::SessionContext;
 use crate::llm::AgentError;
 use crate::llm::ProxyError;
 use crate::llm::spawn;
+use crate::transport::Transport;
 use crate::workspace::Workspace;
-use crate::workspace::WorkspaceInner;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use tokio::task::JoinError;
 
-use crate::transport::PromtpMsg;
-use crate::transport::Transport;
+// ─── SpawnError ───────────────────────────────────────
 
 #[derive(Debug)]
 pub enum SpawnError {
@@ -58,96 +66,121 @@ impl From<ProxyError> for SpawnError {
     }
 }
 
-//TODO: maybe we need a runtime to drive the agent/s so they follow the steps that we want and this in a deterministic way. And another layer that bridges context agregation, agents orchestration, users communication and the fs_watcher so the 'knowledge' is updated
+// ─── Session ──────────────────────────────────────────
 
-//TODO: do we need this runtime? we need a way to manage agents and let the user send promts, that's all. However the back and forth between the agent and user is fairly common
+/// Runtime session shared across workflow steps.
+///
+/// Steps access I/O through [`Session::transport`] and LLM
+/// agents through [`Session::spawn_agent()`].  Cancellation is handled
+/// via the shared [`CancellationToken`].
 pub struct Session<T> {
-    id: String,
-    user_channel: T,
-    cancelled: Arc<AtomicBool>,
-    //TODO: maybe this context should be a bit different, we could have a map that stores context from different agents
+    pub transport: T,
     context: SessionContext,
-    /// Shared state: config, tools, and filesystem bridge.
-    workspace: Workspace,
-    runtime: tokio::runtime::Runtime,
+    cancellation_token: CancellationToken,
 }
 
 impl<T: Transport> Session<T> {
     pub fn new(
-        id: String,
-        user_channel: T,
-        cancelled: Arc<AtomicBool>,
+        transport: T,
+        cancellation_token: CancellationToken,
         context: SessionContext,
-        workspace: Workspace,
-        runtime: tokio::runtime::Runtime,
     ) -> Self {
         Self {
-            id,
-            user_channel,
-
-            cancelled,
+            transport,
+            cancellation_token,
             context,
-            workspace,
-            runtime,
         }
     }
 
-    pub fn workspace(&self) -> std::sync::RwLockReadGuard<'_, WorkspaceInner> {
-        self.workspace.read().unwrap()
-    }
-
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancellation_token.is_cancelled()
     }
 
-    pub fn spawn_agent(
+    /// Spawn an agent for the given provider / model / agent and merge
+    /// its context context back into the session.
+    ///
+    /// The workspace read-lock is released *before* awaiting the agent task
+    /// so the lock is never held across an await point.
+    pub async fn spawn_agent(
         &mut self,
         provider: &str,
         model: &str,
         agent_name: &str,
     ) -> Result<(), SpawnError> {
-        let agent_context = {
-            let workspace = self.workspace.read().unwrap();
-            let handle = spawn(
+        let handle = {
+            let workspace = self.context.workspace().read().unwrap();
+            spawn(
                 workspace.llm_config(),
                 provider,
                 model,
                 agent_name,
                 &self.context,
-            )?;
-            self.runtime.block_on(handle)
-        }?;
+                self.cancellation_token.clone(),
+            )?
+        };
+        let agent_context = handle.await?;
         self.context.merge(&agent_context);
         Ok(())
     }
+}
 
-    /// Write a message to the user (ignores I/O errors).
-    pub fn write(&mut self, msg: &str)
-    where
-        T: Transport,
-    {
-        let _ = self.user_channel.write(msg.to_owned().into());
-    }
+// ─── Snapshot types ───────────────────────────────────
 
-    /// Read a line from the user. Returns empty string on error/EOF.
-    pub fn read(&mut self) -> PromtpMsg {
-        self.read_retry(5, 0)
-    }
+/// Serializable snapshot of a workflow's cursor and history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowSnapshot {
+    pub current: String,
+    pub history: Vec<String>,
+}
 
-    fn read_retry(&mut self, max_retries: usize, retry: usize) -> PromtpMsg {
-        // NOTE: could this really fail that many times?
-        match self.user_channel.read() {
-            Ok(msg) => msg,
-            Err(e) => {
-                self.write(&format!("Error reading input: {e}"));
-                self.read_retry(max_retries, retry + 1)
-            }
-        }
-    }
+/// Serializable snapshot of the full session state.
+///
+/// The `context` field is stored as a JSON [`serde_json::Value`]
+/// placeholder — full context serialization requires upstream
+/// support in the `SessionContext` type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    pub workflow: WorkflowSnapshot,
+    context: serde_json::Value,
+    timestamp: SystemTime,
+}
 
-    /// Read a yes/no answer. Returns `true` for "y" or "yes".
-    pub fn read_yes_no(&mut self) -> bool {
-        let input = self.read().prompt().to_lowercase();
-        input == "y" || input == "yes"
+// ─── Snapshot functions ───────────────────────────────
+
+/// Build a [`SessionSnapshot`] from the current workflow and session.
+///
+/// The `context` field is stored as a JSON null placeholder.
+/// Full context serialisation requires `Serialize` on
+/// [`SessionContext`], which is deferred (the plan constrains changes
+/// to Conversation types).
+pub fn snapshot(workflow: &crate::runtime::Workflow, _context: &SessionContext) -> SessionSnapshot {
+    SessionSnapshot {
+        workflow: WorkflowSnapshot {
+            current: workflow.current().to_string(),
+            history: workflow.history().to_vec(),
+        },
+        context: serde_json::Value::Null,
+        timestamp: SystemTime::now(),
     }
+}
+
+/// Save a snapshot to `.session-snapshot.json`.
+///
+/// Errors are silently ignored (snapshotting is best-effort).
+pub fn save_snapshot<T: Transport + 'static>(
+    workflow: &crate::runtime::Workflow,
+    session: &Session<T>,
+) {
+    let snap = snapshot(workflow, &session.context);
+    if let Ok(json) = serde_json::to_string_pretty(&snap) {
+        std::fs::write(".session-snapshot.json", &json).ok();
+    }
+}
+
+/// Load a snapshot from `.session-snapshot.json`.
+///
+/// Returns `None` if the file does not exist or cannot be parsed.
+pub fn load_snapshot(path: &str) -> Option<SessionSnapshot> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
 }
