@@ -179,47 +179,6 @@ pub struct ChatResponse {
     usage: Usage,
 }
 
-use crate::context::{ContentBlock, Message, ToolCall};
-
-impl From<ChatResponse> for Message {
-    fn from(response: ChatResponse) -> Self {
-        let mut content = Vec::new();
-        let mut tool_calls = Vec::new();
-        for block in response.content {
-            match block {
-                MessageContentBlock::Text { text } => {
-                    content.push(ContentBlock::Text(text));
-                }
-                MessageContentBlock::ToolUse { id, name, input } => {
-                    tool_calls.push(ToolCall {
-                        id,
-                        name,
-                        arguments: input,
-                    });
-                }
-                MessageContentBlock::ToolResult { .. } => {}
-                MessageContentBlock::Thinking {
-                    thinking,
-                    signature,
-                } => {
-                    content.push(ContentBlock::Thinking {
-                        content: thinking,
-                        signature: Some(signature),
-                    });
-                }
-                MessageContentBlock::RedactedThinking { data } => {
-                    content.push(ContentBlock::RedactedThinking { data });
-                }
-                MessageContentBlock::Image { .. } => {}
-            }
-        }
-        Message::Assistant {
-            content,
-            tool_calls,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StopReason {

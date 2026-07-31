@@ -45,7 +45,7 @@ impl ContextBuilder for DefaultContextBuilder {
 
     fn populate_from_session(&self, _session_context: &SessionContext) -> AgentContext {
         // Implement the default logic to populate context from the session
-        AgentContext::default()
+        todo!()
     }
 
     fn handle_new_messages(&self, _messages: &mut VecDeque<Message>, _context: &mut AgentContext) {

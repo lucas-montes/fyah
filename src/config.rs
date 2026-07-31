@@ -10,107 +10,13 @@
 //! TODO: at some point read .github, .opencode and all the specific configs
 
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::llm::Config as LlmConfig;
-use crate::tools::ToolsConfig;
+use crate::tools::Config as ToolsConfig;
+use crate::workflows::Config as WorkflowsConfig;
 
-#[derive(Debug)]
-pub enum Error {
-    /// A config file was explicitly requested via --config but does not exist.
-    NotFound(PathBuf),
-    /// I/O error reading a config file.
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    /// TOML parse error in a config file.
-    Parse {
-        path: PathBuf,
-        source: toml::de::Error,
-    },
-    /// Merged value could not be deserialized into the Config schema.
-    Deserialize(String),
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound(p) => write!(f, "config file not found: {}", p.display()),
-            Self::Io { path, source } => {
-                write!(f, "I/O error reading {}: {}", path.display(), source)
-            }
-            Self::Parse { path, source } => {
-                write!(f, "TOML parse error in {}: {}", path.display(), source)
-            }
-            Self::Deserialize(msg) => write!(f, "config deserialization error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-}
-
-// ─── Workflow / step config ──────────────────────────────────
-
-/// Deserialized from `[workflow]` in `fyah.toml`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkflowConfig {
-    pub(crate) initial: String,
-    pub(crate) max_iterations: Option<u32>,
-    /// Map of step name → step definition.
-    /// In TOML: `[workflow.steps.plan]`, `[workflow.steps.implement]`, etc.
-    #[serde(default)]
-    pub(crate) steps: HashMap<String, StepDef>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StepDef {
-    /// If `None` and the step name matches a built-in, the built-in is used.
-    /// If `None` and no built-in matches, the step is skipped.
-    pub(crate) backend: Option<BackendDef>,
-    /// Empty or missing → treated as `Done` (terminal).
-    pub(crate) on_success: Option<String>,
-    /// Empty or missing → treated as `Done` (terminal).
-    pub(crate) on_failure: Option<String>,
-    pub(crate) description: Option<String>,
-    /// Per-step timeout in seconds (applied by the backend where possible).
-    pub(crate) timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-pub enum BackendDef {
-    #[serde(rename = "command")]
-    Command {
-        command: String,
-        shell: Option<String>,
-    },
-    #[serde(rename = "script")]
-    Script { interpreter: String, source: String },
-    #[serde(rename = "wasm")]
-    Wasm {
-        module: PathBuf,
-        function: Option<String>,
-    },
-    #[serde(rename = "native")]
-    Native {
-        path: PathBuf,
-        function: Option<String>,
-    },
-}
-
-// ─── Main config ─────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(flatten)]
     llm: LlmConfig,
@@ -119,17 +25,13 @@ pub struct Config {
     tools: ToolsConfig,
     /// Workflow / state-machine step definitions.
     #[serde(default)]
-    workflow: Option<WorkflowConfig>,
+    workflows: WorkflowsConfig,
     /// The filesystem path this config was loaded from (set by `load()`).
     #[serde(skip)]
     path: Option<PathBuf>,
 }
 
 impl Config {
-    pub fn workflow(&self) -> Option<&WorkflowConfig> {
-        self.workflow.as_ref()
-    }
-
     /// The filesystem path this config was loaded from, if any.
     pub fn source_path(&self) -> Option<&Path> {
         self.path.as_deref()
@@ -138,8 +40,8 @@ impl Config {
     /// Consume `Config` and return its inner parts.
     ///
     /// Order: `(llm_config, tools_config, workflow_config)`.
-    pub fn into_parts(self) -> (LlmConfig, ToolsConfig, Option<WorkflowConfig>) {
-        (self.llm, self.tools, self.workflow)
+    pub fn into_parts(self) -> (LlmConfig, ToolsConfig, WorkflowsConfig) {
+        (self.llm, self.tools, self.workflows)
     }
     /// Load and merge config from all sources in precedence order.
     ///
@@ -191,54 +93,45 @@ impl Config {
     }
 }
 
-impl Default for WorkflowConfig {
-    /// Default workflow: Plan → Implement → Test → Commit → Done.
-    fn default() -> Self {
-        let mut steps = HashMap::new();
-        steps.insert(
-            "plan".into(),
-            StepDef {
-                backend: None,
-                on_success: Some("implement".into()),
-                on_failure: Some("plan".into()),
-                description: None,
-                timeout_secs: None,
-            },
-        );
-        steps.insert(
-            "implement".into(),
-            StepDef {
-                backend: None,
-                on_success: Some("test".into()),
-                on_failure: Some("plan".into()),
-                description: None,
-                timeout_secs: None,
-            },
-        );
-        steps.insert(
-            "test".into(),
-            StepDef {
-                backend: None,
-                on_success: Some("commit".into()),
-                on_failure: Some("implement".into()),
-                description: None,
-                timeout_secs: None,
-            },
-        );
-        steps.insert(
-            "commit".into(),
-            StepDef {
-                backend: None,
-                on_success: Some("done".into()),
-                on_failure: Some("implement".into()),
-                description: None,
-                timeout_secs: None,
-            },
-        );
-        WorkflowConfig {
-            initial: "plan".into(),
-            max_iterations: None,
-            steps,
+#[derive(Debug)]
+pub enum Error {
+    /// A config file was explicitly requested via --config but does not exist.
+    NotFound(PathBuf),
+    /// I/O error reading a config file.
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// TOML parse error in a config file.
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    /// Merged value could not be deserialized into the Config schema.
+    Deserialize(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(p) => write!(f, "config file not found: {}", p.display()),
+            Self::Io { path, source } => {
+                write!(f, "I/O error reading {}: {}", path.display(), source)
+            }
+            Self::Parse { path, source } => {
+                write!(f, "TOML parse error in {}: {}", path.display(), source)
+            }
+            Self::Deserialize(msg) => write!(f, "config deserialization error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            _ => None,
         }
     }
 }

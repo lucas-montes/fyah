@@ -1,9 +1,11 @@
 use crate::workspace::Workspace;
 
-use super::history::{Branch, Session};
-use crate::context::Message;
+use super::{
+    history::{Branch, Session},
+    message::Message,
+};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AgentContext {
     workspace: Workspace,
     conversation: Branch<Message>,

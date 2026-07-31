@@ -1,24 +1,111 @@
-//! Tools module — schema types and the `FunctionDef` trait.
-//!
-//! This module provides the core types used by the `#[derive(FunctionDef)]`
-//! proc-macro (`fyah-derive`) and the LLM wire-format for tool definitions.
-//!
-//! Variants that carry data use named structs (e.g. [`FunctionTool`],
-//! [`FileSearchTool`], [`McpTool`]) so the same types can be reused in
-//! configuration parsing and tool registry construction.
-//!
-//! # Types
-//!
-//! - [`FunctionDef`] — trait implemented by `#[derive(FunctionDef)]` on argument structs
-//! - [`Tool`] — wire-format tool definition, an internally-tagged enum
-//! - [`FunctionTool`], [`FileSearchTool`], [`McpTool`] — named structs for data-carrying variants
-//! - [`ToolParameters`] — JSON Schema `properties` object for a tool's arguments
-//! - [`ToolProperty`] — a single property inside tool parameters
-
 use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+
+/// Central registry of all available [`Tool`] definitions.
+///
+/// Two internal lists:
+/// - `builtins` — tools registered at compile time via [`register_builtin`]
+/// - `config_tools` — tools populated from [`Config`] via [`reload_from_config`]
+///
+/// Both lists are combined by [`for_context`], which currently returns all
+/// tools (identity). The signature is ready for per-agent filtering.
+#[derive(Debug, Default)]
+pub struct ToolRegistry {
+    /// Compile-time known tools (e.g. `Read`, `Bash` from `FunctionDef`).
+    builtins: Vec<Tool>,
+    /// Tools parsed from `fyah.toml` `[tools]` section.
+    config_tools: Vec<Tool>,
+}
+
+impl ToolRegistry {
+    /// Register a compile-time known tool.
+    ///
+    /// Typically called with [`FunctionDef::tool()`] at startup.
+
+    /// Rebuild `config_tools` from a parsed [`Config`].
+    ///
+    /// Takes ownership of the config and moves data out — no cloning.
+    /// Clears the previous config tools and converts each enabled entry
+    /// into the corresponding [`Tool`] variant. Tools removed from config
+    /// are automatically dropped on the next call.
+    pub fn reload_from_config(&mut self, cfg: Config) {
+        self.config_tools = cfg.into_tools();
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CustomToolConfig {
+    /// `FunctionTool` fields flattened into this struct.
+    #[serde(flatten)]
+    function: FunctionTool,
+    /// Shell command to execute when the tool is called.
+    command: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Config {
+    /// Enable web search tool.
+    #[serde(default)]
+    web_search: bool,
+    /// Enable file search tool with vector store configuration.
+    #[serde(default)]
+    file_search: Option<FileSearchTool>,
+    /// Enable code interpreter tool.
+    #[serde(default)]
+    code_interpreter: bool,
+    /// Enable computer use tool.
+    #[serde(default)]
+    computer_use: bool,
+    /// Enable shell tool.
+    #[serde(default)]
+    shell: bool,
+    /// Enable tool search (deferred tool loading).
+    #[serde(default)]
+    tool_search: bool,
+    /// MCP server definitions.
+    #[serde(default)]
+    mcp: Vec<McpTool>,
+    /// Custom function tool definitions.
+    #[serde(default)]
+    custom: Vec<CustomToolConfig>,
+}
+
+impl Config {
+    /// Consume the config and produce the list of enabled [`Tool`] variants.
+    ///
+    /// Moves data out of the config fields — no cloning. After calling this,
+    /// the config is consumed and cannot be used again.
+    pub fn into_tools(self) -> Vec<Tool> {
+        let mut tools = Vec::new();
+        if self.web_search {
+            tools.push(Tool::WebSearch);
+        }
+        if self.code_interpreter {
+            tools.push(Tool::CodeInterpreter);
+        }
+        if self.computer_use {
+            tools.push(Tool::ComputerUse);
+        }
+        if self.shell {
+            tools.push(Tool::Shell);
+        }
+        if self.tool_search {
+            tools.push(Tool::ToolSearch);
+        }
+        if let Some(fs) = self.file_search {
+            tools.push(Tool::FileSearch(fs));
+        }
+        for mcp in self.mcp {
+            tools.push(Tool::Mcp(mcp));
+        }
+        for custom in self.custom {
+            tools.push(Tool::Function(custom.function));
+        }
+        tools
+    }
+}
 
 /// Trait for generating a [`Tool::Function`] from a struct's fields.
 ///
@@ -36,21 +123,21 @@ pub trait FunctionDef {
 /// Used as the payload of [`Tool::Function`] and also reused in
 /// [`CustomToolConfig`](crate::tools::config::CustomToolConfig) via
 /// `#[serde(flatten)]`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FunctionTool {
     /// The function name (e.g. `"read_file"`).
-    pub(crate) name: Cow<'static, str>,
+    name: Cow<'static, str>,
     /// Explains the function's purpose.
-    pub(crate) description: Cow<'static, str>,
+    description: Cow<'static, str>,
     /// JSON Schema describing the function's parameters.
-    pub(crate) parameters: ToolParameters,
+    parameters: ToolParameters,
 }
 
 /// A file-search tool definition.
 ///
 /// Used as the payload of [`Tool::FileSearch`] and also in
 /// `[tools]` configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FileSearchTool {
     /// Which vector stores to search.
     vector_store_ids: Vec<String>,
@@ -68,7 +155,7 @@ pub struct FileSearchTool {
 /// - The `label` field serializes as `"server_label"` (wire format) but also
 ///   accepts `"name"` in TOML config via `#[serde(alias)]`.
 /// - `server_description` is omitted from JSON when `None`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct McpTool {
     /// A label to identify the server.
     /// Serialized as `"server_label"` in JSON; accepts `"name"` in TOML.
@@ -98,7 +185,7 @@ pub struct McpTool {
 /// {"type": "web_search"}
 /// {"type": "code_interpreter"}
 /// ```
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Tool {
     /// A function the model may call — JSON Schema for the arguments.
@@ -123,7 +210,7 @@ pub enum Tool {
 ///
 /// String fields (except map keys) use [`Cow<'static, str>`] since most
 /// values are statically known (e.g. `"object"` for `param_type`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ToolParameters {
     /// The schema type — always `"object"`.
     #[serde(rename = "type")]
@@ -139,7 +226,7 @@ pub struct ToolParameters {
 /// Both fields use [`Cow<'static, str>`] since `property_type` is always
 /// a static string like `"string"` or `"integer"`, and descriptions are
 /// often doc-comment literals from the derive macro.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ToolProperty {
     /// The JSON Schema type (e.g. `"string"`, `"integer"`).
     #[serde(rename = "type")]

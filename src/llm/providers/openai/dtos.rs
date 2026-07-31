@@ -89,8 +89,6 @@ pub struct Config {
 }
 
 /// `POST /v1/chat/completions` request body.
-///
-/// All optional fields default to `None` (omitted from JSON via `skip_serializing_if`).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatRequest<'a> {
@@ -870,53 +868,4 @@ struct DeltaFunctionCall {
     name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     arguments: Option<String>,
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Conversion to unified Message
-// ═════════════════════════════════════════════════════════════════════════════
-
-use crate::context::{ContentBlock, Message as ContextMessage, ToolCall as ContextToolCall};
-
-impl From<ChatResponse> for ContextMessage {
-    fn from(response: ChatResponse) -> Self {
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .expect("ChatResponse must have at least one choice");
-        let mut content = Vec::new();
-        if let Some(text) = choice.message.content {
-            if !text.is_empty() {
-                content.push(ContentBlock::Text(text));
-            }
-        }
-        if let Some(refusal) = choice.message.refusal {
-            if !refusal.is_empty() {
-                content.push(ContentBlock::Text(refusal));
-            }
-        }
-        let tool_calls = choice
-            .message
-            .tool_calls
-            .into_iter()
-            .map(|tc| {
-                let (name, arguments_str) = match tc.kind {
-                    ToolCallKind::Function { function } => (function.name, function.arguments),
-                    ToolCallKind::Custom { custom } => (custom.name, custom.input),
-                };
-                let arguments =
-                    serde_json::from_str(&arguments_str).unwrap_or(serde_json::Value::Null);
-                ContextToolCall {
-                    id: tc.id,
-                    name,
-                    arguments,
-                }
-            })
-            .collect();
-        ContextMessage::Assistant {
-            content,
-            tool_calls,
-        }
-    }
 }
