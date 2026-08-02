@@ -4,7 +4,6 @@ mod llm;
 mod map;
 mod runtime;
 mod tools;
-mod transport;
 mod workflows;
 mod workspace;
 

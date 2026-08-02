@@ -11,7 +11,7 @@ use crate::context::{Message, Prompt};
 /// borrows from a [`Prompt`] to avoid allocation.
 pub trait Provider<'a>: Debug {
     type Prompt: Serialize;
-    type Response: DeserializeOwned + Into<Message>;
+    type Response: DeserializeOwned;
     type Config: DeserializeOwned;
     type Error: std::error::Error;
 
@@ -19,7 +19,7 @@ pub trait Provider<'a>: Debug {
 
     fn url(&self) -> &str;
 
-    fn build_prompt(&self, prompt: &'a Prompt) -> Self::Prompt;
+    fn build_prompt(&'a self, prompt: &'a Prompt) -> Self::Prompt;
 
     fn create_request(
         &self,
@@ -27,11 +27,15 @@ pub trait Provider<'a>: Debug {
         request_builder: RequestBuilder,
     ) -> RequestBuilder;
 
-    fn parse_response(&self, response: &[u8]) -> Result<Self::Response, Self::Error>
+    /// Convert a provider wire-format response into the IR [`Message`].
+    fn to_message(&self, response: Self::Response) -> Message;
+
+    fn parse_response(&self, response: &[u8]) -> Result<Message, Self::Error>
     where
         Self::Error: From<serde_json::Error>,
     {
-        serde_json::from_slice(response).map_err(Into::into)
+        let response: Self::Response = serde_json::from_slice(response)?;
+        Ok(self.to_message(response))
     }
 }
 

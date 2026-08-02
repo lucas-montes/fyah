@@ -9,8 +9,6 @@
 //! All types serialize to JSON via serde, which is the persistence format for
 //! sessions.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 /// How an [`ImageSource`] references its data.
@@ -31,6 +29,28 @@ pub struct ImageSource {
     media_type: String,
     /// URL or base64-encoded data, depending on [`ImageSourceKind`].
     data: String,
+}
+
+impl ImageSource {
+    pub fn new(kind: ImageSourceKind, media_type: String, data: String) -> Self {
+        Self {
+            kind,
+            media_type,
+            data,
+        }
+    }
+
+    pub fn kind(&self) -> &ImageSourceKind {
+        &self.kind
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn data(&self) -> &str {
+        &self.data
+    }
 }
 
 /// Audio encoding format for audio input blocks.
@@ -156,6 +176,28 @@ pub struct ToolBlock {
     is_error: bool,
 }
 
+impl ToolBlock {
+    pub fn new(id: String, content: Vec<ContentBlock>, is_error: bool) -> Self {
+        Self {
+            id,
+            content,
+            is_error,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn content(&self) -> &[ContentBlock] {
+        &self.content
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.is_error
+    }
+}
+
 /// A normalized tool definition exposed to the model.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -163,6 +205,28 @@ pub struct ToolDefinition {
     description: String,
     /// JSON Schema object describing the tool's parameters.
     input_schema: serde_json::Value,
+}
+
+impl ToolDefinition {
+    pub fn new(name: String, description: String, input_schema: serde_json::Value) -> Self {
+        Self {
+            name,
+            description,
+            input_schema,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn input_schema(&self) -> &serde_json::Value {
+        &self.input_schema
+    }
 }
 
 /// How the model should choose which tool to call.
@@ -179,47 +243,10 @@ pub enum ToolChoice {
     Specific(String),
 }
 
-/// Reasoning effort for OpenAI-style reasoning models.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReasoningEffort {
-    None,
-    Minimal,
-    Low,
-    Medium,
-    High,
-}
-
-/// Structured output format.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ResponseFormat {
-    Text,
-    JsonObject,
-    JsonSchema { schema: serde_json::Value },
-}
-
-/// Output modality the model may produce.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Modality {
-    Text,
-    Audio,
-}
-
-/// Extended-thinking configuration (Anthropic).
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ThinkingConfig {
-    Enabled { budget_tokens: u32 },
-}
-
-
-/// The full request sent to an LLM: system prompt, conversation, tools, and
-/// sampling parameters.
+/// The full request sent to an LLM: system prompt, conversation, and tools.
 ///
-/// Sampling parameters are optional — the provider config supplies defaults
-/// and the prompt overrides them.
+/// Sampling and provider-specific parameters are not part of the IR — they
+/// live in the provider's config, set from the config file.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Prompt {
     /// System prompt content. Omitted when `None`.
@@ -236,47 +263,36 @@ pub struct Prompt {
     /// How the model should choose which tool to call.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<ToolChoice>,
-
-    // ── Sampling (universal) ──
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stop: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seed: Option<u64>,
-
-    /// Provider-specific request options.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extensions: Option<PromptExtensions>,
 }
 
+impl Prompt {
+    pub fn new(
+        system: Option<Vec<SystemBlock>>,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        tool_choice: Option<ToolChoice>,
+    ) -> Self {
+        Self {
+            system,
+            messages,
+            tools,
+            tool_choice,
+        }
+    }
 
-/// Provider-specific request options.
-///
-/// Each field is optional; a provider adapter reads the fields it supports and
-/// ignores the rest.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct PromptExtensions {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<ReasoningEffort>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    modalities: Option<Vec<Modality>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<ThinkingConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    keep_alive: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<HashMap<String, String>>,
+    pub fn system(&self) -> Option<&[SystemBlock]> {
+        self.system.as_deref()
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    pub fn tools(&self) -> Option<&[ToolDefinition]> {
+        self.tools.as_deref()
+    }
+
+    pub fn tool_choice(&self) -> Option<&ToolChoice> {
+        self.tool_choice.as_ref()
+    }
 }

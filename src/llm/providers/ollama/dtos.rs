@@ -7,6 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::context::{
+    AssistantBlock as IrAssistantBlock, ContentBlock as IrContentBlock, ImageSourceKind,
+    Message as IrMessage, Prompt, SystemBlock as IrSystemBlock, ToolBlock as IrToolBlock,
+    ToolChoice as IrToolChoice, ToolDefinition as IrToolDefinition, UserBlock as IrUserBlock,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Model name (required).
@@ -63,6 +69,33 @@ impl<'a> ChatRequest<'a> {
             config,
         }
     }
+
+    /// Build a wire-format request from an IR [`Prompt`].
+    ///
+    /// Ollama has no `tool_choice` field — a non-default choice is ignored
+    /// with a warning. Unsupported blocks are skipped with a warning; tool
+    /// results with `is_error` are prefixed with `[ERROR] `.
+    pub fn from_prompt(prompt: &Prompt, config: &'a Config) -> Self {
+        if let Some(choice) = prompt.tool_choice() {
+            if !matches!(choice, IrToolChoice::None | IrToolChoice::Auto) {
+                tracing::warn!("Ollama: tool_choice is not supported and will be ignored");
+            }
+        }
+        let mut messages = Vec::new();
+        if let Some(system) = prompt.system() {
+            messages.push(system_message(system));
+        }
+        messages.extend(
+            prompt
+                .messages()
+                .iter()
+                .flat_map(|message| <Vec<Message>>::from(message)),
+        );
+        let tools = prompt
+            .tools()
+            .map(|tools| tools.iter().map(ToolDefinition::from).collect());
+        Self::new(messages, tools, config)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,6 +113,129 @@ struct Message {
     /// Tool call requests produced by the model (present on assistant messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ToolCall>>,
+}
+
+impl From<&IrMessage> for Vec<Message> {
+    /// Convert one IR message into one or more wire messages.
+    ///
+    /// Ollama messages are flat: content blocks are joined into a single
+    /// string, images must be base64, and each tool result becomes its own
+    /// `role: "tool"` message (the tool call id is dropped).
+    fn from(message: &IrMessage) -> Self {
+        match message {
+            IrMessage::System { content } => vec![system_message(content)],
+            IrMessage::User { content } => {
+                let mut texts = Vec::new();
+                let mut images = Vec::new();
+                for block in content {
+                    match block {
+                        IrUserBlock::Text { text } => texts.push(text.clone()),
+                        IrUserBlock::Image { source } => match source.kind() {
+                            ImageSourceKind::Base64 => images.push(source.data().to_string()),
+                            ImageSourceKind::Url => {
+                                tracing::warn!("Ollama: skipping URL image (base64 only)");
+                            }
+                        },
+                        IrUserBlock::Audio { .. } => {
+                            tracing::warn!("Ollama: skipping audio block (not supported)");
+                        }
+                        IrUserBlock::File { .. } => {
+                            tracing::warn!("Ollama: skipping file block (not supported)");
+                        }
+                    }
+                }
+                vec![Message {
+                    role: MessageRole::User,
+                    content: texts.join("\n"),
+                    images: if images.is_empty() {
+                        None
+                    } else {
+                        Some(images)
+                    },
+                    tool_calls: None,
+                }]
+            }
+            IrMessage::Assistant { content } => {
+                let mut texts = Vec::new();
+                let mut tool_calls = Vec::new();
+                for block in content {
+                    match block {
+                        IrAssistantBlock::Text { text } => texts.push(text.clone()),
+                        IrAssistantBlock::ToolCall {
+                            id: _,
+                            name,
+                            arguments,
+                        } => tool_calls.push(ToolCall {
+                            function: ToolCallFunction {
+                                name: name.clone(),
+                                description: None,
+                                arguments: Some(arguments.clone()),
+                            },
+                        }),
+                        other => {
+                            tracing::warn!(
+                                "Ollama: skipping unsupported assistant block: {other:?}"
+                            );
+                        }
+                    }
+                }
+                vec![Message {
+                    role: MessageRole::Assistant,
+                    content: texts.join("\n"),
+                    images: None,
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                }]
+            }
+            IrMessage::Tool { content } => content.iter().map(tool_message).collect(),
+        }
+    }
+}
+
+/// Convert IR system blocks into a `role: "system"` wire message.
+fn system_message(blocks: &[IrSystemBlock]) -> Message {
+    let mut texts = Vec::new();
+    for block in blocks {
+        match block {
+            IrSystemBlock::Text { text } => texts.push(text.clone()),
+            IrSystemBlock::Image { .. } => {
+                tracing::warn!("Ollama: skipping image in system message");
+            }
+        }
+    }
+    Message {
+        role: MessageRole::System,
+        content: texts.join("\n"),
+        images: None,
+        tool_calls: None,
+    }
+}
+
+/// Convert one IR tool result into a `role: "tool"` wire message.
+fn tool_message(block: &IrToolBlock) -> Message {
+    let mut texts = Vec::new();
+    for content in block.content() {
+        match content {
+            IrContentBlock::Text { text } => {
+                let text = if block.is_error() {
+                    format!("[ERROR] {text}")
+                } else {
+                    text.clone()
+                };
+                texts.push(text);
+            }
+            other => tracing::warn!("Ollama: skipping non-text content in tool result: {other:?}"),
+        }
+    }
+    Message {
+        role: MessageRole::Tool,
+        content: texts.join("\n"),
+        images: None,
+        tool_calls: None,
+    }
 }
 
 /// Role of a message author.
@@ -122,6 +278,19 @@ struct ToolDefinition {
 
     /// Function definition.
     function: FunctionDef,
+}
+
+impl From<&IrToolDefinition> for ToolDefinition {
+    fn from(tool: &IrToolDefinition) -> Self {
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDef {
+                name: tool.name().to_string(),
+                description: Some(tool.description().to_string()),
+                parameters: tool.input_schema().clone(),
+            },
+        }
+    }
 }
 
 /// Function definition within a tool.
@@ -274,6 +443,42 @@ pub struct ChatResponse {
     /// Log probability information for the generated tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     logprobs: Option<Vec<Logprob>>,
+}
+
+impl From<ChatResponse> for IrMessage {
+    /// Convert a wire response into an IR assistant message.
+    ///
+    /// Ollama tool calls carry no ids, so `call_1`, `call_2`, … are
+    /// synthesized in order.
+    fn from(response: ChatResponse) -> Self {
+        let mut blocks = Vec::new();
+        if !response.message.content.is_empty() {
+            blocks.push(IrAssistantBlock::Text {
+                text: response.message.content,
+            });
+        }
+        if let Some(thinking) = response.message.thinking {
+            blocks.push(IrAssistantBlock::Thinking {
+                text: thinking,
+                signature: None,
+            });
+        }
+        if let Some(calls) = response.message.tool_calls {
+            for (i, call) in calls.into_iter().enumerate() {
+                blocks.push(IrAssistantBlock::ToolCall {
+                    id: format!("call_{}", i + 1),
+                    name: call.function.name,
+                    arguments: call.function.arguments.unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+        if let Some(images) = response.message.images {
+            if !images.is_empty() {
+                tracing::warn!("Ollama: dropping {} image(s) from response", images.len());
+            }
+        }
+        IrMessage::Assistant { content: blocks }
+    }
 }
 
 /// The assistant's response message.

@@ -80,8 +80,12 @@ impl<'a> Provider<'a> for OllamaFormat {
             .json(&prompt)
     }
 
-    fn build_prompt(&self, _prompt: &'a Prompt) -> Self::Prompt {
-        todo!()
+    fn build_prompt(&'a self, prompt: &'a Prompt) -> Self::Prompt {
+        ChatRequest::from_prompt(prompt, &self.config)
+    }
+
+    fn to_message(&self, response: Self::Response) -> Message {
+        response.into()
     }
 }
 
@@ -107,7 +111,6 @@ impl DynProvider for OllamaFormat {
     ) -> Result<Message, crate::llm::providers::ports::Error> {
         Provider::parse_response(self, response)
             .map_err(|e| crate::llm::providers::ports::Error::Provider(e.to_string()))
-            .map(Into::into)
     }
 }
 
