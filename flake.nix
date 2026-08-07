@@ -36,17 +36,12 @@
         devShells.default = pkgs.mkShell {
           name = "fyah";
           buildInputs = [
-            pkgs.pkg-config
-            pkgs.openssl
             sce.packages.${system}.default
             rust
             pkgs.ollama
             pkgs.bazel
+            pkgs.buildifier
           ];
-          shellHook = ''
-            export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
-            export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
-          '';
         };
 
         apps = {

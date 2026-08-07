@@ -1,11 +1,26 @@
 module(name = "fyah", version = "0.1.0")
 
 bazel_dep(name = "rules_rust", version = "0.71.3")
+bazel_dep(name = "platforms", version = "0.0.10")
+bazel_dep(name = "rules_cc", version = "0.0.9")
 
-rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
-rust.toolchain(edition = "2024")
-use_repo(rust, "rust_toolchains")
-register_toolchains("@rust_toolchains//:all")
+bazel_dep(name = "rules_nixpkgs_core", version = "0.13.0")
+bazel_dep(name = "rules_nixpkgs_cc", version = "0.13.0")
+bazel_dep(name = "rules_nixpkgs_rust", version = "0.13.0")
+
+archive_override(
+    module_name = "rules_nixpkgs_cc",
+    urls = "https://github.com/tweag/rules_nixpkgs/releases/download/v0.13.0/rules_nixpkgs-0.13.0.tar.gz",
+    integrity = "sha256-MCcfe9OA5OIOTXEywySUbE/bwx6+C7tmOKD2GjfnQ5c=",
+    strip_prefix = "rules_nixpkgs-0.13.0/toolchains/cc",
+)
+
+archive_override(
+    module_name = "rules_nixpkgs_rust",
+    urls = "https://github.com/tweag/rules_nixpkgs/releases/download/v0.13.0/rules_nixpkgs-0.13.0.tar.gz",
+    integrity = "sha256-MCcfe9OA5OIOTXEywySUbE/bwx6+C7tmOKD2GjfnQ5c=",
+    strip_prefix = "rules_nixpkgs-0.13.0/toolchains/rust",
+)
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
@@ -18,3 +33,13 @@ crate.from_cargo(
     ],
 )
 use_repo(crate, "fyah_crates")
+
+non_module_deps = use_extension("//:non_module_deps.bzl", "non_module_deps")
+use_repo(non_module_deps, "nixpkgs")
+use_repo(non_module_deps, "nixpkgs_config_cc")
+use_repo(non_module_deps, "nixpkgs_config_cc_info")
+use_repo(non_module_deps, "nixpkgs_config_cc_toolchains")
+register_toolchains("@nixpkgs_config_cc_toolchains//:all")
+use_repo(non_module_deps, "nixpkgs_config_rust")
+use_repo(non_module_deps, "nixpkgs_config_rust_toolchain")
+register_toolchains("@nixpkgs_config_rust_toolchain//:all")
