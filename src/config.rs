@@ -37,6 +37,12 @@ impl Config {
         self.path.as_deref()
     }
 
+    /// Resolve the active workflow name: `--workflow` override, else the
+    /// config's `[workflows].default`, else the first workflow.
+    pub fn select_workflow(&self, override_name: Option<&str>) -> Option<String> {
+        self.workflows.select_name(override_name)
+    }
+
     /// Consume `Config` and return its inner parts.
     ///
     /// Order: `(llm_config, tools_config, workflow_config)`.
@@ -174,5 +180,37 @@ fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
             }
         }
         (base, overlay) => *base = overlay,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The development `fyah.toml` in the repo root must parse and populate
+    /// every section. This guards the flat schema against drift.
+    #[test]
+    fn development_config_loads_all_sections() {
+        let config = Config::load(Some(PathBuf::from("fyah.toml"))).expect("fyah.toml parses");
+        let (llm, tools, workflow) = config.into_parts();
+
+        assert!(llm.get_provider("openai").is_some());
+        assert!(llm.get_provider("ollama").is_some());
+        assert!(llm.get_model("gpt-4o").is_some());
+        assert!(llm.get_model("phi3").is_some());
+        let agent = llm.get_agent("primary").expect("primary agent");
+        assert_eq!(agent.max_iterations(), 25);
+        assert!(agent.system_prompt().is_some());
+        assert!(!agent.tools().is_empty());
+
+        assert!(!tools.into_tools().is_empty());
+
+        assert_eq!(workflow.select_name(None).as_deref(), Some("primary"));
+        let plans = workflow.into_plans();
+        assert!(plans.contains_key("primary"));
+        let plan = &plans["primary"];
+        assert_eq!(plan.steps.len(), 4);
+        let plan_step = plan.steps.iter().find(|s| s.name == "plan").unwrap();
+        assert_eq!(plan_step.agent.as_deref(), Some("primary"));
     }
 }

@@ -13,7 +13,7 @@ use crate::context::{
     ToolChoice as IrToolChoice, ToolDefinition as IrToolDefinition, UserBlock as IrUserBlock,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     /// Model name (required).
     model: String,
@@ -308,7 +308,7 @@ struct FunctionDef {
 }
 
 /// Format control — either the string `"json"` or a JSON schema object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum Format {
     /// Simple `"json"` mode.
@@ -318,21 +318,21 @@ enum Format {
 }
 
 /// The string `"json"` used to request JSON mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum JsonMode {
     Json,
 }
 
 /// Thinking level — controls the amount of reasoning the model exposes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum ThinkLevel {
     Bool(bool),
     Level(ThinkLevelStr),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum ThinkLevelStr {
     High,
@@ -342,7 +342,7 @@ enum ThinkLevelStr {
 }
 
 /// Keep-alive duration — either a string like `"5m"` or a number (seconds/0 to unload).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum KeepAlive {
     Duration(String),
@@ -350,7 +350,7 @@ enum KeepAlive {
 }
 
 /// Runtime options that control text generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ModelOptions {
     /// Random seed used for reproducible outputs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -386,7 +386,7 @@ struct ModelOptions {
 }
 
 /// Stop sequences — either a single string or an array of strings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum Stop {
     Single(String),

@@ -9,7 +9,7 @@ use crate::context::{
     ToolDefinition as IrToolDefinition, UserBlock as IrUserBlock,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     model: String,
     max_tokens: u32,
@@ -332,7 +332,7 @@ enum MessageRole {
     System,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct RequestMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     user_id: Option<String>,
@@ -382,7 +382,7 @@ impl From<&IrToolChoice> for Option<ToolChoice> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ThinkingConfig {
     Enabled { budget_tokens: u32 },

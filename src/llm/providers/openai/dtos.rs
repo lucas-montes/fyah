@@ -14,7 +14,7 @@ use crate::context::{
     ToolChoice as IrToolChoice, ToolDefinition as IrToolDefinition, UserBlock as IrUserBlock,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     model: String,
     // ── Sampling ──
@@ -368,7 +368,7 @@ enum Content {
 }
 
 /// A single content part within a message — tagged by `type`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentPart {
     Text { text: String },
@@ -379,7 +379,7 @@ enum ContentPart {
 }
 
 /// Image URL reference (URL or base64).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ImageUrl {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -400,7 +400,7 @@ impl From<&IrImageSource> for ImageUrl {
 }
 
 /// Image detail level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum ImageDetail {
     Auto,
@@ -409,14 +409,14 @@ enum ImageDetail {
 }
 
 /// Base64-encoded audio input.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct InputAudio {
     data: String,
     format: AudioFormat,
 }
 
 /// Audio encoding format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum AudioFormat {
     Wav,
@@ -424,7 +424,7 @@ enum AudioFormat {
 }
 
 /// File input data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct FileData {
     #[serde(skip_serializing_if = "Option::is_none")]
     file_data: Option<String>,
@@ -491,7 +491,7 @@ struct ToolCallCustom {
 
 // ── Stop sequences ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum StopSequence {
     Single(String),
@@ -500,7 +500,7 @@ enum StopSequence {
 
 // ── Stream options ──
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -511,7 +511,7 @@ struct StreamOptions {
 
 // ── Response format / Structured Outputs ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseFormat {
     #[serde(rename = "text")]
@@ -522,7 +522,7 @@ enum ResponseFormat {
     JsonSchema { json_schema: JsonSchema },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct JsonSchema {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -535,7 +535,7 @@ struct JsonSchema {
 
 // ── Modalities ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Modality {
     Text,
@@ -544,13 +544,13 @@ enum Modality {
 
 // ── Audio output parameters ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AudioParams {
     format: OutputAudioFormat,
     voice: Voice,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum OutputAudioFormat {
     Wav,
@@ -561,14 +561,14 @@ enum OutputAudioFormat {
     Pcm16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum Voice {
     Builtin(BuiltinVoice),
     Custom { id: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum BuiltinVoice {
     Alloy,
@@ -727,7 +727,7 @@ enum AllowedToolsMode {
 
 // ── Reasoning effort ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum ReasoningEffort {
     None,
@@ -740,7 +740,7 @@ enum ReasoningEffort {
 
 // ── Predicted Outputs ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 struct PredictionContent {
     #[serde(rename = "type")]
@@ -748,7 +748,7 @@ struct PredictionContent {
     content: PredictionText,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum PredictionText {
     Text(String),
@@ -757,7 +757,7 @@ enum PredictionText {
 
 // ── Moderation config ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ModerationConfig {
     model: String,
 }
@@ -777,12 +777,12 @@ enum ServiceTier {
 // ── Metadata ──
 
 /// Set of 16 key-value pairs (max 64 char keys, max 512 char values).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Metadata(std::collections::HashMap<String, String>);
 
 // ── Cache retention ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum CacheRetention {
     InMemory,
@@ -792,7 +792,7 @@ enum CacheRetention {
 
 // ── Verbosity ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Verbosity {
     Low,
@@ -802,7 +802,7 @@ enum Verbosity {
 
 // ── Web search ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct WebSearchOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     search_context_size: Option<SearchContextSize>,
@@ -810,7 +810,7 @@ struct WebSearchOptions {
     user_location: Option<UserLocation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum SearchContextSize {
     Low,
@@ -818,14 +818,14 @@ enum SearchContextSize {
     High,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct UserLocation {
     #[serde(rename = "type")]
     type_: String, // always "approximate"
     approximate: ApproximateLocation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ApproximateLocation {
     #[serde(skip_serializing_if = "Option::is_none")]
     city: Option<String>,

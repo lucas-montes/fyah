@@ -12,7 +12,8 @@ impl PromptBuilder for DefaultPromptBuilder {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptBuilderCfg {
     #[default]
     Default,
@@ -53,7 +54,8 @@ impl ContextBuilder for DefaultContextBuilder {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextBuilderCfg {
     #[default]
     Default,
@@ -79,7 +81,8 @@ impl ContextCompaction for DefaultContextCompaction {
     fn compact(&self, _context: &mut AgentContext) {}
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextCompactionCfg {
     #[default]
     Default,
@@ -105,7 +108,8 @@ impl<Tool> ToolsFilter<Tool> for DefaultToolsFilter {
     fn filter(&self, _tool_calls: &Vec<Tool>) {}
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolsFilterCfg {
     #[default]
     Default,

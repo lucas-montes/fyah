@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// How an [`ImageSource`] references its data.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageSourceKind {
     /// The data is a URL.
@@ -22,7 +22,7 @@ pub enum ImageSourceKind {
 }
 
 /// An image referenced by a content block.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageSource {
     kind: ImageSourceKind,
     /// MIME type, e.g. `image/png`.
@@ -54,7 +54,7 @@ impl ImageSource {
 }
 
 /// Audio encoding format for audio input blocks.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioFormat {
     Wav,
@@ -62,7 +62,7 @@ pub enum AudioFormat {
 }
 
 /// Content block valid in a system message.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SystemBlock {
     Text { text: String },
@@ -70,7 +70,7 @@ pub enum SystemBlock {
 }
 
 /// Content block valid in a user message.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserBlock {
     Text {
@@ -91,7 +91,7 @@ pub enum UserBlock {
 }
 
 /// Content block valid in an assistant message.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantBlock {
     Text {
@@ -129,7 +129,7 @@ pub enum AssistantBlock {
 ///
 /// Distinct from the role-restricted block enums because a tool result may
 /// carry arbitrary payload types (text, images, etc.).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
@@ -156,7 +156,7 @@ pub enum ContentBlock {
 /// ```json
 /// {"role": "user", "content": [{"type": "text", "text": "Hello"}]}
 /// ```
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     System { content: Vec<SystemBlock> },
@@ -165,9 +165,18 @@ pub enum Message {
     Tool { content: Vec<ToolBlock> },
 }
 
+impl Message {
+    /// Build a user message from a single text block.
+    pub fn user(text: impl Into<String>) -> Self {
+        Message::User {
+            content: vec![UserBlock::Text { text: text.into() }],
+        }
+    }
+}
+
 /// Content block valid in a tool message.
 /// The result of a tool execution, referencing the originating tool call.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolBlock {
     /// Tool call id (`tool_call_id` in OpenAI, `tool_use_id` in Anthropic).
     id: String,
@@ -199,7 +208,7 @@ impl ToolBlock {
 }
 
 /// A normalized tool definition exposed to the model.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolDefinition {
     name: String,
     description: String,
@@ -230,7 +239,7 @@ impl ToolDefinition {
 }
 
 /// How the model should choose which tool to call.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoice {
     /// The model must not call any tool.
@@ -247,7 +256,7 @@ pub enum ToolChoice {
 ///
 /// Sampling and provider-specific parameters are not part of the IR — they
 /// live in the provider's config, set from the config file.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Prompt {
     /// System prompt content. Omitted when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]

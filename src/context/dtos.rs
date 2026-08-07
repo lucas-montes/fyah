@@ -1,4 +1,5 @@
-use crate::workspace::Workspace;
+use crate::config_store::ConfigView;
+use crate::llm::{Client, ProviderRegistry};
 
 use super::{
     history::{Branch, Session},
@@ -7,36 +8,64 @@ use super::{
 
 #[derive(Debug)]
 pub struct AgentContext {
-    workspace: Workspace,
+    view: ConfigView,
+    providers: ProviderRegistry,
     conversation: Branch<Message>,
 }
 
 #[derive(Debug)]
 pub struct SessionContext {
-    workspace: Workspace,
+    view: ConfigView,
+    providers: ProviderRegistry,
+    /// Reused HTTP client used to send LLM requests.
+    client: Client,
     conversation: Session<Message>,
 }
 
 impl SessionContext {
-    pub fn new(workspace: Workspace, conversation: Session<Message>) -> Self {
+    pub fn new(
+        view: ConfigView,
+        providers: ProviderRegistry,
+        client: Client,
+        conversation: Session<Message>,
+    ) -> Self {
         Self {
-            workspace,
+            view,
+            providers,
+            client,
             conversation,
         }
     }
 
-    /// Access the provider registry through the shared workspace.
-    pub fn providers(&self) -> std::sync::RwLockReadGuard<'_, crate::workspace::WorkspaceInner> {
-        self.workspace.read().expect("workspace lock poisoned")
+    /// The config-part receivers; agents read the current llm config and tool
+    /// registry from here.
+    pub fn view(&self) -> &ConfigView {
+        &self.view
+    }
+
+    /// The static registry of provider factories used to build llm clients.
+    pub fn providers(&self) -> &ProviderRegistry {
+        &self.providers
+    }
+
+    /// The HTTP client used to send LLM requests.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// The conversation history recorded so far, in order.
+    pub fn conversation(&self) -> &[Message] {
+        self.conversation.messages()
+    }
+
+    /// Append a message to the session conversation.
+    pub fn push_message(&mut self, message: Message) {
+        self.conversation.push(message);
     }
 
     /// Merge an agent context's conversation back into the session.
     pub fn merge(&mut self, agent_context: &AgentContext) {
         // TODO: implement actual conversation merging
         let _ = agent_context;
-    }
-
-    pub fn workspace(&self) -> &Workspace {
-        &self.workspace
     }
 }
