@@ -70,33 +70,51 @@ initial = "plan"
 max_iterations = 50
 
 [workflows.primary.steps.plan]
-backend = { type = "built_in" }
+type = "plan"
 agent = "primary"
-provider = "ollama"
+provider = "openai"
 model = "phi3"
 on_success = "implement"
 on_failure = "plan"
 
 [workflows.primary.steps.implement]
-backend = { type = "built_in" }
+type = "implement"
 agent = "primary"
-provider = "ollama"
+provider = "openai"
 model = "phi3"
 on_success = "test"
 on_failure = "plan"
 
 [workflows.primary.steps.test]
-backend = { type = "built_in" }
+type = "test"
 agent = "primary"
-provider = "ollama"
+provider = "openai"
 model = "phi3"
 on_success = "commit"
 on_failure = "implement"
 
 [workflows.primary.steps.commit]
-backend = { type = "built_in" }
+type = "commit"
 agent = "primary"
-provider = "ollama"
+provider = "openai"
 model = "phi3"
 on_success = "done"
 on_failure = "implement"
+
+# Custom step examples (commented out — uncomment to use):
+# A silent agent turn, like implement/test but under a custom name:
+# [workflows.primary.steps.review]
+# type = "custom"
+# backend = { type = "llm" }
+# agent = "primary"
+# provider = "openai"
+# model = "phi3"
+# on_success = "done"
+# on_failure = "plan"
+#
+# A subprocess step: exit 0 ⇒ Success, non-zero ⇒ Failure:
+# [workflows.primary.steps.lint]
+# type = "custom"
+# backend = { type = "command", command = "cargo clippy --all-targets" }
+# on_success = "done"
+# on_failure = "implement"

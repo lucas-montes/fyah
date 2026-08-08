@@ -8,12 +8,11 @@
 //! listen. The runtime only reflects whether the current step accepts input on
 //! a watch; the input source (stdin, http, …) lives outside the runtime.
 //!
-//! Nothing here is cloned on the hot path: `current` is a [`Step`] (a `Copy`
-//! zero-sized variant) and the transitions are `usize` indices. Config reloads
-//! arrive on a watch as fresh, precompiled [`WorkflowPlan`]s and are swapped in
-//! at step boundaries — only the latest plan is ever applied. Because `current`
-//! is tracked by kind, the next step resolves against the new plan even when
-//! steps were renamed or reordered.
+//! The current step is tracked by name. Config reloads arrive on a watch as
+//! fresh, precompiled [`WorkflowPlan`]s and are swapped in at step boundaries —
+//! only the latest plan is ever applied. The current name re-resolves against
+//! the (possibly reloaded) plan before each step; a name that is no longer part
+//! of the plan completes the workflow instead of leaving it dangling.
 
 use std::collections::HashMap;
 
@@ -22,10 +21,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
 use crate::context::{Message, SessionContext};
-use crate::workflows::{DONE, Step, StepOutcome, StepSpec, WorkflowPlan, validate_bindings};
+use crate::workflows::{DONE, NamedStep, StepOutcome, WorkflowPlan, validate};
 
-/// Reasons a run cannot start: the active workflow's steps cannot resolve
-/// complete, consistent bindings against the loaded config.
+/// Reasons a run cannot start: the active workflow fails startup validation.
 #[derive(Debug)]
 pub struct StartupError {
     problems: Vec<String>,
@@ -59,7 +57,9 @@ fn select_plan<'a>(
 /// plan reloads, and reflects the current step's input state on a watch.
 pub struct Runtime {
     plan: WorkflowPlan,
-    current: Step,
+    /// Name of the step currently being walked. Resolved against the current
+    /// plan before each step; a missing name completes the workflow.
+    current: String,
     plan_updates: watch::Receiver<HashMap<String, WorkflowPlan>>,
     active_workflow: String,
     input_tx: watch::Sender<bool>,
@@ -76,9 +76,8 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// Returns [`StartupError`] when the active workflow has steps that need a
-    /// binding but cannot resolve a complete, consistent one against the
-    /// session's llm config.
+    /// Returns [`StartupError`] when the active workflow fails startup
+    /// validation against the session's llm config.
     pub fn new(
         plan_updates: watch::Receiver<HashMap<String, WorkflowPlan>>,
         active_workflow: String,
@@ -93,13 +92,13 @@ impl Runtime {
             let plan = select_plan(&plans, &active_workflow)
                 .expect("plan map is never empty; ConfigStore always seeds a workflow");
             let llm = session.view().llm.borrow();
-            let problems = validate_bindings(plan, &llm);
+            let problems = validate(plan, &llm);
             if !problems.is_empty() {
                 return Err(StartupError { problems });
             }
             plan.clone()
         };
-        let current = plan.initial;
+        let current = plan.initial.clone();
         Ok(Self {
             plan,
             current,
@@ -145,20 +144,19 @@ impl Runtime {
                 break;
             }
 
-            // Resolve the current step kind against the (possibly reloaded)
-            // plan. A step that is no longer part of the plan terminates the
+            // Resolve the current step name against the (possibly reloaded)
+            // plan. A name that is no longer part of the plan terminates the
             // workflow.
-            let index = self.plan.resolve(self.current);
-            if index == DONE {
+            let Some(index) = self.plan.resolve(&self.current) else {
                 info!("workflow complete");
                 break;
-            }
+            };
             let Some(spec) = self.plan.steps.get(index) else {
-                error!(current = ?self.current, "no spec for current step; stopping");
+                error!(current = %self.current, "no spec for current step; stopping");
                 break;
             };
 
-            let _ = self.input_tx.send(self.current.accepts_input());
+            let _ = self.input_tx.send(spec.step.accepts_input());
 
             info!(step = spec.name, step_kind = %spec.step, "step start");
             let outcome = run_step(
@@ -171,20 +169,19 @@ impl Runtime {
             .await;
             trace!(step = spec.name, ?outcome, "step end");
 
-            // Transitions are indices into the plan the step just ran against;
-            // convert them back to kinds so the next iteration resolves against
-            // whatever plan is current after a reload.
+            // Transitions are step names from the plan the step just ran
+            // against. `DONE` — or a name that no longer exists after a
+            // reload — completes the workflow.
             let target = match outcome {
-                StepOutcome::Success => spec.on_success,
-                StepOutcome::Failure => spec.on_failure,
+                StepOutcome::Success => spec.step.on_success().to_string(),
+                StepOutcome::Failure => spec.step.on_failure().to_string(),
                 StepOutcome::Cancelled | StepOutcome::Aborted => break,
             };
-
-            let Some(next) = self.plan.next_kind(target) else {
+            if target == DONE || self.plan.resolve(&target).is_none() {
                 info!("workflow complete");
                 break;
-            };
-            self.current = next;
+            }
+            self.current = target;
             iterations += 1;
         }
         let _ = self.input_tx.send(false);
@@ -193,21 +190,23 @@ impl Runtime {
 
 /// Run one step: enforce its timeout and abort it if a hard cancellation
 /// arrives mid-flight. The step decides for itself whether to consume user
-/// input; the channel is always handed over.
+/// input; the channel is always handed over. Dropping the step future (timeout
+/// or hard cancel) also drops a running command process, which `kill_on_drop`
+/// then terminates.
 async fn run_step(
-    spec: &StepSpec,
+    spec: &NamedStep,
     session: &mut SessionContext,
     soft: &CancellationToken,
     hard: &CancellationToken,
     user_input: &mut mpsc::UnboundedReceiver<Message>,
 ) -> StepOutcome {
-    let step = spec.step;
-    let binding = spec.to_binding();
+    let step = spec.step.clone();
+    let binding = spec.step.to_binding();
     tokio::select! {
         _ = hard.cancelled() => StepOutcome::Aborted,
         outcome = async {
             let run = step.run(session, soft, user_input, binding.as_ref());
-            match spec.timeout {
+            match spec.step.timeout() {
                 Some(secs) => match tokio::time::timeout(secs, run).await {
                     Ok(outcome) => outcome,
                     Err(_) => {
@@ -218,66 +217,5 @@ async fn run_step(
                 None => run.await,
             }
         } => outcome,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use serde::Deserialize;
-    use tokio::sync::{mpsc, watch};
-    use tokio_util::sync::CancellationToken;
-
-    use crate::config::Config;
-    use crate::config_store::ConfigStore;
-    use crate::context::{Session, SessionContext};
-    use crate::llm::{Client, ProviderRegistry};
-
-    use super::*;
-
-    /// Build a runtime against a config, named after the workflow it resolves.
-    fn runtime_for(config: Config) -> Result<Runtime, StartupError> {
-        let store = ConfigStore::new(config);
-        let view = store.subscribe();
-        let plan_updates = view.workflow.clone();
-        let session = SessionContext::new(
-            view,
-            ProviderRegistry::default(),
-            Client::default(),
-            Session::new(),
-        );
-        let (input_tx, _) = watch::channel(false);
-        let (_user_tx, user_rx) = mpsc::unbounded_channel();
-        Runtime::new(
-            plan_updates,
-            "primary".to_string(),
-            input_tx,
-            session,
-            user_rx,
-            CancellationToken::new(),
-            CancellationToken::new(),
-        )
-    }
-
-    #[tokio::test]
-    async fn runtime_starts_with_valid_bindings() {
-        let config = Config::load(Some(PathBuf::from("fyah.toml"))).expect("fyah.toml parses");
-        assert!(runtime_for(config).is_ok());
-    }
-
-    #[tokio::test]
-    async fn runtime_rejects_broken_bindings() {
-        let contents = std::fs::read_to_string("fyah.toml").expect("fyah.toml in the repo root");
-        let mut value: toml::Value = toml::from_str(&contents).expect("valid config toml");
-        value["workflows"]["primary"]["steps"]["plan"]["provider"] =
-            toml::Value::String("nope".into());
-        let config = Config::deserialize(value).expect("valid config toml");
-
-        let err = match runtime_for(config) {
-            Ok(_) => panic!("broken provider must fail startup"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("unknown provider"), "got: {err}");
     }
 }

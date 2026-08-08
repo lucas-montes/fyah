@@ -5,8 +5,12 @@ use std::time::Duration;
 
 use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
+use tracing::{debug, error, info, warn};
 
 use crate::config_store::ConfigStore;
+
+/// How long filesystem changes are batched before being emitted.
+const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Events emitted by the filesystem watcher.
 #[derive(Debug)]
@@ -101,12 +105,19 @@ fn watcher_loop(
     config_path: PathBuf,
     tools_dir: Option<PathBuf>,
 ) {
+    info!(
+        config_path = %config_path.display(),
+        tools_dir = ?tools_dir,
+        debounce_ms = DEBOUNCE_TIMEOUT.as_millis(),
+        "fs watcher started"
+    );
+
     let (debouncer_tx, debouncer_rx) = mpsc::channel();
 
     let notify_config = notify::Config::default().with_event_kinds(EventKindMask::CORE);
 
     let mut debouncer = match new_debouncer_opt::<_, RecommendedWatcher, RecommendedCache>(
-        Duration::from_secs(2),
+        DEBOUNCE_TIMEOUT,
         None,
         debouncer_tx,
         RecommendedCache::new(),
@@ -114,25 +125,28 @@ fn watcher_loop(
     ) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("fs_watcher: failed to create debouncer: {e}");
+            error!(error = %e, "failed to create debouncer");
             return;
         }
     };
 
     if let Err(e) = debouncer.watch(&config_path, RecursiveMode::NonRecursive) {
-        eprintln!("fs_watcher: failed to watch config: {e}");
+        error!(path = %config_path.display(), error = %e, "failed to watch config file");
         return;
     }
+    debug!(path = %config_path.display(), "watching config file");
 
-    if let Some(tools_dir) = &tools_dir
-        && let Err(e) = debouncer.watch(tools_dir, RecursiveMode::Recursive)
-    {
-        eprintln!("fs_watcher: failed to watch tools dir: {e}");
-        return;
+    if let Some(tools_dir) = &tools_dir {
+        if let Err(e) = debouncer.watch(tools_dir, RecursiveMode::Recursive) {
+            error!(path = %tools_dir.display(), error = %e, "failed to watch tools directory");
+            return;
+        }
+        debug!(path = %tools_dir.display(), "watching tools directory");
     }
 
     for result in debouncer_rx {
         if stop_rx.try_recv().is_ok() {
+            debug!("fs watcher stopped");
             break;
         }
 
@@ -140,9 +154,11 @@ fn watcher_loop(
             Ok(events) => {
                 for ev in &events {
                     for path in &ev.paths {
+                        debug!(kind = ?ev.kind, path = %path.display(), "filesystem event");
                         if let Some(event) =
                             classify_event(path.clone(), &config_path, tools_dir.as_ref())
                         {
+                            info!(event = ?event, path = %path.display(), "fs event queued");
                             let _ = event_tx.send(event);
                         }
                     }
@@ -150,7 +166,7 @@ fn watcher_loop(
             }
             Err(errors) => {
                 for error in errors {
-                    eprintln!("fs_watcher: debounce error: {error:?}");
+                    warn!(error = ?error, "debounce error");
                 }
             }
         }
@@ -169,16 +185,18 @@ fn watcher_loop(
 fn processor_loop(event_rx: mpsc::Receiver<FsEvent>, mut store: ConfigStore, config_path: PathBuf) {
     loop {
         match event_rx.recv() {
-            Ok(FsEvent::ConfigChanged) => {
-                if let Err(e) = store.reload(&config_path) {
-                    eprintln!("fs_processor: failed to reload config: {e}");
+            Ok(FsEvent::ConfigChanged) => match store.reload(&config_path) {
+                Ok(changed) => info!(changed, "config reloaded"),
+                Err(e) => {
+                    error!(path = %config_path.display(), error = %e, "failed to reload config")
                 }
-            }
+            },
             Ok(FsEvent::ToolsUpdated) => {
-                // Reserved: reload tool files from the tools directory
+                debug!("tools update event received; reserved, no-op");
             }
             Err(_) => {
                 // Channel closed — watcher thread exited
+                debug!("fs processor stopped; watcher channel closed");
                 break;
             }
         }

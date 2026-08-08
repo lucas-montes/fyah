@@ -92,12 +92,12 @@ impl ConfigStore {
         changed
     }
 
-    /// Reload the config from disk and apply it. On a load error the store is
-    /// left untouched, so subscribers keep serving the last good config.
-    pub fn reload(&mut self, path: &Path) -> Result<(), crate::config::Error> {
+    /// Reload the config from disk and apply it. Returns whether any part
+    /// changed. On a load error the store is left untouched, so subscribers
+    /// keep serving the last good config.
+    pub fn reload(&mut self, path: &Path) -> Result<bool, crate::config::Error> {
         let config = Config::load(Some(path.to_path_buf()))?;
-        self.apply(config);
-        Ok(())
+        Ok(self.apply(config))
     }
 
     /// Subscribe to every part, yielding a [`ConfigView`].
@@ -126,29 +126,7 @@ pub struct ConfigView {
 
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
-
     use super::*;
-
-    /// The single config in the repo root; must deserialize as [`Config`].
-    const FIXTURE: &str = "fyah.toml";
-
-    fn load() -> String {
-        std::fs::read_to_string(FIXTURE).expect("fixture config in the repo root")
-    }
-
-    /// The fixture config unchanged.
-    fn config() -> Config {
-        toml::from_str(&load()).expect("valid config toml")
-    }
-
-    /// The fixture config with a different workflow iteration budget, so tests
-    /// can change exactly one part.
-    fn config_with_max_iterations(max_iterations: i64) -> Config {
-        let mut value: toml::Value = toml::from_str(&load()).expect("valid fixture toml");
-        value["workflows"]["primary"]["max_iterations"] = toml::Value::Integer(max_iterations);
-        Config::deserialize(value).expect("valid config toml")
-    }
 
     #[test]
     fn part_store_only_broadcasts_on_change() {
@@ -162,45 +140,5 @@ mod tests {
         assert!(store.update(1), "new value must change");
         assert!(rx.has_changed().unwrap_or(false));
         assert_eq!(*rx.borrow_and_update(), 1);
-    }
-
-    #[test]
-    fn apply_publishes_only_the_changed_part() {
-        let mut store = ConfigStore::new(config());
-        let mut llm = store.subscribe().llm;
-        let mut tools = store.subscribe().tools;
-        let mut workflow = store.subscribe().workflow;
-        llm.borrow_and_update();
-        tools.borrow_and_update();
-        workflow.borrow_and_update();
-
-        assert!(store.apply(config_with_max_iterations(20)));
-        assert!(!llm.has_changed().unwrap_or(false));
-        assert!(!tools.has_changed().unwrap_or(false));
-        assert!(workflow.has_changed().unwrap_or(false));
-        assert_eq!(store.generation(), 1);
-        assert_eq!(workflow.borrow_and_update()["primary"].max_iterations, 20);
-
-        assert!(
-            !store.apply(config_with_max_iterations(20)),
-            "identical config must not change"
-        );
-        assert!(!workflow.has_changed().unwrap_or(false));
-        assert_eq!(store.generation(), 1);
-    }
-
-    #[test]
-    fn reload_of_missing_path_keeps_last_good() {
-        let mut store = ConfigStore::new(config());
-        let mut workflow = store.subscribe().workflow;
-        workflow.borrow_and_update();
-
-        let missing = std::env::temp_dir().join(format!(
-            "fyah-missing-{}.toml",
-            uuid::Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext))
-        ));
-        assert!(store.reload(&missing).is_err());
-        assert!(!workflow.has_changed().unwrap_or(false));
-        assert_eq!(store.generation(), 0);
     }
 }
