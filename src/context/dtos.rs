@@ -39,8 +39,8 @@ impl SessionContext {
 
     /// The config-part receivers; agents read the current llm config and tool
     /// registry from here.
-    pub fn view(&self) -> &ConfigView {
-        &self.view
+    pub fn view(&mut self) -> &mut ConfigView {
+        &mut self.view
     }
 
     /// The static registry of provider factories used to build llm clients.

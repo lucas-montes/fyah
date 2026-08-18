@@ -19,9 +19,10 @@ carries the runtime contract (`run`, `accepts_input`, `Display`) and the
 binding/timeout/transition accessors.
 
 ## NamedStep
-A compiled plan step: `{ name: String, step: Step }`. `WorkflowPlan.steps` is a
-name-sorted `Vec<NamedStep>`; the runtime resolves transitions by `name` and
-delegates to the `Step` accessors.
+A compiled plan step (private `name`/`step` fields, read via
+`NamedStep::name()`/`step()`). `WorkflowPlan.steps` is a name-sorted
+`Vec<NamedStep>`; the runtime resolves transitions by `name` and delegates to
+the `Step` accessors.
 
 ## Backend
 The `backend` table on a **custom** step (`type = "custom"`), itself tagged by

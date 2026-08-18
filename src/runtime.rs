@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
+use crate::config_store::ConfigView;
 use crate::context::{Message, SessionContext};
 use crate::workflows::{DONE, NamedStep, StepOutcome, WorkflowPlan, validate};
 
@@ -37,22 +38,6 @@ impl std::fmt::Display for StartupError {
 
 impl std::error::Error for StartupError {}
 
-/// Pick the active plan from a freshly published plan map. The configured
-/// name wins; if it is gone after a reload (renamed/removed) the
-/// lexicographically first workflow is used so the run keeps making progress.
-fn select_plan<'a>(
-    plans: &'a HashMap<String, WorkflowPlan>,
-    active_workflow: &str,
-) -> Option<&'a WorkflowPlan> {
-    if let Some(plan) = plans.get(active_workflow) {
-        return Some(plan);
-    }
-    plans
-        .iter()
-        .min_by_key(|(name, _)| *name)
-        .map(|(_, plan)| plan)
-}
-
 /// Deterministic harness: walks the step graph, applies cancellations and
 /// plan reloads, and reflects the current step's input state on a watch.
 pub struct Runtime {
@@ -60,7 +45,6 @@ pub struct Runtime {
     /// Name of the step currently being walked. Resolved against the current
     /// plan before each step; a missing name completes the workflow.
     current: String,
-    plan_updates: watch::Receiver<HashMap<String, WorkflowPlan>>,
     active_workflow: String,
     input_tx: watch::Sender<bool>,
     session: SessionContext,
@@ -79,30 +63,26 @@ impl Runtime {
     /// Returns [`StartupError`] when the active workflow fails startup
     /// validation against the session's llm config.
     pub fn new(
-        plan_updates: watch::Receiver<HashMap<String, WorkflowPlan>>,
         active_workflow: String,
         input_tx: watch::Sender<bool>,
-        session: SessionContext,
+        mut session: SessionContext,
         user_input: mpsc::UnboundedReceiver<Message>,
         soft: CancellationToken,
         hard: CancellationToken,
     ) -> Result<Self, StartupError> {
         let plan = {
-            let plans = plan_updates.borrow();
-            let plan = select_plan(&plans, &active_workflow)
-                .expect("plan map is never empty; ConfigStore always seeds a workflow");
-            let llm = session.view().llm.borrow();
-            let problems = validate(plan, &llm);
-            if !problems.is_empty() {
-                return Err(StartupError { problems });
-            }
+            let cfg = session.view();
+            let plans = cfg.workflow().borrow();
+
+            let plan = plans
+                .get(&active_workflow)
+                .expect("we should always find the plan with the active workflow");
             plan.clone()
         };
-        let current = plan.initial.clone();
+        let current = plan.initial().to_string();
         Ok(Self {
             plan,
             current,
-            plan_updates,
             active_workflow,
             input_tx,
             session,
@@ -124,11 +104,21 @@ impl Runtime {
             // Apply the latest plan map, if one changed since the last step
             // boundary. The watch coalesces reloads: only the newest map is
             // ever applied, and the active workflow is re-selected from it.
-            if self.plan_updates.has_changed().unwrap_or(false) {
-                let plans = self.plan_updates.borrow_and_update().clone();
-                self.plan = select_plan(&plans, &self.active_workflow)
-                    .expect("plan map is never empty; ConfigStore always seeds a workflow")
-                    .clone();
+            if self
+                .session
+                .view()
+                .workflow()
+                .has_changed()
+                .unwrap_or(false)
+            {
+                let plan = {
+                    let plans = self.session.view().workflow().borrow_and_update();
+                    plans
+                        .get(&self.active_workflow)
+                        .expect("we should always find the plan with the active workflow")
+                        .clone()
+                };
+                self.plan = plan;
                 iterations = 0;
             }
 
@@ -136,9 +126,9 @@ impl Runtime {
                 info!("graceful shutdown requested at step boundary");
                 break;
             }
-            if self.plan.max_iterations > 0 && iterations >= self.plan.max_iterations {
+            if self.plan.max_iterations() > 0 && iterations >= self.plan.max_iterations() {
                 warn!(
-                    max_iterations = self.plan.max_iterations,
+                    max_iterations = self.plan.max_iterations(),
                     "max iterations reached"
                 );
                 break;
@@ -151,14 +141,14 @@ impl Runtime {
                 info!("workflow complete");
                 break;
             };
-            let Some(spec) = self.plan.steps.get(index) else {
+            let Some(spec) = self.plan.steps().get(index) else {
                 error!(current = %self.current, "no spec for current step; stopping");
                 break;
             };
 
-            let _ = self.input_tx.send(spec.step.accepts_input());
+            let _ = self.input_tx.send(spec.step().accepts_input());
 
-            info!(step = spec.name, step_kind = %spec.step, "step start");
+            info!(step = spec.name(), step_kind = %spec.step(), "step start");
             let outcome = run_step(
                 spec,
                 &mut self.session,
@@ -167,14 +157,14 @@ impl Runtime {
                 &mut self.user_input,
             )
             .await;
-            trace!(step = spec.name, ?outcome, "step end");
+            trace!(step = spec.name(), ?outcome, "step end");
 
             // Transitions are step names from the plan the step just ran
             // against. `DONE` — or a name that no longer exists after a
             // reload — completes the workflow.
             let target = match outcome {
-                StepOutcome::Success => spec.step.on_success().to_string(),
-                StepOutcome::Failure => spec.step.on_failure().to_string(),
+                StepOutcome::Success => spec.step().on_success().to_string(),
+                StepOutcome::Failure => spec.step().on_failure().to_string(),
                 StepOutcome::Cancelled | StepOutcome::Aborted => break,
             };
             if target == DONE || self.plan.resolve(&target).is_none() {
@@ -200,13 +190,12 @@ async fn run_step(
     hard: &CancellationToken,
     user_input: &mut mpsc::UnboundedReceiver<Message>,
 ) -> StepOutcome {
-    let step = spec.step.clone();
-    let binding = spec.step.to_binding();
+    let binding = spec.step().to_binding();
     tokio::select! {
         _ = hard.cancelled() => StepOutcome::Aborted,
         outcome = async {
-            let run = step.run(session, soft, user_input, binding.as_ref());
-            match spec.step.timeout() {
+            let run = spec.step().run(session, soft, user_input, binding.as_ref());
+            match spec.step().timeout() {
                 Some(secs) => match tokio::time::timeout(secs, run).await {
                     Ok(outcome) => outcome,
                     Err(_) => {

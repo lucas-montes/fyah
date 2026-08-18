@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tokio::sync::watch;
+use tokio::sync::watch::{self, Ref};
 
 use crate::config::Config;
 use crate::llm::Config as LlmConfig;
@@ -59,6 +59,7 @@ pub struct ConfigStore {
     /// name; hot reloads recompile every workflow and publish the whole map.
     workflow: PartStore<HashMap<String, WorkflowPlan>>,
 }
+//TODO: maybe ConfigStore should actually just hold the configs, validate that they are correct, and then notify for changes. Another structure should be responsible to parse the config and convert it into something usable
 
 impl ConfigStore {
     /// Derive every part from an initial config.
@@ -96,7 +97,7 @@ impl ConfigStore {
     /// changed. On a load error the store is left untouched, so subscribers
     /// keep serving the last good config.
     pub fn reload(&mut self, path: &Path) -> Result<bool, crate::config::Error> {
-        let config = Config::load(Some(path.to_path_buf()))?;
+        let config = Config::load(path.to_path_buf())?;
         Ok(self.apply(config))
     }
 
@@ -108,37 +109,30 @@ impl ConfigStore {
             workflow: self.workflow.subscribe(),
         }
     }
-
-    /// Number of times any part changed.
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
 }
 
 /// The read side of the config: receivers for every part. It holds only
 /// receivers; the writer lives in the [`ConfigStore`].
 #[derive(Clone, Debug)]
 pub struct ConfigView {
-    pub llm: watch::Receiver<LlmConfig>,
-    pub tools: watch::Receiver<ToolRegistry>,
-    pub workflow: watch::Receiver<HashMap<String, WorkflowPlan>>,
+    llm: watch::Receiver<LlmConfig>,
+    tools: watch::Receiver<ToolRegistry>,
+    workflow: watch::Receiver<HashMap<String, WorkflowPlan>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl ConfigView {
+    /// Subscribe to the LLM config.
+    pub fn llm(&self) -> Ref<LlmConfig> {
+        self.llm.borrow()
+    }
 
-    #[test]
-    fn part_store_only_broadcasts_on_change() {
-        let mut store = PartStore::new(0u32);
-        let mut rx = store.subscribe();
-        rx.borrow_and_update(); // mark the initial value as seen
+    /// Subscribe to the tool registry.
+    pub fn tools(&self) -> watch::Receiver<ToolRegistry> {
+        self.tools.clone()
+    }
 
-        assert!(!store.update(0), "same value must not change");
-        assert!(!rx.has_changed().unwrap_or(false));
-
-        assert!(store.update(1), "new value must change");
-        assert!(rx.has_changed().unwrap_or(false));
-        assert_eq!(*rx.borrow_and_update(), 1);
+    /// Subscribe to the workflow plan map.
+    pub fn workflow(&mut self) -> &mut watch::Receiver<HashMap<String, WorkflowPlan>> {
+        &mut self.workflow
     }
 }

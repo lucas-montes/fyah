@@ -11,8 +11,10 @@ use std::fmt::{Debug, Display};
 use reqwest::Method;
 
 use crate::context::{Message, Prompt, SessionContext, SystemBlock};
-use crate::llm::client::{Client, LlmClient};
-use crate::llm::config::Binding;
+use crate::llm::{
+    client::{Client, LlmClient},
+    config::Binding,
+};
 
 /// Why a single agent turn failed.
 #[derive(Debug)]
@@ -54,7 +56,7 @@ pub async fn run_agent(
     // Copy the config values out of the watch borrow — a `watch::Ref` guard is
     // never held across an `.await`.
     let (system_prompt, provider, model) = {
-        let llm = session.view().llm.borrow();
+        let llm = session.view().llm();
         let agent = llm
             .get_agent(&binding.agent)
             .ok_or_else(|| RunError::Config(format!("unknown agent {:?}", binding.agent)))?;

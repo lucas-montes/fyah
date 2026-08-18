@@ -41,9 +41,9 @@ Input: stdin (http reserved). Two-stage Ctrl+C: soft at step boundary, hard abor
 
 Key invariants:
 - **Watch-only sharing.** Raw values flow through `tokio::sync::watch`. Nothing is
-  cloned on the hot path beyond the current step name and the precompiled plan map
-  swapped in at step boundaries. A `watch::Ref` guard is never held across an
-  `.await` (statement-temporaries only).
+  cloned on the hot path beyond the current step name and the selected `WorkflowPlan`
+  (re-selected from the reloaded map) swapped in at step boundaries. A `watch::Ref`
+  guard is never held across an `.await` (statement-temporaries only).
 - **Deterministic plans.** `WorkflowPlan::from_workflow` sorts steps by name so
   identical configs compile to identical plans (HashMap iteration order is
   randomized per instance).
@@ -125,9 +125,10 @@ Every step table parses into one variant of the tagged `Step` enum
 (`src/workflows.rs`): `type = "plan"` → `Step::Plan(PlanConfig)`, …,
 `type = "custom"` → `Step::Custom(CustomConfig)`. Rules are type-enforced:
 built-ins cannot carry a `backend`; custom steps must carry one. The compiled
-plan holds `NamedStep`s (`name` + `Step`), sorted by name; `Step` carries the
-runtime contract (`run`, `accepts_input`, `Display`) + binding/timeout/transition
-accessors.
+plan holds `NamedStep`s (`name` + `Step`), sorted by name; fields are private,
+read via accessors (`NamedStep::name/step`, `WorkflowPlan::initial/max_iterations/
+steps`, `Step::agent/provider/model/on_success/on_failure/timeout`), and `Step`
+carries the runtime contract (`run`, `accepts_input`, `Display`).
 - **Built-in steps** — `type = "plan" | "implement" | "test" | "commit"`.
   `plan`/`commit` are listening steps (wait for stdin, push the user message,
   run an agent turn); `implement`/`test` run an agent turn silently. They keep

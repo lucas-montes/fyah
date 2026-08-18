@@ -11,6 +11,7 @@ Discoverability index for the durable project memory in `context/`.
 | [sota-references.md](sota-references.md) | SOTA context-management reference notes (for the context-builder middleware) |
 | [plans/workflows-rewrite.md](plans/workflows-rewrite.md) | Completed plan: workflow model/executor rewrite (all tasks done; validation report inside) |
 | [plans/workflows-step-enum.md](plans/workflows-step-enum.md) | Completed plan: restructure step config into a tagged `Step` enum (all tasks done; validation report inside; supersedes the workflows-rewrite config shape) |
+| [plans/field-privacy-cleanup.md](plans/field-privacy-cleanup.md) | Completed plan: make workflow model fields private + remove redundant runtime clones (all tasks done; validation report inside) |
 | [plans/llm-wiring.md](plans/llm-wiring.md) | Completed plan: real LLM round-trip + single-config consolidation |
 
 ## Code → context

@@ -36,25 +36,12 @@ use crate::runtime::Runtime;
 #[command(name = "Fyah", author, version, about)]
 pub struct Cli {
     /// Path to a TOML config file (overrides XDG and local defaults).
-    #[arg(short, long)]
-    config: Option<PathBuf>,
+    #[arg(short, long, default_value = "fyah.toml")]
+    config: PathBuf,
 
-    /// Workflow name to run. Defaults to `[workflows].default` in the config,
-    /// then to the first workflow.
-    #[arg(long)]
-    workflow: Option<String>,
-
-    /// Agent to bind for the run.
-    #[arg(long)]
-    agent: Option<String>,
-
-    /// Provider (endpoint) to bind for the run.
-    #[arg(long)]
-    provider: Option<String>,
-
-    /// Model to bind for the run.
-    #[arg(long)]
-    model: Option<String>,
+    /// Workflow name to run; defaults to the built-in `default` workflow.
+    #[arg(long, default_value = "default")]
+    workflow: String,
 }
 
 /// Start the loggers, one for the regular logs for the app and the agent_ for the agentraces
@@ -137,27 +124,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load(cli.config)?;
     debug!(?config, "config loaded");
 
-    // The combo flags are parsed but binding is config-only for now: each step
-    // resolves its agent/provider/model from the workflow config.
-    debug!(
-        agent = ?cli.agent,
-        provider = ?cli.provider,
-        model = ?cli.model,
-        "combo flags parsed (binding comes from config)"
-    );
-
-    // Resolve the active workflow: --workflow flag, else the config's
-    // `[workflows].default`, else the first workflow.
-    let active_workflow = config
-        .select_workflow(cli.workflow.as_deref())
-        .expect("config must provide at least one workflow");
-    debug!(workflow = %active_workflow, "active workflow");
+    // The CLI workflow name selects a plan by that name; the built-in
+    // `default` workflow is always present unless overwritten in the config.
+    debug!(workflow = %cli.workflow, "active workflow");
 
     // Resolve the watch path before the config is consumed by `into_parts`.
-    let config_path = config
-        .source_path()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("fyah.toml"));
+    let config_path = config.source_path().to_path_buf();
 
     let (user_tx, user_rx) = mpsc::unbounded_channel::<Message>();
 
@@ -179,26 +151,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // config changes on disk.
     let store = ConfigStore::new(config);
     let view = store.subscribe();
-    let plan_updates = view.workflow.clone();
 
+    //TODO: if we know all the providers, maybe we don't ned a Dyn and we can use a regular ass enum
     let mut providers = ProviderRegistry::default();
     providers.register("openai", Box::new(OpenAIFactory));
     providers.register("ollama", Box::new(OllamaFactory));
     providers.register("anthropic", Box::new(AnthropicFactory));
 
+    //TODO: the context should either be created or populated from somewhere if it already exists, also we should have the whole Hisotry struct, not just a session
     let session = SessionContext::new(view, providers, Client::default(), Session::new());
     let _fs_watcher = FsWatcher::spawn(store, config_path, None);
 
+    //TODO: maybe we should pass and keep in the runtime only one workflow plan and we don't need to keep all the other around?
     info!("workflow starting");
-    let mut runtime = Runtime::new(
-        plan_updates,
-        active_workflow,
-        input_tx,
-        session,
-        user_rx,
-        soft,
-        hard,
-    )?;
+    let mut runtime = Runtime::new(cli.workflow, input_tx, session, user_rx, soft, hard)?;
     runtime.run().await;
 
     info!("Fyah stopped");

@@ -24,7 +24,7 @@ temperature = 0.7
 [models.phi3]
 format = "openai"
 model = "phi3:mini"
-options = { temperature = 0.3 }
+temperature = 0.3
 
 # ── Agents: middleware bundle + system prompt + strict tool allow-list. ──
 # tools = [...] restricts the [tools] catalog to the listed names; empty means
@@ -59,17 +59,16 @@ command = "execute_read_file"
 parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = ["path"] }
 
 # ── Workflows: named step graphs; run with `--workflow <name>`. ──
-# Selection order: --workflow flag, then [workflows].default, then the first
-# workflow. Agent-involving steps may pin a default binding here; the runtime
-# can still override it.
-[workflows]
-default = "primary"
+# The built-in `default` workflow is compiled internally; defining
+# [workflows.default] here overwrites it. Other names add extra workflows.
+# Agent-involving steps may pin a default binding here; the runtime can
+# still override it.
 
-[workflows.primary]
+[workflows.default]
 initial = "plan"
 max_iterations = 50
 
-[workflows.primary.steps.plan]
+[workflows.default.steps.plan]
 type = "plan"
 agent = "primary"
 provider = "openai"
@@ -77,44 +76,23 @@ model = "phi3"
 on_success = "implement"
 on_failure = "plan"
 
-[workflows.primary.steps.implement]
+[workflows.default.steps.implement]
 type = "implement"
 agent = "primary"
 provider = "openai"
 model = "phi3"
-on_success = "test"
+on_success = "validate"
 on_failure = "plan"
 
-[workflows.primary.steps.test]
-type = "test"
-agent = "primary"
-provider = "openai"
-model = "phi3"
+[workflows.default.steps.validate]
+type = "validate"
 on_success = "commit"
 on_failure = "implement"
 
-[workflows.primary.steps.commit]
+[workflows.default.steps.commit]
 type = "commit"
 agent = "primary"
 provider = "openai"
 model = "phi3"
 on_success = "done"
 on_failure = "implement"
-
-# Custom step examples (commented out — uncomment to use):
-# A silent agent turn, like implement/test but under a custom name:
-# [workflows.primary.steps.review]
-# type = "custom"
-# backend = { type = "llm" }
-# agent = "primary"
-# provider = "openai"
-# model = "phi3"
-# on_success = "done"
-# on_failure = "plan"
-#
-# A subprocess step: exit 0 ⇒ Success, non-zero ⇒ Failure:
-# [workflows.primary.steps.lint]
-# type = "custom"
-# backend = { type = "command", command = "cargo clippy --all-targets" }
-# on_success = "done"
-# on_failure = "implement"

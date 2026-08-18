@@ -2,7 +2,7 @@
 //! validation.
 //!
 //! Each step is parsed as one variant of the tagged [`Step`] enum — the `type`
-//! key in the config selects `Plan`/`Implement`/`Test`/`Commit`/`Custom`, so
+//! key in the config selects `Plan`/`Implement`/`Validate`/`Commit`/`Custom`, so
 //! parsing is driven entirely by the enum. Built-in variants carry their own
 //! config struct (no `backend` key); `Custom` wraps a [`Backend`] plus its own
 //! config. Transitions are name-based: `on_success`/`on_failure` name another
@@ -30,80 +30,61 @@ pub const DONE: &str = "done";
 
 /// Named workflow configuration map.
 ///
-/// In TOML:
+/// The built-in `default` workflow is always compiled internally; a
+/// `[workflows.default]` table in the config overwrites it, and other names
+/// are added as extra selectable workflows. In TOML:
 /// ```toml
-/// [workflows]
-/// default = "primary"
-///
-/// [workflows.primary]
+/// [workflows.default]
 /// initial = "plan"
 /// max_iterations = 50
 ///
-/// [workflows.primary.steps.plan]
+/// [workflows.default.steps.plan]
 /// type = "plan"
 /// on_success = "implement"
 /// on_failure = "plan"
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Workflow name to run when no `--workflow` flag is given.
-    default: Option<String>,
     /// The named workflows. Flattened so `[workflows.<name>]` tables land in
-    /// the map while the `default` key stays a named field.
+    /// the map; the internal default is seeded at compile time.
     #[serde(flatten)]
     workflows: HashMap<String, WorkflowConfig>,
 }
 
 impl Default for Config {
-    /// One default workflow: Plan -> Implement -> Test -> Commit -> Done.
+    /// No user workflows: the internal default `"default"` workflow is seeded
+    /// by [`Config::into_plans`].
     fn default() -> Self {
-        let mut workflows = HashMap::new();
-        workflows.insert("default".into(), WorkflowConfig::default());
         Config {
-            default: Some("default".into()),
-            workflows,
+            workflows: HashMap::new(),
         }
     }
 }
 
 impl Config {
-    /// Resolve the workflow to run: an explicit override wins, then the
-    /// config's `default` field, then the lexicographically first workflow.
-    pub fn select_name(&self, override_name: Option<&str>) -> Option<String> {
-        if let Some(name) = override_name {
-            return Some(name.to_string());
-        }
-        if let Some(default) = &self.default {
-            return Some(default.clone());
-        }
-        self.workflows.keys().min().cloned()
-    }
-
     /// Compile every named workflow into a plan map.
     ///
-    /// An empty map is never produced: a config with no workflows yields the
-    /// default workflow under the name `"default"`, keeping the runtime's
-    /// "there is always a plan" invariant.
+    /// The map always contains the built-in `"default"` workflow (Plan ->
+    /// Implement -> Validate -> Commit -> Done). A user-defined
+    /// `[workflows.default]` overwrites it; any other name is added on top,
+    /// keeping the runtime's "there is always a plan" invariant.
     pub fn into_plans(self) -> HashMap<String, WorkflowPlan> {
-        let Config {
-            default: _,
-            workflows,
-        } = self;
-        if workflows.is_empty() {
-            return HashMap::from([(
-                "default".to_string(),
-                WorkflowPlan::from_workflow(WorkflowConfig::default()),
-            )]);
-        }
-        workflows
-            .into_iter()
-            .map(|(name, workflow)| (name, WorkflowPlan::from_workflow(workflow)))
-            .collect()
+        let Config { workflows } = self;
+        let mut plans = HashMap::from([(
+            "default".to_string(),
+            WorkflowPlan::from_workflow(WorkflowConfig::default()),
+        )]);
+        plans.extend(
+            workflows
+                .into_iter()
+                .map(|(name, workflow)| (name, WorkflowPlan::from_workflow(workflow))),
+        );
+        plans
     }
 }
 
 /// One named workflow: its start state, iteration budget, and step graph.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct WorkflowConfig {
     /// Name of the step the workflow starts at ([`DONE`] completes it at once).
     initial: String,
@@ -116,7 +97,7 @@ pub struct WorkflowConfig {
 }
 
 impl Default for WorkflowConfig {
-    /// Default workflow: Plan -> Implement -> Test -> Commit -> Done.
+    /// Default workflow: Plan -> Implement -> Validate -> Commit -> Done.
     fn default() -> Self {
         let mut steps = HashMap::new();
         steps.insert(
@@ -130,14 +111,14 @@ impl Default for WorkflowConfig {
         steps.insert(
             "implement".into(),
             Step::Implement(ImplementConfig {
-                on_success: "test".into(),
+                on_success: "validate".into(),
                 on_failure: "plan".into(),
                 ..Default::default()
             }),
         );
         steps.insert(
-            "test".into(),
-            Step::Test(TestConfig {
+            "validate".into(),
+            Step::Validate(ValidateConfig {
                 on_success: "commit".into(),
                 on_failure: "implement".into(),
                 ..Default::default()
@@ -159,6 +140,132 @@ impl Default for WorkflowConfig {
     }
 }
 
+/// Configuration for a `plan` step: listens for one user message, pushes it,
+/// then runs an agent turn.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct PlanConfig {
+    /// Default agent binding for this step. Only agent-involving steps need
+    /// one; the runtime may still override it.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Default provider (endpoint) binding for this step.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Default model binding for this step.
+    #[serde(default)]
+    model: Option<String>,
+    /// Name of the step to run next on success, or [`DONE`].
+    on_success: String,
+    /// Name of the step to run next on failure, or [`DONE`].
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+/// Configuration for an `implement` step: runs an agent turn silently.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct ImplementConfig {
+    /// Default agent binding for this step. Only agent-involving steps need
+    /// one; the runtime may still override it.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Default provider (endpoint) binding for this step.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Default model binding for this step.
+    #[serde(default)]
+    model: Option<String>,
+    /// Name of the step to run next on success, or [`DONE`].
+    on_success: String,
+    /// Name of the step to run next on failure, or [`DONE`].
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+/// Configuration for a `validate` step: runs an agent turn silently.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct ValidateConfig {
+    /// Default agent binding for this step. Only agent-involving steps need
+    /// one; the runtime may still override it.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Default provider (endpoint) binding for this step.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Default model binding for this step.
+    #[serde(default)]
+    model: Option<String>,
+    /// Name of the step to run next on success, or [`DONE`].
+    on_success: String,
+    /// Name of the step to run next on failure, or [`DONE`].
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+/// Configuration for a `commit` step: listens for one user message, pushes it,
+/// then runs an agent turn.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct CommitConfig {
+    /// Default agent binding for this step. Only agent-involving steps need
+    /// one; the runtime may still override it.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Default provider (endpoint) binding for this step.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Default model binding for this step.
+    #[serde(default)]
+    model: Option<String>,
+    /// Name of the step to run next on success, or [`DONE`].
+    on_success: String,
+    /// Name of the step to run next on failure, or [`DONE`].
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+/// Configuration for a custom step: a required [`Backend`] plus the shared
+/// binding overrides, transition targets, and optional timeout.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CustomConfig {
+    /// How this step's work is executed.
+    backend: Backend,
+    /// Default agent binding for this step. Only agent-involving steps need
+    /// one; the runtime may still override it.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Default provider (endpoint) binding for this step.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Default model binding for this step.
+    #[serde(default)]
+    model: Option<String>,
+    /// Name of the step to run next on success, or [`DONE`].
+    on_success: String,
+    /// Name of the step to run next on failure, or [`DONE`].
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+/// How a custom step's work is executed. Built-in steps need no backend; their
+/// behavior is hardcoded in [`Step`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Backend {
+    /// Run one silent agent turn with the step's binding.
+    Llm, //TODO: add some config for the llm logic
+    /// Run the process via `sh -c`; exit 0 ⇒ [`StepOutcome::Success`],
+    /// non-zero ⇒ [`StepOutcome::Failure`].
+    Command { command: String },
+    /// Modeled; returns an "unsupported backend" error until implemented.
+    Wasm { module: PathBuf, function: String },
+    /// Modeled; returns an "unsupported backend" error until implemented.
+    Native { path: PathBuf, function: String },
+}
+
 /// One step definition as written in the config. The `type` key selects the
 /// variant, so parsing is driven entirely by this enum: built-in variants
 /// carry their own config struct, `Custom` wraps a [`Backend`] plus its own
@@ -171,138 +278,12 @@ pub enum Step {
     Plan(PlanConfig),
     /// `implement` — runs an agent turn silently.
     Implement(ImplementConfig),
-    /// `test` — runs an agent turn silently.
-    Test(TestConfig),
+    /// `validate` — runs validation steps.
+    Validate(ValidateConfig),
     /// `commit` — listens for one user message, pushes it, runs an agent turn.
     Commit(CommitConfig),
     /// Any other step, executed according to its [`Backend`].
     Custom(CustomConfig),
-}
-
-/// Configuration for a `plan` step: listens for one user message, pushes it,
-/// then runs an agent turn.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-pub struct PlanConfig {
-    /// Default agent binding for this step. Only agent-involving steps need
-    /// one; the runtime may still override it.
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Default provider (endpoint) binding for this step.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Default model binding for this step.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Name of the step to run next on success, or [`DONE`].
-    pub on_success: String,
-    /// Name of the step to run next on failure, or [`DONE`].
-    pub on_failure: String,
-    /// Optional execution timeout in seconds.
-    pub timeout_secs: Option<u64>,
-}
-
-/// Configuration for an `implement` step: runs an agent turn silently.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-pub struct ImplementConfig {
-    /// Default agent binding for this step. Only agent-involving steps need
-    /// one; the runtime may still override it.
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Default provider (endpoint) binding for this step.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Default model binding for this step.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Name of the step to run next on success, or [`DONE`].
-    pub on_success: String,
-    /// Name of the step to run next on failure, or [`DONE`].
-    pub on_failure: String,
-    /// Optional execution timeout in seconds.
-    pub timeout_secs: Option<u64>,
-}
-
-/// Configuration for a `test` step: runs an agent turn silently.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-pub struct TestConfig {
-    /// Default agent binding for this step. Only agent-involving steps need
-    /// one; the runtime may still override it.
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Default provider (endpoint) binding for this step.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Default model binding for this step.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Name of the step to run next on success, or [`DONE`].
-    pub on_success: String,
-    /// Name of the step to run next on failure, or [`DONE`].
-    pub on_failure: String,
-    /// Optional execution timeout in seconds.
-    pub timeout_secs: Option<u64>,
-}
-
-/// Configuration for a `commit` step: listens for one user message, pushes it,
-/// then runs an agent turn.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-pub struct CommitConfig {
-    /// Default agent binding for this step. Only agent-involving steps need
-    /// one; the runtime may still override it.
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Default provider (endpoint) binding for this step.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Default model binding for this step.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Name of the step to run next on success, or [`DONE`].
-    pub on_success: String,
-    /// Name of the step to run next on failure, or [`DONE`].
-    pub on_failure: String,
-    /// Optional execution timeout in seconds.
-    pub timeout_secs: Option<u64>,
-}
-
-/// Configuration for a custom step: a required [`Backend`] plus the shared
-/// binding overrides, transition targets, and optional timeout.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct CustomConfig {
-    /// How this step's work is executed.
-    pub backend: Backend,
-    /// Default agent binding for this step. Only agent-involving steps need
-    /// one; the runtime may still override it.
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// Default provider (endpoint) binding for this step.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Default model binding for this step.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Name of the step to run next on success, or [`DONE`].
-    pub on_success: String,
-    /// Name of the step to run next on failure, or [`DONE`].
-    pub on_failure: String,
-    /// Optional execution timeout in seconds.
-    pub timeout_secs: Option<u64>,
-}
-
-/// How a custom step's work is executed. Built-in steps need no backend; their
-/// behavior is hardcoded in [`Step`].
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Backend {
-    /// Run one silent agent turn with the step's binding.
-    Llm,
-    /// Run the process via `sh -c`; exit 0 ⇒ [`StepOutcome::Success`],
-    /// non-zero ⇒ [`StepOutcome::Failure`].
-    Command { command: String },
-    /// Modeled; returns an "unsupported backend" error until implemented.
-    Wasm { module: PathBuf, function: String },
-    /// Modeled; returns an "unsupported backend" error until implemented.
-    Native { path: PathBuf, function: String },
 }
 
 impl Step {
@@ -328,7 +309,7 @@ impl Step {
         let mut silent = StepContext::new(session, soft, user_input, binding);
         match self {
             Step::Plan(_) | Step::Commit(_) => run_listening_step(&mut silent.listen()).await,
-            Step::Implement(_) | Step::Test(_) => silent.run_agent_turn().await,
+            Step::Implement(_) | Step::Validate(_) => silent.run_agent_turn().await,
             Step::Custom(CustomConfig {
                 backend: Backend::Llm,
                 ..
@@ -353,7 +334,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => cfg.agent.as_deref(),
             Step::Implement(cfg) => cfg.agent.as_deref(),
-            Step::Test(cfg) => cfg.agent.as_deref(),
+            Step::Validate(cfg) => cfg.agent.as_deref(),
             Step::Commit(cfg) => cfg.agent.as_deref(),
             Step::Custom(cfg) => cfg.agent.as_deref(),
         }
@@ -364,7 +345,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => cfg.provider.as_deref(),
             Step::Implement(cfg) => cfg.provider.as_deref(),
-            Step::Test(cfg) => cfg.provider.as_deref(),
+            Step::Validate(cfg) => cfg.provider.as_deref(),
             Step::Commit(cfg) => cfg.provider.as_deref(),
             Step::Custom(cfg) => cfg.provider.as_deref(),
         }
@@ -375,7 +356,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => cfg.model.as_deref(),
             Step::Implement(cfg) => cfg.model.as_deref(),
-            Step::Test(cfg) => cfg.model.as_deref(),
+            Step::Validate(cfg) => cfg.model.as_deref(),
             Step::Commit(cfg) => cfg.model.as_deref(),
             Step::Custom(cfg) => cfg.model.as_deref(),
         }
@@ -386,7 +367,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => &cfg.on_success,
             Step::Implement(cfg) => &cfg.on_success,
-            Step::Test(cfg) => &cfg.on_success,
+            Step::Validate(cfg) => &cfg.on_success,
             Step::Commit(cfg) => &cfg.on_success,
             Step::Custom(cfg) => &cfg.on_success,
         }
@@ -397,7 +378,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => &cfg.on_failure,
             Step::Implement(cfg) => &cfg.on_failure,
-            Step::Test(cfg) => &cfg.on_failure,
+            Step::Validate(cfg) => &cfg.on_failure,
             Step::Commit(cfg) => &cfg.on_failure,
             Step::Custom(cfg) => &cfg.on_failure,
         }
@@ -405,16 +386,12 @@ impl Step {
 
     /// Optional execution timeout.
     pub fn timeout(&self) -> Option<Duration> {
-        self.timeout_secs().map(Duration::from_secs)
-    }
-
-    fn timeout_secs(&self) -> Option<u64> {
         match self {
-            Step::Plan(cfg) => cfg.timeout_secs,
-            Step::Implement(cfg) => cfg.timeout_secs,
-            Step::Test(cfg) => cfg.timeout_secs,
-            Step::Commit(cfg) => cfg.timeout_secs,
-            Step::Custom(cfg) => cfg.timeout_secs,
+            Step::Plan(cfg) => cfg.timeout_secs.map(Duration::from_secs),
+            Step::Implement(cfg) => cfg.timeout_secs.map(Duration::from_secs),
+            Step::Validate(cfg) => cfg.timeout_secs.map(Duration::from_secs),
+            Step::Commit(cfg) => cfg.timeout_secs.map(Duration::from_secs),
+            Step::Custom(cfg) => cfg.timeout_secs.map(Duration::from_secs),
         }
     }
 
@@ -434,7 +411,7 @@ impl fmt::Display for Step {
         f.write_str(match self {
             Step::Plan(_) => "plan",
             Step::Implement(_) => "implement",
-            Step::Test(_) => "test",
+            Step::Validate(_) => "validate",
             Step::Commit(_) => "commit",
             Step::Custom(_) => "custom",
         })
@@ -489,9 +466,21 @@ async fn run_command(command: &str) -> StepOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedStep {
     /// Config name of this step.
-    pub name: String,
+    name: String,
     /// Kind of work to perform.
-    pub step: Step,
+    step: Step,
+}
+
+impl NamedStep {
+    /// Config name of this step.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Kind of work to perform.
+    pub fn step(&self) -> &Step {
+        &self.step
+    }
 }
 
 /// Validate a compiled plan against the loaded llm config.
@@ -597,14 +586,29 @@ pub fn validate(plan: &WorkflowPlan, llm: &LlmConfig) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowPlan {
     /// Name of the step the workflow starts at ([`DONE`] completes it at once).
-    pub initial: String,
+    initial: String,
     /// Iteration budget for the whole run.
-    pub max_iterations: u32,
+    max_iterations: u32,
     /// The plan's steps, sorted by name.
-    pub steps: Vec<NamedStep>,
+    steps: Vec<NamedStep>,
 }
 
 impl WorkflowPlan {
+    /// Name of the step the workflow starts at ([`DONE`] completes it at once).
+    pub fn initial(&self) -> &str {
+        &self.initial
+    }
+
+    /// Iteration budget for the whole run.
+    pub fn max_iterations(&self) -> u32 {
+        self.max_iterations
+    }
+
+    /// The plan's steps, sorted by name.
+    pub fn steps(&self) -> &[NamedStep] {
+        &self.steps
+    }
+
     /// Compile a [`WorkflowConfig`] into a [`WorkflowPlan`].
     ///
     /// Steps are sorted by name for determinism. Transition targets are kept
@@ -669,8 +673,8 @@ struct Silent;
 /// on `StepContext<'_, Listening>` — can wait on it. Silent steps cannot even
 /// name the method, so "may this step listen?" is enforced by the compiler.
 pub struct StepContext<'a, Mode> {
-    pub session: &'a mut SessionContext,
-    pub soft: &'a CancellationToken,
+    session: &'a mut SessionContext,
+    soft: &'a CancellationToken,
     user_input: &'a mut mpsc::UnboundedReceiver<Message>,
     /// The step's resolved agent binding, if any.
     binding: Option<&'a Binding>,

@@ -28,19 +28,13 @@ pub struct Config {
     workflows: WorkflowsConfig,
     /// The filesystem path this config was loaded from (set by `load()`).
     #[serde(skip)]
-    path: Option<PathBuf>,
+    path: PathBuf,
 }
 
 impl Config {
     /// The filesystem path this config was loaded from, if any.
-    pub fn source_path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-
-    /// Resolve the active workflow name: `--workflow` override, else the
-    /// config's `[workflows].default`, else the first workflow.
-    pub fn select_workflow(&self, override_name: Option<&str>) -> Option<String> {
-        self.workflows.select_name(override_name)
+    pub fn source_path(&self) -> &Path {
+        self.path.as_ref()
     }
 
     /// Consume `Config` and return its inner parts.
@@ -56,44 +50,35 @@ impl Config {
     /// 3. CLI override: `--config <path>` (errors if provided but missing)
     ///
     /// If no file exists at any location, returns a `Config` with all defaults.
-    pub fn load(cli_override: Option<PathBuf>) -> Result<Self, Error> {
+    pub fn load(cli_path: PathBuf) -> Result<Self, Error> {
         let mut merged = toml::Value::Table(toml::value::Table::new());
 
         // Track the most specific config file that was loaded.
         let mut resolved_path: Option<PathBuf> = None;
 
         //TODO: instead of using a default value at the end we could populate the config and then reuse it
-        // 1. XDG default: ~/.config/fyah/config.toml (silently skipped if missing)
+        // XDG default: ~/.config/fyah/config.toml (silently skipped if missing)
         if let Some(xdg_path) = xdg_config_path()
             && xdg_path.exists()
         {
             load_and_merge(&mut merged, &xdg_path)?;
             resolved_path = Some(xdg_path);
         }
-
-        // 2. Local: ./fyah.toml
-        let local_path = PathBuf::from("fyah.toml");
-        if local_path.exists() {
-            load_and_merge(&mut merged, &local_path)?;
-            resolved_path = Some(local_path);
+        // CLI override (most specific — overwrites any previous path)
+        if cli_path.exists() {
+            load_and_merge(&mut merged, &cli_path)?;
+            resolved_path = Some(cli_path);
+        } else {
+            return Err(Error::NotFound(cli_path));
         }
 
-        // 3. CLI override (most specific — overwrites any previous path)
-        if let Some(ref cli_path) = cli_override {
-            if cli_path.exists() {
-                load_and_merge(&mut merged, cli_path)?;
-                resolved_path = Some(cli_path.clone());
-            } else {
-                return Err(Error::NotFound(cli_path.clone()));
-            }
-        }
+        let mut config: Config = merged
+            .try_into()
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        // Deserialize the merged TOML value into a Config.
-        let toml_string =
-            toml::to_string(&merged).map_err(|e| Error::Deserialize(e.to_string()))?;
-        let mut config: Config =
-            toml::from_str(&toml_string).map_err(|e| Error::Deserialize(e.to_string()))?;
-        config.path = resolved_path;
+        if let Some(path) = resolved_path {
+            config.path = path;
+        };
 
         Ok(config)
     }
@@ -154,14 +139,16 @@ fn xdg_config_path() -> Option<PathBuf> {
 
 /// Read a TOML file at `path`, parse to `toml::Value`, and merge into `base`.
 fn load_and_merge(base: &mut toml::Value, path: &PathBuf) -> Result<(), Error> {
-    let contents = std::fs::read_to_string(path).map_err(|e| Error::Io {
-        path: path.clone(),
-        source: e,
-    })?;
-    let value: toml::Value = toml::from_str(&contents).map_err(|e| Error::Parse {
-        path: path.clone(),
-        source: e,
-    })?;
+    let value = std::fs::read_to_string(path)
+        .map_err(|e| Error::Io {
+            path: path.clone(),
+            source: e,
+        })
+        .map(|s| toml::from_str(&s))?
+        .map_err(|e| Error::Parse {
+            path: path.clone(),
+            source: e,
+        })?;
     merge_toml(base, value);
     Ok(())
 }
