@@ -1,0 +1,67 @@
+{
+  "agents": {
+    "primary": {
+      "context_builder": "default",
+      "context_compaction": "default",
+      "max_iterations": 25,
+      "prompt_builder": "default",
+      "system_prompt": "You are Fyah, an AI coding assistant.",
+      "tools": [],
+      "tools_filter": "default"
+    }
+  },
+  "models": {
+    "phi3": {
+      "format": "openai",
+      "model": "phi3:mini"
+    }
+  },
+  "providers": {
+    "openai": {
+      "api_key": "ollama",
+      "url": "http://127.0.0.1:11434/v1/chat/completions"
+    }
+  },
+  "tools": {
+    "code_interpreter": false,
+    "computer_use": false,
+    "custom": [],
+    "file_search": null,
+    "mcp": [],
+    "shell": true,
+    "tool_search": false,
+    "web_search": false
+  },
+  "workflows": {
+    "default": {
+      "initial": "plan",
+      "max_iterations": 50,
+      "steps": {
+        "commit": {
+          "agent": "primary",
+          "model": "phi3",
+          "on_failure": "plan",
+          "on_success": "done",
+          "provider": "openai",
+          "timeout_secs": null,
+          "type": "commit"
+        },
+        "plan": {
+          "agent": "primary",
+          "model": "phi3",
+          "on_failure": "plan",
+          "on_success": "validate",
+          "provider": "openai",
+          "timeout_secs": null,
+          "type": "plan"
+        },
+        "validate": {
+          "on_failure": "plan",
+          "on_success": "commit",
+          "timeout_secs": null,
+          "type": "validate"
+        }
+      }
+    }
+  }
+}

@@ -59,10 +59,10 @@ command = "execute_read_file"
 parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = ["path"] }
 
 # ── Workflows: named step graphs; run with `--workflow <name>`. ──
-# The built-in `default` workflow is compiled internally; defining
-# [workflows.default] here overwrites it. Other names add extra workflows.
-# Agent-involving steps may pin a default binding here; the runtime can
-# still override it.
+# Workflows are entirely config-defined — no built-ins. The default CLI
+# workflow name is "default", so the config defines one here. Additional
+# names add extra workflows. Agent-involving steps may pin a default binding
+# here; the runtime can still override it.
 
 [workflows.default]
 initial = "plan"

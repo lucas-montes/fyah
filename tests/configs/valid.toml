@@ -1,0 +1,42 @@
+# Valid config: every workflow compiles into a plan with no problems.
+# Exercises parse + structural conversion (TryFrom) — must build a ConfigStore.
+
+[providers.openai]
+url = "http://127.0.0.1:11434/v1/chat/completions"
+api_key = "ollama"
+
+[models.phi3]
+format = "openai"
+model = "phi3:mini"
+
+[agents.primary]
+system_prompt = "You are Fyah, an AI coding assistant."
+max_iterations = 25
+
+[tools]
+shell = true
+
+[workflows.default]
+initial = "plan"
+max_iterations = 50
+
+[workflows.default.steps.plan]
+type = "plan"
+agent = "primary"
+provider = "openai"
+model = "phi3"
+on_success = "validate"
+on_failure = "plan"
+
+[workflows.default.steps.validate]
+type = "validate"
+on_success = "commit"
+on_failure = "plan"
+
+[workflows.default.steps.commit]
+type = "commit"
+agent = "primary"
+provider = "openai"
+model = "phi3"
+on_success = "done"
+on_failure = "plan"

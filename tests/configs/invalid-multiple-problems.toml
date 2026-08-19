@@ -1,0 +1,25 @@
+# Invalid config: one workflow with three structural problems, all of which
+# must be reported together (not the first one):
+#   1. step "done" is a reserved name
+#   2. step "plan" transitions to "nope", which does not exist
+#   3. step "lint" is a command backend with an empty command
+
+[workflows.default]
+initial = "plan"
+max_iterations = 10
+
+[workflows.default.steps.plan]
+type = "plan"
+on_success = "nope"
+on_failure = "plan"
+
+[workflows.default.steps.done]
+type = "implement"
+on_success = "done"
+on_failure = "plan"
+
+[workflows.default.steps.lint]
+type = "custom"
+backend = { type = "command", command = "   " }
+on_success = "done"
+on_failure = "plan"

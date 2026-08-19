@@ -8,15 +8,24 @@
 //! No env-var support. No hot-reload (single-load at startup).
 //!
 //! TODO: at some point read .github, .opencode and all the specific configs
-
-use serde::Deserialize;
+//! Central store for the config parts and their change notifications.
+//!
+//! The store ingests the **raw** parsed [`Config`], converts each part into its
+//! runtime-ready derived form via [`TryFrom`], diffs it against the current
+//! value, and only sends the parts that actually changed on per-part watch
+//! channels. The watch channel owns all locking and ref-counting; the store
+//! never holds a guard across an await and never keeps a duplicate copy of a
+//! value.
+//!
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tokio::sync::watch::{self, Ref};
 
 use crate::llm::Config as LlmConfig;
-use crate::tools::Config as ToolsConfig;
-use crate::workflows::Config as WorkflowsConfig;
+use crate::tools::{Config as ToolsConfig, ToolRegistry};
+use crate::workflows::{Config as WorkflowsConfig, PlanMap, WorkflowErrors};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(flatten)]
     llm: LlmConfig,
@@ -53,36 +62,67 @@ impl Config {
     pub fn load(cli_path: PathBuf) -> Result<Self, Error> {
         let mut merged = toml::Value::Table(toml::value::Table::new());
 
-        // Track the most specific config file that was loaded.
-        let mut resolved_path: Option<PathBuf> = None;
-
-        //TODO: instead of using a default value at the end we could populate the config and then reuse it
         // XDG default: ~/.config/fyah/config.toml (silently skipped if missing)
         if let Some(xdg_path) = xdg_config_path()
             && xdg_path.exists()
         {
             load_and_merge(&mut merged, &xdg_path)?;
-            resolved_path = Some(xdg_path);
-        }
+        };
+
         // CLI override (most specific — overwrites any previous path)
-        if cli_path.exists() {
+        let resolved_path = if cli_path.exists() {
             load_and_merge(&mut merged, &cli_path)?;
-            resolved_path = Some(cli_path);
+            Ok(cli_path)
         } else {
-            return Err(Error::NotFound(cli_path));
-        }
+            Err(Error::NotFound(cli_path))
+        };
 
         let mut config: Config = merged
             .try_into()
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        if let Some(path) = resolved_path {
-            config.path = path;
-        };
+        config.path = resolved_path?;
 
         Ok(config)
     }
 }
+
+/// Something the run cannot start with: the parsed config fails structural
+/// validation, or the requested workflow does not exist.
+pub enum StartupError {
+    /// One or more workflows are structurally invalid.
+    InvalidConfig(Vec<WorkflowErrors>),
+    /// The workflow requested via `--workflow` is not defined by the config.
+    UnknownWorkflow(String),
+}
+
+/// User-facing errors render through [`Display`]: the standard `?`/`Termination`
+/// path prints an error's `Debug`, so startup failures surface as readable
+/// text instead of the raw enum structure.
+impl std::fmt::Debug for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownWorkflow(name) => {
+                write!(f, "cannot start: unknown workflow {name:?}")
+            }
+            Self::InvalidConfig(workflows) => {
+                write!(f, "cannot start: invalid config")?;
+                for workflow in workflows {
+                    write!(f, "\n{workflow}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for StartupError {}
 
 #[derive(Debug)]
 pub enum Error {
@@ -167,5 +207,163 @@ fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
             }
         }
         (base, overlay) => *base = overlay,
+    }
+}
+
+/// One config part: the current value plus a watch channel publishing updates.
+///
+/// [`PartStore::update`] diffs the new value against the current one and only
+/// notifies subscribers when the value actually changed.
+#[derive(Debug)]
+struct PartStore<T: PartialEq> {
+    changed: watch::Sender<T>,
+}
+
+impl<T: PartialEq> PartStore<T> {
+    /// Create a store seeded with `initial`. Subscribers see this value.
+    fn new(initial: T) -> Self {
+        let (changed, _) = watch::channel(initial);
+        Self { changed }
+    }
+
+    /// Replace the current value if it differs; returns whether it changed.
+    /// A change is published to every current and future subscriber.
+    fn update(&mut self, value: T) -> bool {
+        if *self.changed.borrow() == value {
+            return false;
+        }
+        let _ = self.changed.send(value);
+        true
+    }
+
+    /// Subscribe to updates. The receiver already sees the current value.
+    fn subscribe(&self) -> watch::Receiver<T> {
+        self.changed.subscribe()
+    }
+}
+
+/// The writer side of the config: ingests a raw parsed [`Config`], converts each
+/// part into its derived form, diffs them, and publishes changes on per-part
+/// watch channels. Owned by the filesystem watcher; readers hold a
+/// [`ConfigView`].
+#[derive(Debug)]
+pub struct ConfigStore {
+    generation: u64,
+    llm: PartStore<LlmConfig>,
+    tools: PartStore<ToolRegistry>,
+    /// All named workflows, compiled. The runtime selects the active one by
+    /// name; hot reloads recompile every workflow and publish the whole map.
+    workflow: PartStore<PlanMap>,
+}
+
+impl ConfigStore {
+    /// Convert every part of a raw config into its runtime form and seed the
+    /// store. Any problem aborts before the run.
+    pub fn new(config: Config) -> Result<Self, StartupError> {
+        let (llm, tools, workflows) = config.into_parts();
+        let plans = match PlanMap::try_from(workflows) {
+            Ok(plans) => plans,
+            Err(problems) => return Err(StartupError::InvalidConfig(problems)),
+        };
+        let tools = tools.into();
+
+        Ok(Self {
+            generation: 0,
+            llm: PartStore::new(llm),
+            tools: PartStore::new(tools),
+            workflow: PartStore::new(plans),
+        })
+    }
+
+    /// Convert a fresh config and publish only the parts that changed. Returns
+    /// whether anything changed.
+    ///
+    /// `|` (not `||`) so every part is applied even when an earlier one
+    /// already changed. A conversion error leaves the store untouched, so
+    /// subscribers keep serving the last good config.
+    pub fn apply(&mut self, config: Config) -> Result<bool, StartupError> {
+        let (llm, tools, workflows) = config.into_parts();
+        let plans = match PlanMap::try_from(workflows) {
+            Ok(plans) => plans,
+            Err(problems) => return Err(StartupError::InvalidConfig(problems)),
+        };
+        let tools = tools.into();
+
+        let changed = self.llm.update(llm) | self.tools.update(tools) | self.workflow.update(plans);
+        if changed {
+            self.generation += 1;
+        }
+        Ok(changed)
+    }
+
+    /// Reload the config from disk and apply it. Returns whether any part
+    /// changed. On a load or conversion error the store is left untouched, so
+    /// subscribers keep serving the last good config.
+    pub fn reload(&mut self, path: &Path) -> Result<bool, StoreError> {
+        let config = Config::load(path.to_path_buf()).map_err(StoreError::Load)?;
+        self.apply(config).map_err(StoreError::Convert)
+    }
+
+    /// Subscribe to every part, yielding a [`ConfigView`].
+    pub fn subscribe(&self) -> ConfigView {
+        ConfigView {
+            llm: self.llm.subscribe(),
+            tools: self.tools.subscribe(),
+            workflow: self.workflow.subscribe(),
+        }
+    }
+}
+
+/// Reasons a config reload did not produce a new config: parse errors and
+/// conversion (structural validation) errors.
+#[derive(Debug)]
+pub enum StoreError {
+    /// The config could not be read or parsed.
+    Load(crate::config::Error),
+    /// The parsed config failed structural validation.
+    Convert(StartupError),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Load(source) => write!(f, "config load failed: {source}"),
+            Self::Convert(source) => write!(f, "config validation failed: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Load(source) => Some(source),
+            Self::Convert(source) => Some(source),
+        }
+    }
+}
+
+/// The read side of the config: receivers for every part. It holds only
+/// receivers; the writer lives in the [`ConfigStore`].
+#[derive(Clone, Debug)]
+pub struct ConfigView {
+    llm: watch::Receiver<LlmConfig>,
+    tools: watch::Receiver<ToolRegistry>,
+    workflow: watch::Receiver<PlanMap>,
+}
+
+impl ConfigView {
+    /// Subscribe to the LLM config.
+    pub fn llm(&self) -> Ref<'_, LlmConfig> {
+        self.llm.borrow()
+    }
+
+    /// Subscribe to the tool registry.
+    pub fn tools(&self) -> watch::Receiver<ToolRegistry> {
+        self.tools.clone()
+    }
+
+    /// Subscribe to the workflow plan map.
+    pub fn workflow(&mut self) -> &mut watch::Receiver<PlanMap> {
+        &mut self.workflow
     }
 }

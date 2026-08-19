@@ -7,7 +7,7 @@ use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
 use tracing::{debug, error, info, warn};
 
-use crate::config_store::ConfigStore;
+use crate::config::ConfigStore;
 
 /// How long filesystem changes are batched before being emitted.
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::middlewares::{
     ContextBuilderCfg, ContextCompactionCfg, PromptBuilderCfg, ToolsFilterCfg,
@@ -21,7 +21,7 @@ fn default_max_iterations() -> u32 {
     10
 }
 
-#[derive(Debug, Deserialize, Default, PartialEq)]
+#[derive(Debug, Deserialize, Default, PartialEq, Serialize)]
 pub struct Agent {
     #[serde(default = "default_max_iterations")]
     max_iterations: u32,
@@ -65,7 +65,7 @@ impl Agent {
     }
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq)]
+#[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Config {
     #[serde(default)]
     providers: HashMap<String, Provider>,
@@ -87,7 +87,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Provider {
     url: String,
     api_key: Option<String>,
@@ -102,7 +102,7 @@ impl Provider {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "format", rename_all = "lowercase")]
 pub enum Model {
     Anthropic(AnthropicConfig),

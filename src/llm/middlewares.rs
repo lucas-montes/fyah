@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::context::{AgentContext, Message, Prompt, SessionContext};
 
@@ -12,7 +12,7 @@ impl PromptBuilder for DefaultPromptBuilder {
     }
 }
 
-#[derive(Debug, Deserialize, Default, PartialEq)]
+#[derive(Debug, Deserialize, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptBuilderCfg {
     #[default]
@@ -54,7 +54,7 @@ impl ContextBuilder for DefaultContextBuilder {
     }
 }
 
-#[derive(Debug, Deserialize, Default, PartialEq)]
+#[derive(Debug, Deserialize, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextBuilderCfg {
     #[default]
@@ -81,7 +81,7 @@ impl ContextCompaction for DefaultContextCompaction {
     fn compact(&self, _context: &mut AgentContext) {}
 }
 
-#[derive(Debug, Deserialize, Default, PartialEq)]
+#[derive(Debug, Deserialize, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextCompactionCfg {
     #[default]
@@ -108,7 +108,7 @@ impl<Tool> ToolsFilter<Tool> for DefaultToolsFilter {
     fn filter(&self, _tool_calls: &Vec<Tool>) {}
 }
 
-#[derive(Debug, Deserialize, Default, PartialEq)]
+#[derive(Debug, Deserialize, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolsFilterCfg {
     #[default]

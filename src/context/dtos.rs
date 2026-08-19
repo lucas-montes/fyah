@@ -1,4 +1,4 @@
-use crate::config_store::ConfigView;
+use crate::config::ConfigView;
 use crate::llm::{Client, ProviderRegistry};
 
 use super::{

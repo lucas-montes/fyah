@@ -1,13 +1,3 @@
-mod config;
-mod config_store;
-mod context;
-mod fs_watcher;
-mod llm;
-mod map;
-mod runtime;
-mod tools;
-mod workflows;
-
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -23,14 +13,13 @@ use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::config::Config;
-use crate::config_store::ConfigStore;
-use crate::context::Message;
-use crate::context::Session;
-use crate::context::SessionContext;
-use crate::fs_watcher::FsWatcher;
-use crate::llm::{AnthropicFactory, Client, OllamaFactory, OpenAIFactory, ProviderRegistry};
-use crate::runtime::Runtime;
+use fyah::config::{Config, ConfigStore};
+use fyah::context::Message;
+use fyah::context::Session;
+use fyah::context::SessionContext;
+use fyah::fs_watcher::FsWatcher;
+use fyah::llm::{AnthropicFactory, Client, OllamaFactory, OpenAIFactory, ProviderRegistry};
+use fyah::runtime::Runtime;
 
 #[derive(Debug, Parser)]
 #[command(name = "Fyah", author, version, about)]
@@ -39,7 +28,8 @@ pub struct Cli {
     #[arg(short, long, default_value = "fyah.toml")]
     config: PathBuf,
 
-    /// Workflow name to run; defaults to the built-in `default` workflow.
+    /// Workflow name to run; the config must define a workflow with this name
+    /// (no built-in workflows — a missing name aborts startup).
     #[arg(long, default_value = "default")]
     workflow: String,
 }
@@ -124,11 +114,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load(cli.config)?;
     debug!(?config, "config loaded");
 
-    // The CLI workflow name selects a plan by that name; the built-in
-    // `default` workflow is always present unless overwritten in the config.
+    // The CLI workflow name selects a plan by that name; workflows are entirely
+    // config-defined, so a name not present in the config aborts startup.
     debug!(workflow = %cli.workflow, "active workflow");
 
-    // Resolve the watch path before the config is consumed by `into_parts`.
+    // Resolve the watch path before the config is consumed by the store.
     let config_path = config.source_path().to_path_buf();
 
     let (user_tx, user_rx) = mpsc::unbounded_channel::<Message>();
@@ -145,11 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_cancellation_handler(soft.clone(), hard.clone());
 
     // The store owns every reloadable config part and publishes changes on
-    // watch channels. The runtime subscribes to the workflow plan; the session
-    // holds the read side (view) plus the static provider factories, built
-    // once here. The file watcher owns the store and reloads it when the
-    // config changes on disk.
-    let store = ConfigStore::new(config);
+    // watch channels. It converts the raw config into its runtime parts;
+    // a structural problem aborts here before the run. The session holds the
+    // read side (view) plus the static provider factories, built once here.
+    // The file watcher owns the store and reloads it when the config changes
+    // on disk.
+    let store = ConfigStore::new(config)?;
     let view = store.subscribe();
 
     //TODO: if we know all the providers, maybe we don't ned a Dyn and we can use a regular ass enum

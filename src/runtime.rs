@@ -14,29 +14,13 @@
 //! the (possibly reloaded) plan before each step; a name that is no longer part
 //! of the plan completes the workflow instead of leaving it dangling.
 
-use std::collections::HashMap;
-
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace, warn};
+use tracing::{info, trace, warn};
 
-use crate::config_store::ConfigView;
+use crate::config::StartupError;
 use crate::context::{Message, SessionContext};
-use crate::workflows::{DONE, NamedStep, StepOutcome, WorkflowPlan, validate};
-
-/// Reasons a run cannot start: the active workflow fails startup validation.
-#[derive(Debug)]
-pub struct StartupError {
-    problems: Vec<String>,
-}
-
-impl std::fmt::Display for StartupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "cannot start: {}", self.problems.join("; "))
-    }
-}
-
-impl std::error::Error for StartupError {}
+use crate::workflows::{DONE, Step, StepOutcome, WorkflowPlan};
 
 /// Deterministic harness: walks the step graph, applies cancellations and
 /// plan reloads, and reflects the current step's input state on a watch.
@@ -60,8 +44,9 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// Returns [`StartupError`] when the active workflow fails startup
-    /// validation against the session's llm config.
+    /// Returns [`StartupError`] when the active workflow is not defined in the
+    /// loaded config (workflows are config-defined; there is no built-in
+    /// default).
     pub fn new(
         active_workflow: String,
         input_tx: watch::Sender<bool>,
@@ -74,10 +59,10 @@ impl Runtime {
             let cfg = session.view();
             let plans = cfg.workflow().borrow();
 
-            let plan = plans
+            plans
                 .get(&active_workflow)
-                .expect("we should always find the plan with the active workflow");
-            plan.clone()
+                .cloned()
+                .ok_or_else(|| StartupError::UnknownWorkflow(active_workflow.clone()))?
         };
         let current = plan.initial().to_string();
         Ok(Self {
@@ -99,7 +84,7 @@ impl Runtime {
     /// input watch reflects whether the current step accepts user input; after
     /// the loop it is set to `false`.
     pub async fn run(&mut self) {
-        let mut iterations = 0u32;
+        let mut iterations = 0;
         loop {
             // Apply the latest plan map, if one changed since the last step
             // boundary. The watch coalesces reloads: only the newest map is
@@ -113,10 +98,14 @@ impl Runtime {
             {
                 let plan = {
                     let plans = self.session.view().workflow().borrow_and_update();
-                    plans
-                        .get(&self.active_workflow)
-                        .expect("we should always find the plan with the active workflow")
-                        .clone()
+                    plans.get(&self.active_workflow).cloned()
+                };
+                let Some(plan) = plan else {
+                    info!(
+                        workflow = %self.active_workflow,
+                        "active workflow no longer defined; completing"
+                    );
+                    break;
                 };
                 self.plan = plan;
                 iterations = 0;
@@ -137,34 +126,30 @@ impl Runtime {
             // Resolve the current step name against the (possibly reloaded)
             // plan. A name that is no longer part of the plan terminates the
             // workflow.
-            let Some(index) = self.plan.resolve(&self.current) else {
+            let Some(step) = self.plan.resolve(&self.current) else {
                 info!("workflow complete");
                 break;
             };
-            let Some(spec) = self.plan.steps().get(index) else {
-                error!(current = %self.current, "no spec for current step; stopping");
-                break;
-            };
 
-            let _ = self.input_tx.send(spec.step().accepts_input());
+            let _ = self.input_tx.send(step.accepts_input());
 
-            info!(step = spec.name(), step_kind = %spec.step(), "step start");
+            info!(step = self.current, step_kind = %step, "step start");
             let outcome = run_step(
-                spec,
+                step,
                 &mut self.session,
                 &self.soft,
                 &self.hard,
                 &mut self.user_input,
             )
             .await;
-            trace!(step = spec.name(), ?outcome, "step end");
+            trace!(step = self.current, ?outcome, "step end");
 
             // Transitions are step names from the plan the step just ran
             // against. `DONE` — or a name that no longer exists after a
             // reload — completes the workflow.
             let target = match outcome {
-                StepOutcome::Success => spec.step().on_success().to_string(),
-                StepOutcome::Failure => spec.step().on_failure().to_string(),
+                StepOutcome::Success => step.on_success().to_string(),
+                StepOutcome::Failure => step.on_failure().to_string(),
                 StepOutcome::Cancelled | StepOutcome::Aborted => break,
             };
             if target == DONE || self.plan.resolve(&target).is_none() {
@@ -184,18 +169,18 @@ impl Runtime {
 /// or hard cancel) also drops a running command process, which `kill_on_drop`
 /// then terminates.
 async fn run_step(
-    spec: &NamedStep,
+    step: &Step,
     session: &mut SessionContext,
     soft: &CancellationToken,
     hard: &CancellationToken,
     user_input: &mut mpsc::UnboundedReceiver<Message>,
 ) -> StepOutcome {
-    let binding = spec.step().to_binding();
+    let binding = step.to_binding();
     tokio::select! {
         _ = hard.cancelled() => StepOutcome::Aborted,
         outcome = async {
-            let run = spec.step().run(session, soft, user_input, binding.as_ref());
-            match spec.step().timeout() {
+            let run = step.run(session, soft, user_input, binding.as_ref());
+            match step.timeout() {
                 Some(secs) => match tokio::time::timeout(secs, run).await {
                     Ok(outcome) => outcome,
                     Err(_) => {

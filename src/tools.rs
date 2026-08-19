@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Two internal lists:
 /// - `builtins` — tools registered at compile time via [`register_builtin`]
-/// - `config_tools` — tools populated from [`Config`] via [`reload_from_config`]
+/// - `config_tools` — tools populated from [`Config`] via the
+///   [`TryFrom<Config>`] conversion
 ///
 /// Both lists are combined by [`for_context`], which currently returns all
 /// tools (identity). The signature is ready for per-agent filtering.
@@ -19,23 +20,20 @@ pub struct ToolRegistry {
     config_tools: Vec<Tool>,
 }
 
-impl ToolRegistry {
-    /// Register a compile-time known tool.
+impl From<Config> for ToolRegistry {
+    /// Build the registry from a parsed [`Config`].
     ///
-    /// Typically called with [`FunctionDef::tool()`] at startup.
-
-    /// Rebuild `config_tools` from a parsed [`Config`].
-    ///
-    /// Takes ownership of the config and moves data out — no cloning.
-    /// Clears the previous config tools and converts each enabled entry
-    /// into the corresponding [`Tool`] variant. Tools removed from config
-    /// are automatically dropped on the next call.
-    pub fn reload_from_config(&mut self, cfg: Config) {
-        self.config_tools = cfg.into_tools();
+    /// Takes ownership of the config and moves data out — no cloning. Each
+    /// enabled entry is converted into the corresponding [`Tool`] variant.
+    fn from(cfg: Config) -> Self {
+        ToolRegistry {
+            builtins: Vec::new(),
+            config_tools: cfg.into_tools(),
+        }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CustomToolConfig {
     /// `FunctionTool` fields flattened into this struct.
     #[serde(flatten)]
@@ -44,7 +42,7 @@ pub struct CustomToolConfig {
     command: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Config {
     /// Enable web search tool.
     #[serde(default)]

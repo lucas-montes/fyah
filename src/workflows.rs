@@ -1,28 +1,28 @@
-//! Workflow model: config, plan compilation, step execution, and startup
-//! validation.
+//! Workflow model: config, plan compilation (via [`TryFrom`]), step execution,
+//! and startup validation.
 //!
 //! Each step is parsed as one variant of the tagged [`Step`] enum — the `type`
 //! key in the config selects `Plan`/`Implement`/`Validate`/`Commit`/`Custom`, so
 //! parsing is driven entirely by the enum. Built-in variants carry their own
 //! config struct (no `backend` key); `Custom` wraps a [`Backend`] plus its own
 //! config. Transitions are name-based: `on_success`/`on_failure` name another
-//! step or the terminal [`DONE`]. [`validate`] checks a compiled
-//! [`WorkflowPlan`] against the loaded llm config and reports every problem so
-//! the runtime can fail fast at startup.
+//! step or the terminal [`DONE`]. Compiling a [`WorkflowConfig`] into a
+//! [`WorkflowPlan`] is a fallible conversion — every structural problem is
+//! reported so the runtime can fail fast at startup.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::context::{Message, SessionContext};
-use crate::llm::{Binding, Config as LlmConfig, run_agent};
+use crate::llm::{Binding, run_agent};
 
 /// Name of the terminal state. A step may not be named `done`; `initial` and
 /// the transition targets may use it to end the workflow.
@@ -30,9 +30,7 @@ pub const DONE: &str = "done";
 
 /// Named workflow configuration map.
 ///
-/// The built-in `default` workflow is always compiled internally; a
-/// `[workflows.default]` table in the config overwrites it, and other names
-/// are added as extra selectable workflows. In TOML:
+/// Every workflow is config-defined; there is no built-in default. In TOML:
 /// ```toml
 /// [workflows.default]
 /// initial = "plan"
@@ -43,48 +41,120 @@ pub const DONE: &str = "done";
 /// on_success = "implement"
 /// on_failure = "plan"
 /// ```
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    /// The named workflows. Flattened so `[workflows.<name>]` tables land in
-    /// the map; the internal default is seeded at compile time.
-    #[serde(flatten)]
-    workflows: HashMap<String, WorkflowConfig>,
+#[derive(Debug, Deserialize, Default, PartialEq, Eq, Serialize)]
+/// The named workflows. Flattened so `[workflows.<name>]` tables land in
+/// the map.
+pub struct Config(HashMap<String, WorkflowConfig>);
+
+/// The compiled workflow map consumed by the runtime, keyed by workflow name.
+pub type PlanMap = HashMap<String, WorkflowPlan>;
+
+/// One structural problem in a workflow config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowError {
+    /// The `initial` key names a step that is not part of the plan.
+    UnknownInitial { step: String },
+    /// A step name collides with the reserved terminal name [`DONE`].
+    ReservedName { step: String },
+    /// A transition names a step that is not part of the plan.
+    UnknownTransition { step: String, target: String },
+    /// A `command` backend carries an empty command.
+    EmptyCommand { step: String },
 }
 
-impl Default for Config {
-    /// No user workflows: the internal default `"default"` workflow is seeded
-    /// by [`Config::into_plans`].
-    fn default() -> Self {
-        Config {
-            workflows: HashMap::new(),
+impl WorkflowError {
+    /// The name of the step the problem is attached to, if any.
+    pub fn step(&self) -> Option<&str> {
+        match self {
+            Self::UnknownInitial { step } => Some(step),
+            Self::ReservedName { step } => Some(step),
+            Self::UnknownTransition { step, .. } => Some(step),
+            Self::EmptyCommand { step } => Some(step),
         }
     }
 }
 
-impl Config {
-    /// Compile every named workflow into a plan map.
-    ///
-    /// The map always contains the built-in `"default"` workflow (Plan ->
-    /// Implement -> Validate -> Commit -> Done). A user-defined
-    /// `[workflows.default]` overwrites it; any other name is added on top,
-    /// keeping the runtime's "there is always a plan" invariant.
-    pub fn into_plans(self) -> HashMap<String, WorkflowPlan> {
-        let Config { workflows } = self;
-        let mut plans = HashMap::from([(
-            "default".to_string(),
-            WorkflowPlan::from_workflow(WorkflowConfig::default()),
-        )]);
-        plans.extend(
-            workflows
-                .into_iter()
-                .map(|(name, workflow)| (name, WorkflowPlan::from_workflow(workflow))),
-        );
-        plans
+impl std::fmt::Display for WorkflowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownInitial { step } => write!(f, "unknown initial step {step:?}"),
+            Self::ReservedName { step } => {
+                write!(f, "step {step:?} may not be named {DONE:?}")
+            }
+            Self::UnknownTransition { step, target } => {
+                write!(f, "step {step:?}: unknown transition target {target:?}")
+            }
+            Self::EmptyCommand { step } => {
+                write!(f, "step {step:?}: command step has an empty command")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkflowError {}
+
+/// Every structural problem found in one named workflow, with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowErrors {
+    workflow: String,
+    errors: Vec<WorkflowError>,
+}
+
+impl WorkflowErrors {
+    /// Attach the workflow name to a list of problems.
+    pub fn new(workflow: String, errors: Vec<WorkflowError>) -> Self {
+        Self { workflow, errors }
+    }
+
+    /// The name of the failing workflow.
+    pub fn workflow(&self) -> &str {
+        &self.workflow
+    }
+
+    /// The problems found in the workflow.
+    pub fn errors(&self) -> &[WorkflowError] {
+        &self.errors
+    }
+}
+
+impl std::fmt::Display for WorkflowErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "workflow {:?} is invalid:", self.workflow)?;
+        for error in &self.errors {
+            write!(f, "\n  {error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for WorkflowErrors {}
+
+impl TryFrom<Config> for PlanMap {
+    type Error = Vec<WorkflowErrors>;
+
+    /// Compile every named workflow into a plan map, collecting the problems
+    /// from all workflows so a bad config is reported in full.
+    fn try_from(config: Config) -> Result<Self, Self::Error> {
+        let mut plans = HashMap::with_capacity(config.0.len());
+        let mut errors = Vec::with_capacity(config.0.len());
+        for (name, workflow) in config.0 {
+            match WorkflowPlan::try_from(workflow) {
+                Ok(plan) => {
+                    plans.insert(name, plan);
+                }
+                Err(problems) => errors.push(WorkflowErrors::new(name, problems)),
+            }
+        }
+        if errors.is_empty() {
+            Ok(plans)
+        } else {
+            Err(errors)
+        }
     }
 }
 
 /// One named workflow: its start state, iteration budget, and step graph.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct WorkflowConfig {
     /// Name of the step the workflow starts at ([`DONE`] completes it at once).
     initial: String,
@@ -96,53 +166,103 @@ pub struct WorkflowConfig {
     steps: HashMap<String, Step>,
 }
 
-impl Default for WorkflowConfig {
-    /// Default workflow: Plan -> Implement -> Validate -> Commit -> Done.
-    fn default() -> Self {
-        let mut steps = HashMap::new();
-        steps.insert(
-            "plan".into(),
-            Step::Plan(PlanConfig {
-                on_success: "implement".into(),
-                on_failure: "plan".into(),
-                ..Default::default()
-            }),
-        );
-        steps.insert(
-            "implement".into(),
-            Step::Implement(ImplementConfig {
-                on_success: "validate".into(),
-                on_failure: "plan".into(),
-                ..Default::default()
-            }),
-        );
-        steps.insert(
-            "validate".into(),
-            Step::Validate(ValidateConfig {
-                on_success: "commit".into(),
-                on_failure: "implement".into(),
-                ..Default::default()
-            }),
-        );
-        steps.insert(
-            "commit".into(),
-            Step::Commit(CommitConfig {
-                on_success: "done".into(),
-                on_failure: "implement".into(),
-                ..Default::default()
-            }),
-        );
-        WorkflowConfig {
-            initial: "plan".into(),
-            max_iterations: 50,
+/// A compiled, deterministic step graph. Steps are keyed by name because every
+/// transition is a name lookup (`on_success`/`on_failure` → [`resolve`](Self::resolve)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowPlan {
+    /// Name of the step the workflow starts at ([`DONE`] completes it at once).
+    initial: String,
+    /// Iteration budget for the whole run.
+    max_iterations: u16,
+    /// The plan's steps, keyed by step name.
+    steps: HashMap<String, Step>,
+}
+
+impl WorkflowPlan {
+    /// Name of the step the workflow starts at ([`DONE`] completes it at once).
+    pub fn initial(&self) -> &str {
+        &self.initial
+    }
+
+    /// Iteration budget for the whole run.
+    pub fn max_iterations(&self) -> u16 {
+        self.max_iterations
+    }
+
+    /// The plan's steps, keyed by step name.
+    pub fn steps(&self) -> &HashMap<String, Step> {
+        &self.steps
+    }
+
+    /// Resolve a step name to its step, or `None` when it is not part of the
+    /// plan. The runtime treats a missing name as the end of the workflow, so
+    /// a reload that renames or removes the current step completes the run
+    /// instead of dangling.
+    pub fn resolve(&self, name: &str) -> Option<&Step> {
+        self.steps.get(name)
+    }
+}
+
+impl TryFrom<WorkflowConfig> for WorkflowPlan {
+    type Error = Vec<WorkflowError>;
+
+    /// Compile a [`WorkflowConfig`] into a [`WorkflowPlan`], checking the
+    /// plan's structure: the `initial` step exists (or is [`DONE`]); no step is
+    /// named [`DONE`]; every transition target is a real step or [`DONE`]; and
+    /// command backends carry a non-empty command. Each problem is reported as
+    /// a [`WorkflowError`]; an empty error means the plan is valid.
+    fn try_from(workflow: WorkflowConfig) -> Result<Self, Self::Error> {
+        let WorkflowConfig {
+            initial,
+            max_iterations,
             steps,
+        } = workflow;
+        let mut errors = Vec::new();
+
+        if initial != DONE && !steps.contains_key(&initial) {
+            errors.push(WorkflowError::UnknownInitial {
+                step: initial.clone(),
+            });
+        }
+        if steps.contains_key(DONE) {
+            errors.push(WorkflowError::ReservedName {
+                step: DONE.to_string(),
+            });
+        }
+        for (name, step) in &steps {
+            for target in [step.on_success(), step.on_failure()] {
+                if target != DONE && !steps.contains_key(target) {
+                    errors.push(WorkflowError::UnknownTransition {
+                        step: name.clone(),
+                        target: target.to_string(),
+                    });
+                }
+            }
+            if let Step::Custom(CustomConfig {
+                backend: Backend::Command { command },
+                ..
+            }) = step
+                && command.trim().is_empty()
+            {
+                errors.push(WorkflowError::EmptyCommand { step: name.clone() });
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(WorkflowPlan {
+                initial,
+                max_iterations,
+                steps,
+            })
+        } else {
+            Err(errors)
         }
     }
 }
 
 /// Configuration for a `plan` step: listens for one user message, pushes it,
 /// then runs an agent turn.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct PlanConfig {
     /// Default agent binding for this step. Only agent-involving steps need
     /// one; the runtime may still override it.
@@ -163,7 +283,7 @@ pub struct PlanConfig {
 }
 
 /// Configuration for an `implement` step: runs an agent turn silently.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct ImplementConfig {
     /// Default agent binding for this step. Only agent-involving steps need
     /// one; the runtime may still override it.
@@ -183,19 +303,10 @@ pub struct ImplementConfig {
     timeout_secs: Option<u64>,
 }
 
-/// Configuration for a `validate` step: runs an agent turn silently.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+/// Configuration for a `validate` step: runs validation checks (no agent
+/// binding — the test stages are configured later).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct ValidateConfig {
-    /// Default agent binding for this step. Only agent-involving steps need
-    /// one; the runtime may still override it.
-    #[serde(default)]
-    agent: Option<String>,
-    /// Default provider (endpoint) binding for this step.
-    #[serde(default)]
-    provider: Option<String>,
-    /// Default model binding for this step.
-    #[serde(default)]
-    model: Option<String>,
     /// Name of the step to run next on success, or [`DONE`].
     on_success: String,
     /// Name of the step to run next on failure, or [`DONE`].
@@ -206,7 +317,7 @@ pub struct ValidateConfig {
 
 /// Configuration for a `commit` step: listens for one user message, pushes it,
 /// then runs an agent turn.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct CommitConfig {
     /// Default agent binding for this step. Only agent-involving steps need
     /// one; the runtime may still override it.
@@ -228,7 +339,7 @@ pub struct CommitConfig {
 
 /// Configuration for a custom step: a required [`Backend`] plus the shared
 /// binding overrides, transition targets, and optional timeout.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CustomConfig {
     /// How this step's work is executed.
     backend: Backend,
@@ -252,7 +363,7 @@ pub struct CustomConfig {
 
 /// How a custom step's work is executed. Built-in steps need no backend; their
 /// behavior is hardcoded in [`Step`].
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Backend {
     /// Run one silent agent turn with the step's binding.
@@ -271,7 +382,7 @@ pub enum Backend {
 /// carry their own config struct, `Custom` wraps a [`Backend`] plus its own
 /// config. Structural rules are type-enforced — a built-in variant cannot
 /// carry a backend, and a custom variant must carry one.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Step {
     /// `plan` — listens for one user message, pushes it, runs an agent turn.
@@ -334,7 +445,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => cfg.agent.as_deref(),
             Step::Implement(cfg) => cfg.agent.as_deref(),
-            Step::Validate(cfg) => cfg.agent.as_deref(),
+            Step::Validate(_) => None,
             Step::Commit(cfg) => cfg.agent.as_deref(),
             Step::Custom(cfg) => cfg.agent.as_deref(),
         }
@@ -345,7 +456,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => cfg.provider.as_deref(),
             Step::Implement(cfg) => cfg.provider.as_deref(),
-            Step::Validate(cfg) => cfg.provider.as_deref(),
+            Step::Validate(_) => None,
             Step::Commit(cfg) => cfg.provider.as_deref(),
             Step::Custom(cfg) => cfg.provider.as_deref(),
         }
@@ -356,7 +467,7 @@ impl Step {
         match self {
             Step::Plan(cfg) => cfg.model.as_deref(),
             Step::Implement(cfg) => cfg.model.as_deref(),
-            Step::Validate(cfg) => cfg.model.as_deref(),
+            Step::Validate(_) => None,
             Step::Commit(cfg) => cfg.model.as_deref(),
             Step::Custom(cfg) => cfg.model.as_deref(),
         }
@@ -459,195 +570,6 @@ async fn run_command(command: &str) -> StepOutcome {
         StepOutcome::Failure
     }
 }
-
-// ── Plan ────────────────────────────────────────────────────────────────────
-
-/// A step of a compiled plan: its config name plus the parsed [`Step`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedStep {
-    /// Config name of this step.
-    name: String,
-    /// Kind of work to perform.
-    step: Step,
-}
-
-impl NamedStep {
-    /// Config name of this step.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Kind of work to perform.
-    pub fn step(&self) -> &Step {
-        &self.step
-    }
-}
-
-/// Validate a compiled plan against the loaded llm config.
-///
-/// Checks, in order: the `initial` step exists (or is [`DONE`]); every
-/// transition target is a real step or [`DONE`]; no step is named [`DONE`];
-/// command backends carry a non-empty command; and every agent-involving step
-/// (the built-ins + [`Backend::Llm`]) has a complete, resolvable,
-/// format-consistent binding. Each problem is reported as a human-readable
-/// string; an empty result means the plan is valid.
-pub fn validate(plan: &WorkflowPlan, llm: &LlmConfig) -> Vec<String> {
-    let mut errors = Vec::new();
-    let names: HashSet<&str> = plan.steps.iter().map(|spec| spec.name.as_str()).collect();
-
-    if plan.initial != DONE && !names.contains(plan.initial.as_str()) {
-        errors.push(format!("unknown initial step {:?}", plan.initial));
-    }
-
-    for spec in &plan.steps {
-        if spec.name == DONE {
-            errors.push(format!("step may not be named {:?}", DONE));
-        }
-        for target in [spec.step.on_success(), spec.step.on_failure()] {
-            if target != DONE && !names.contains(target) {
-                errors.push(format!(
-                    "step {:?}: unknown transition target {:?}",
-                    spec.name, target
-                ));
-            }
-        }
-
-        if let Step::Custom(CustomConfig {
-            backend: Backend::Command { command },
-            ..
-        }) = &spec.step
-            && command.trim().is_empty()
-        {
-            errors.push(format!(
-                "step {:?}: command step has an empty command",
-                spec.name
-            ));
-        }
-
-        // Custom steps need a binding only when they run an agent turn; the
-        // built-ins always do.
-        let needs_binding = match &spec.step {
-            Step::Custom(CustomConfig { backend, .. }) => matches!(backend, Backend::Llm),
-            _ => true,
-        };
-        if !needs_binding {
-            continue;
-        }
-        let Some(binding) = spec.step.to_binding() else {
-            let mut missing = Vec::new();
-            if spec.step.agent().is_none() {
-                missing.push("agent");
-            }
-            if spec.step.provider().is_none() {
-                missing.push("provider");
-            }
-            if spec.step.model().is_none() {
-                missing.push("model");
-            }
-            errors.push(format!(
-                "step {:?}: missing binding field(s): {}",
-                spec.name,
-                missing.join(", ")
-            ));
-            continue;
-        };
-        if llm.get_agent(&binding.agent).is_none() {
-            errors.push(format!(
-                "step {:?}: unknown agent {:?}",
-                spec.name, binding.agent
-            ));
-        }
-        if llm.get_provider(&binding.provider).is_none() {
-            errors.push(format!(
-                "step {:?}: unknown provider {:?}",
-                spec.name, binding.provider
-            ));
-        }
-        match llm.get_model(&binding.model) {
-            Some(model) if model.format_name() != binding.provider => errors.push(format!(
-                "step {:?}: model {:?} uses the {:?} wire format, which does not match provider {:?}",
-                spec.name,
-                binding.model,
-                model.format_name(),
-                binding.provider
-            )),
-            Some(_) => {}
-            None => errors.push(format!(
-                "step {:?}: unknown model {:?}",
-                spec.name, binding.model
-            )),
-        }
-    }
-    errors
-}
-
-/// A compiled, deterministic step graph. Steps are kept name-sorted so
-/// identical configs compile to identical plans; transitions are step names.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkflowPlan {
-    /// Name of the step the workflow starts at ([`DONE`] completes it at once).
-    initial: String,
-    /// Iteration budget for the whole run.
-    max_iterations: u32,
-    /// The plan's steps, sorted by name.
-    steps: Vec<NamedStep>,
-}
-
-impl WorkflowPlan {
-    /// Name of the step the workflow starts at ([`DONE`] completes it at once).
-    pub fn initial(&self) -> &str {
-        &self.initial
-    }
-
-    /// Iteration budget for the whole run.
-    pub fn max_iterations(&self) -> u32 {
-        self.max_iterations
-    }
-
-    /// The plan's steps, sorted by name.
-    pub fn steps(&self) -> &[NamedStep] {
-        &self.steps
-    }
-
-    /// Compile a [`WorkflowConfig`] into a [`WorkflowPlan`].
-    ///
-    /// Steps are sorted by name for determinism. Transition targets are kept
-    /// as the names written in the config; [`validate`] checks that they name a
-    /// real step or [`DONE`].
-    pub fn from_workflow(workflow: WorkflowConfig) -> Self {
-        let WorkflowConfig {
-            initial,
-            max_iterations,
-            steps,
-        } = workflow;
-        let mut entries: Vec<(String, Step)> = steps.into_iter().collect();
-
-        // Canonical order by name so identical configs always compile to the
-        // same plan (HashMap iteration order is randomized per instance).
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let steps = entries
-            .into_iter()
-            .map(|(name, step)| NamedStep { name, step })
-            .collect();
-
-        WorkflowPlan {
-            initial,
-            max_iterations: u32::from(max_iterations),
-            steps,
-        }
-    }
-
-    /// Resolve a step name to its index in this plan, or `None` when the step
-    /// is not part of the plan. The runtime treats a missing step as the end
-    /// of the workflow, so a reload that renames or removes the current step
-    /// completes the run instead of dangling.
-    pub fn resolve(&self, name: &str) -> Option<usize> {
-        self.steps.iter().position(|spec| spec.name == name)
-    }
-}
-
-// ── Step execution contract ─────────────────────────────────────────────────
 
 /// How a step finished; the runtime maps this onto the plan's transitions.
 #[derive(Debug, PartialEq, Eq)]
