@@ -17,13 +17,15 @@ longer exists.
 ## Current architecture
 
 ```
-fyah.toml ──> Config::load (merge XDG → local → --config)
+fyah.toml ──> Config::load (merge XDG → local → --config)        [parse]
                   │
                   ▼
-            ConfigStore  (single writer: derives parts, diffs, publishes)
-            ├─ llm:      PartStore<LlmConfig>          providers / models / agents
-            ├─ tools:    PartStore<ToolRegistry>       from [tools]
-            └─ workflow: PartStore<HashMap<String, WorkflowPlan>>   all named workflows
+        ConfigStore::new(config) — TryFrom<Config> for Parts     [convert]
+        (the conversion IS the structural validation; every problem
+         collected into one StartupError; aborts before the run)
+        ├─ llm:      PartStore<LlmConfig>          providers / models / agents
+        ├─ tools:    PartStore<ToolRegistry>       from [tools]
+        └─ workflow: PartStore<PlanMap>            all named workflows, compiled
                   │ subscribe()
                   ▼
             ConfigView (watch receivers only — no Arc/RwLock in our code)
@@ -34,7 +36,8 @@ fyah.toml ──> Config::load (merge XDG → local → --config)
                   ▼
             Runtime  (walks active WorkflowPlan: resolve name → run step → transition)
                   ▲
-            FsWatcher owns the ConfigStore; reloads on disk change, keeps last-good on error
+            FsWatcher owns the ConfigStore; reloads on disk change (same conversion,
+            StoreError::Convert keeps last-good on error)
 
 Input: stdin (http reserved). Two-stage Ctrl+C: soft at step boundary, hard aborts in-flight.
 ```
@@ -44,116 +47,39 @@ Key invariants:
   cloned on the hot path beyond the current step name and the selected `WorkflowPlan`
   (re-selected from the reloaded map) swapped in at step boundaries. A `watch::Ref`
   guard is never held across an `.await` (statement-temporaries only).
-- **Deterministic plans.** `WorkflowPlan::from_workflow` sorts steps by name so
-  identical configs compile to identical plans (HashMap iteration order is
-  randomized per instance).
+- **Deterministic plans.** A `WorkflowPlan` is a name-addressable map
+  (`steps: HashMap<String, Step>`); the runtime only does `get()` lookups and never
+  iterates the map, so iteration order never affects behavior — identical configs
+  compile to equivalent plans (no name sorting, no `from_workflow`).
 - **Name-driven execution.** The runtime tracks the current step by name;
   transitions are step names, and the terminal is the reserved name `"done"`
   (`DONE`). A step may not be named `done`.
 - **No duplicate copies.** The store owns the value; readers subscribe.
-- **Runtime stays thin.** Plan compilation and validation live in `workflows.rs`;
+- **Runtime stays thin.** Plan compilation and structural validation happen in the
+  `TryFrom` conversions (`workflows.rs`, composed into `Parts` in `config.rs`);
   the runtime only walks.
 
 ### Data-flow for a reload
 `FsWatcher` → `ConfigStore::reload` → `Config::load` (error ⇒ keep last-good) →
-`apply` re-derives each part, diffs via `PartialEq`, publishes only changed parts →
-Runtime swaps the plan map at the next step boundary, re-selects the active workflow
-by name, and re-resolves the current step name (missing ⇒ complete; budget resets).
+`apply` re-`try_from`s the config into `Parts` (structural error ⇒
+`StoreError::Convert`, keep last-good), diffs via `PartialEq`, publishes only changed
+parts → Runtime swaps the plan map at the next step boundary, re-selects the active
+workflow by name, and re-resolves the current step name (missing ⇒ complete; budget
+resets).
 
 ---
 
 ## Config structure (settled)
 
-Flat top-level sections; `Config` in `src/config.rs` flattens the `llm` part so
-`providers`/`models`/`agents` sit at the top level.
-
-```toml
-[providers.openai]              # runnable: local Ollama's OpenAI-compat /v1 layer
-url = "http://127.0.0.1:11434/v1/chat/completions"
-api_key = "ollama"              # required by the DTO; ignored by Ollama
-
-[models.gpt-4o]                 # wire-format dialect lives on the MODEL
-format = "openai"               #   (Model enum, tagged by format)
-model = "gpt-4o"
-max_completion_tokens = 4096
-temperature = 0.7
-
-[models.phi3]                   # local phi3, reached through Ollama's /v1 layer
-format = "openai"
-model = "phi3:mini"
-options = { temperature = 0.3 } # ignored by the OpenAI DTO (harmless)
-
-[agents.primary]                # middleware bundle + system prompt + strict tools
-system_prompt = "You are Fyah, an AI coding assistant."
-max_iterations = 25             # serde default 10 when absent
-prompt_builder = "Default"      # enum: Default | Custom(<name>)
-context_builder = "Default"
-context_compaction = "Default"
-tools_filter = "Default"
-tools = ["shell", "code_interpreter", "file_search", "read_file", "filesystem"]
-
-[tools]                         # catalog: toggles + [[tools.mcp]] + [[tools.custom]]
-web_search = false
-shell = true
-...
-
-[workflows]                     # multiple NAMED workflows
-default = "primary"             # used when no --workflow flag
-
-[workflows.primary]             # map: [workflows.<name>], #[serde(flatten)]
-initial = "plan"
-max_iterations = 50
-
-[workflows.primary.steps.plan]  # built-in step: type = "plan", NO backend key
-type = "plan"
-agent = "primary"
-provider = "openai"
-model = "phi3"
-on_success = "implement"
-on_failure = "plan"
-
-# Custom steps carry type = "custom" plus a backend table:
-# [workflows.primary.steps.lint]
-# type = "custom"
-# backend = { type = "command", command = "cargo clippy --all-targets" }
-# on_success = "done"
-# on_failure = "plan"
-```
-
-### Workflow step model
-Every step table parses into one variant of the tagged `Step` enum
-(`src/workflows.rs`): `type = "plan"` → `Step::Plan(PlanConfig)`, …,
-`type = "custom"` → `Step::Custom(CustomConfig)`. Rules are type-enforced:
-built-ins cannot carry a `backend`; custom steps must carry one. The compiled
-plan holds `NamedStep`s (`name` + `Step`), sorted by name; fields are private,
-read via accessors (`NamedStep::name/step`, `WorkflowPlan::initial/max_iterations/
-steps`, `Step::agent/provider/model/on_success/on_failure/timeout`), and `Step`
-carries the runtime contract (`run`, `accepts_input`, `Display`).
-- **Built-in steps** — `type = "plan" | "implement" | "test" | "commit"`.
-  `plan`/`commit` are listening steps (wait for stdin, push the user message,
-  run an agent turn); `implement`/`test` run an agent turn silently. They keep
-  their own `agent`/`provider`/`model` binding, `on_success`/`on_failure`
-  transitions, and optional `timeout_secs`.
-- **Custom steps** — `type = "custom"` plus a `backend` table tagged by `type`
-  ([`Backend`](glossary.md#backend)):
-  - `type = "llm"` → silent agent turn with the step's binding.
-  - `type = "command"` → `sh -c "<command>"`; exit 0 ⇒ `Success`, non-zero ⇒
-    `Failure`; killed on abort (`kill_on_drop`), under the step timeout.
-  - `type = "wasm"` / `type = "native"` → modeled; logged "unsupported backend"
-    error ⇒ `Failure` until implemented.
-- **Transitions are name-based**: `on_success`/`on_failure` name another step or
-  the terminal `"done"`; a step may not be named `done`.
-
-### Validation (`workflows::validate(plan, llm) -> Vec<String>`)
-Runs at startup (`Runtime::new`); every problem is collected into one
-`StartupError` and the run aborts. Checks: `initial` exists (or is `done`);
-transition targets are real steps or `done`; no step is named `done`; `command`
-backends are non-empty; agent-involving steps (the built-ins + custom-`llm`) have
-complete, resolvable, format-consistent bindings (missing/unknown names or
-provider↔model format mismatch are errors). The backend-on-built-in /
-backend-less-custom rules are type-enforced by the enum and no longer checked.
-Validation is **not** re-run on hot reload (a reload that breaks a binding falls
-back to stub-with-warn).
+Flat top-level `providers`/`models`/`agents`/`tools`/`workflows` sections; `Config`
+in `src/config.rs` flattens the `llm` part so `providers`/`models`/`agents` sit at
+the top level. Full TOML shape, the workflow step model, and the structural
+validation live in [config.md](config.md). Key points: steps are one variant of a
+tagged `Step` enum (`type = "plan" | "implement" | "test" | "commit" |
+"validate" | "custom"`); transitions name steps or the terminal `"done"`;
+validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
+`TryFrom<workflows::Config> for PlanMap` → `TryFrom<Config> for Parts`,
+`Error = StartupError`, every problem listed; bindings are **not** checked).
 
 ### Rationale & decisions (Q&A outcomes)
 - **`format` lives on the model**, not the provider. `Model` is an enum tagged by
@@ -169,14 +95,15 @@ back to stub-with-warn).
   default, runtime-overridable) and a **strict tools allow-list** (`tools = [...]`;
   empty = the agent exposes **no** tools; unknown names are warn + skip — naming
   scheme: built-ins use their `[tools]` toggle keys, custom = its `name`, mcp = its `name`).
-- **Multiple named workflows**; active one selected by `--workflow <name>` flag →
-  `[workflows].default` → first (sorted, deterministic).
-- **Binding is config-only for now.** Each step resolves its `agent`/`provider`/`model`
-  from the workflow config; `--agent/--provider/--model` are parsed and logged but not
-  used for binding. Bindings are validated at startup (missing field, unknown name, or
-  provider↔format mismatch ⇒ `StartupError`; a bare `fyah` fails on the default
-  workflow's four unbound built-in steps). Flag-based precedence and mid-run switching
-  are deferred.
+- **Multiple named workflows; no built-in default.** Every workflow is
+  config-defined; `--workflow <name>` (CLI default `"default"`) must name an
+  existing workflow or startup aborts with `unknown workflow "<name>"` — no
+  seeding, no fallback selection.
+- **Binding is config-only and unchecked for now.** Each step resolves its
+  `agent`/`provider`/`model` from the workflow config; `--agent/--provider/--model`
+  are parsed and logged but not used for binding. Bindings are **not** validated at
+  startup (a step whose binding doesn't resolve warns and keeps stub behavior).
+  Flag-based precedence and mid-run switching are deferred.
 - **`max_iterations`** on agents is serde-defaulted (10); workflows config requires
   `initial` + `max_iterations` explicitly.
 
@@ -185,8 +112,9 @@ back to stub-with-warn).
 ## What works today
 
 - **Name-driven deterministic runtime**: tagged `Step` variants (`type =
-  "plan"|"implement"|"test"|"commit"|"custom"`), custom `llm`/`command`/`wasm`/
-  `native` backends, name-based transitions with terminal `"done"`, sorted steps.
+  "plan"|"implement"|"test"|"commit"|"validate"|"custom"`), custom `llm`/`command`/
+  `wasm`/`native` backends, name-based transitions with terminal `"done"`,
+  name-addressable plan map (`get()`-only lookups).
 - **Custom `command` steps** run via `sh -c`; exit 0 ⇒ `Success`, non-zero ⇒
   `Failure`, killed on abort/timeout. `wasm`/`native` log "unsupported backend" ⇒
   `Failure` (modeled, not executed).
@@ -196,23 +124,30 @@ back to stub-with-warn).
   a user line first; `implement`/`test`/custom-`llm` run silently. LLM/HTTP errors become
   `StepOutcome::Failure`, driving the step's `on_failure` transition. A step without a
   binding warns and keeps stub behavior.
-- **Fail-fast startup validation** (`Runtime::new` → `StartupError`): structural
-  checks (initial, transition targets, empty command) plus binding checks
-  (missing/unknown names, provider↔format mismatch); every problem is listed.
+- **Fail-fast startup validation (conversion)** (`ConfigStore::new` →
+  `Parts::try_from` → `StartupError`): structural checks (initial, transition
+  targets, step named `done`, empty command) with every problem listed;
+  `--workflow` naming a missing workflow aborts cleanly too. Bindings are not
+  validated (missing binding ⇒ warn + stub, existing behavior).
 - **Single source of truth for config**: `fyah.toml` is the project-local dev
   config, loaded at startup (XDG → local → `--config`); the config-dependent
   fixture tests were removed with the old model (plan `workflows-rewrite` T01).
   The whole workflow runs for real against local Ollama.
 - Two-stage Ctrl+C cancellation (soft at step boundary, hard abort mid-step), input
   gate watch so stdin is only read while a listening step (`plan`/`commit`) runs.
-- Config hot-reload with last-good-on-error and changed-part-only broadcast; all named
+- Config hot-reload with last-good-on-error and changed-part-only broadcast (the
+  same `TryFrom<Config> for Parts` conversion backs startup and reload; an invalid
+  reload ⇒ `StoreError::Convert`, last-good kept); all named
   workflows compile, re-select on reload, and the current step re-resolves by name
   (missing name ⇒ workflow completes; iteration budget resets).
 - IR message/prompt layer + per-provider wire DTOs + adapters for anthropic / ollama /
   openai, factories registered in the registry, plus the `#[ignore]`d live Ollama test.
-- 14 tests passing (map, tools, dtos, config-store — the workflows/runtime tests
-  were deleted with the old model), `cargo clippy --all-targets` clean of errors
-  (64 pre-existing warnings, none in `workflows.rs`/`runtime.rs`).
+- 17 tests passing (map, tools, llm dto serde, and config validation in
+  `tests/config_validation.rs` — a real integration test over the lib crate's
+  public API: valid configs are asserted verbatim against `tests/configs/`
+  JSON snapshots, invalid ones against their expected error lists),
+  `cargo clippy --all-targets` clean of errors
+  (33 pre-existing warnings in the lib target, none in the touched files).
 
 ## What's left / gaps
 
@@ -223,9 +158,11 @@ back to stub-with-warn).
   builds a minimal default prompt itself).
 - **Agentic loop**: the agent's `max_iterations` (single-turn per step today) and
   tool-calling loop are not wired.
-- **Binding follow-ups**: flags-based binding precedence, mid-run binding switching, and
-  hot-reload validation of bindings (a reload that breaks a binding currently falls back
-  to stub-with-warn, not an error).
+- **Binding follow-ups**: flags-based binding precedence and mid-run binding
+  switching; binding validation is deliberately dropped (a missing/unknown binding
+  warns + stubs rather than failing startup or reload).
+- **`validate` step test stages**: `Step::Validate` is binding-less and carries no
+  tests yet; running unit/integration/mutation/e2e stages is deferred.
 - **Context-dir watcher + SCE integration**: the old watcher watched
   `config_path.parent()/context`; dropped in the `fs_watcher.rs` rewrite.
 - **HTTP input** (reserved) and the input-gate-agnostic transport.
@@ -248,4 +185,5 @@ back to stub-with-warn).
 - `../NOTES.md` — historical architecture sketch; superseded by this document.
 - `sota-references.md` — SOTA context-management reference notes.
 - `plans/workflows-step-enum.md` — completed plan (tagged `Step` enum; all tasks
-  done, validation report inside); `plans/workflows-rewrite.md` — predecessor.
+  done, validation report inside); `plans/workflows-rewrite.md` — predecessor;
+  `plans/runtime-rework-hooks.md` — active plan (runtime/hook rework; T00 done).

@@ -4,11 +4,12 @@ Canonical terms used across Fyah. See [overview.md](overview.md) for architectur
 and [context-map.md](context-map.md) for the full index.
 
 ## Built-in steps
-The step types `plan`, `implement`, `test`, `commit`, selected by the `type` tag
-in each step table (`type = "plan"` …). Each is one variant of the tagged `Step`
-enum in `src/workflows.rs` with its own config struct (`Step::Plan(PlanConfig)`
-… `Step::Commit(CommitConfig)`). Their behavior is hardcoded (no `backend` key):
-`plan`/`commit` are listening steps, `implement`/`test` run silently.
+The step types `plan`, `implement`, `test`, `commit`, `validate`, selected by the
+`type` tag in each step table (`type = "plan"` …). Each is one variant of the tagged
+`Step` enum in `src/workflows.rs` with its own config struct (`Step::Plan(PlanConfig)`
+… `Step::Validate(ValidateConfig)`). Their behavior is hardcoded (no `backend` key):
+`plan`/`commit` are listening steps, `implement`/`test` run silently, `validate` is
+binding-less (test stages not implemented yet).
 
 ## Step (tagged config enum)
 The `Step` enum in `src/workflows.rs` that **is** the step configuration: each
@@ -18,11 +19,20 @@ rename_all = "snake_case")]` — `Plan(PlanConfig)`, `Implement(ImplementConfig)
 carries the runtime contract (`run`, `accepts_input`, `Display`) and the
 binding/timeout/transition accessors.
 
-## NamedStep
-A compiled plan step (private `name`/`step` fields, read via
-`NamedStep::name()`/`step()`). `WorkflowPlan.steps` is a name-sorted
-`Vec<NamedStep>`; the runtime resolves transitions by `name` and delegates to
-the `Step` accessors.
+## WorkflowPlan
+The compiled form of one named workflow: private `initial` / `max_iterations` /
+`steps: HashMap<String, Step>` (name-addressable), read via
+`WorkflowPlan::initial()/max_iterations()/steps()/resolve(name) -> Option<&Step>`.
+The runtime resolves transitions by name (`get()`-only, never iterates — order
+never matters) and delegates to the `Step` accessors. Produced only by
+`TryFrom<WorkflowConfig> for WorkflowPlan`.
+
+## PlanMap
+All named workflows, compiled (`HashMap<String, WorkflowPlan>`), produced by
+`TryFrom<workflows::Config> for PlanMap`. Config-defined only — **no built-in
+default workflow**. The active workflow is picked by name (`--workflow`, CLI
+default `"default"`); a missing name aborts startup with `unknown workflow
+"<name>"`. Published whole-map on the `ConfigView.workflow` watch.
 
 ## Backend
 The `backend` table on a **custom** step (`type = "custom"`), itself tagged by
@@ -39,13 +49,42 @@ The type-state markers on `StepContext`. Only `StepContext<'_, Listening>` can w
 on user input (`next_user_input`); silent steps cannot even name the method, so "may
 this step listen?" is enforced by the compiler.
 
-## validate
-`workflows::validate(plan, llm) -> Vec<String>` — startup validation replacing
-`validate_bindings`: structural checks (initial, transition targets, empty
-command) plus binding checks (missing/unknown names, provider↔format mismatch).
-The backend-on-built-in / backend-less-custom rules are type-enforced by the
-`Step` enum and not checked. Every problem is collected into one `StartupError`;
-not re-run on hot reload.
+## WorkflowError
+A typed structural problem found while compiling a workflow (one enum, fields for
+context): `UnknownInitial { step }`, `ReservedName { step }` (a step named
+`done`), `UnknownTransition { step, target }`, `EmptyCommand { step }`. Rendered
+to the user via `Display` (the `Debug` of `StartupError` delegates to it). A
+`WorkflowPlan::try_from` failure is `Vec<WorkflowError>`.
+
+## WorkflowErrors
+One failing workflow's name plus its `Vec<WorkflowError>` (private fields,
+`workflow()`/`errors()` accessors). `TryFrom<Config> for PlanMap` fails with
+`Vec<WorkflowErrors>` — every broken workflow is reported.
+
+## Structural validation (TryFrom)
+There is no separate validate pass — **compiling the parts *is* the validation**.
+`TryFrom<WorkflowConfig> for WorkflowPlan` returns typed `WorkflowError`s (an enum:
+`UnknownInitial`/`ReservedName`/`UnknownTransition`/`EmptyCommand`, each carrying
+its step/target context), `TryFrom<workflows::Config> for PlanMap` groups them per
+workflow as `WorkflowErrors`, and `TryFrom<Config> for Parts` folds everything into
+one `StartupError` — all problems, not the first. Startup aborts on any problem
+(`ConfigStore::new`); hot reload re-runs the conversion and an invalid reload ⇒
+`StoreError::Convert`, keeping last-good.
+Binding checks were dropped (missing/unknown binding ⇒ warn + stub, existing
+behavior); the backend-on-built-in / backend-less-custom rules are type-enforced by
+the `Step` enum.
+
+## StartupError
+`src/config.rs`: a user-facing enum — `InvalidConfig(Vec<WorkflowErrors>)` (one or
+more workflows are structurally broken) or `UnknownWorkflow(String)` (`--workflow`
+names nothing the config defines). `Debug` delegates to `Display`, so the
+standard `?`/`Error:` printing renders readable text, e.g.:
+
+```
+cannot start: invalid config
+workflow "default" is invalid:
+  step "plan": unknown transition target "nope"
+```
 
 ## StepOutcome
 How a step finished: `Success`, `Failure`, `Cancelled`, `Aborted`. The runtime maps

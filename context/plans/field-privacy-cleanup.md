@@ -29,8 +29,9 @@ removes redundant/duplicated code in `src/runtime.rs`:
 - Inline the private `timeout_secs()` into `timeout()` — its only caller — and
   delete it.
 
-The crate is a binary (no lib target), so this is internal encapsulation
-discipline; no external API exists to break.
+The crate is a lib+bin split, so field privacy in the lib crate is the
+public contract integration tests and the `fyah` binary are built against;
+no private field is reachable outside the lib.
 
 ## Success criteria
 
@@ -209,8 +210,9 @@ discipline; no external API exists to break.
 ### Residual risks
 - `Debug` derives still render the private fields in the startup config dump;
   that is a diagnostic view, not field access, and is unchanged.
-- `Step`/`StepContext` stay `pub` with private fields (user decisions); in a
-  binary crate this has no API impact, it is encapsulation discipline.
+- `Step`/`StepContext` stay `pub` with private fields (user decisions); in the
+  lib crate this is the public API contract, and keeping the fields private is
+  encapsulation discipline.
 - No commit was created; all plan changes remain uncommitted in the working tree
   (user has not requested a commit). `context/plans/field-privacy-cleanup.md`
   and the other SCE baseline files remain untracked.
