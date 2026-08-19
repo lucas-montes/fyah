@@ -1,67 +1,65 @@
+use std::error::Error;
 use std::fmt;
 
 use reqwest::RequestBuilder;
 
+use super::dtos::{ChatRequest, ChatResponse, Config};
 use crate::context::{Message, Prompt};
 use crate::llm::config;
-use crate::llm::providers::ProviderFactory;
-use crate::llm::providers::{
-    ports::{DynProvider, Provider},
-    registry::Error as RegistryError,
-};
-
-use super::dtos::{ChatRequest, ChatResponse, Config};
+use crate::llm::formats::ProviderFactory;
+use crate::llm::formats::ports::{DynProvider, Provider};
+use crate::llm::formats::registry::Error as RegistryError;
 
 #[derive(Debug)]
-pub enum Error {
+pub enum OllamaError {
     Http(reqwest::Error),
     Serde(serde_json::Error),
     Api { code: String, message: String },
 }
 
-impl From<reqwest::Error> for Error {
+impl From<reqwest::Error> for OllamaError {
     fn from(e: reqwest::Error) -> Self {
         if let Some(status) = e.status() {
-            Error::Api {
+            OllamaError::Api {
                 code: status.to_string(),
                 message: e.to_string(),
             }
         } else {
-            Error::Http(e)
+            OllamaError::Http(e)
         }
     }
 }
 
-impl From<serde_json::Error> for Error {
+impl From<serde_json::Error> for OllamaError {
     fn from(e: serde_json::Error) -> Self {
-        Error::Serde(e)
+        OllamaError::Serde(e)
     }
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for OllamaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Http(e) => write!(f, "Anthropic HTTP error: {e}"),
-            Self::Serde(e) => write!(f, "Anthropic serialization error: {e}"),
-            Self::Api { code, message } => write!(f, "Anthropic API error ({code}): {message}"),
+            Self::Http(e) => write!(f, "Ollama HTTP error: {e}"),
+            Self::Serde(e) => write!(f, "Ollama serialization error: {e}"),
+            Self::Api { code, message } => write!(f, "Ollama API error ({code}): {message}"),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl Error for OllamaError {}
 
 #[derive(Debug)]
-pub struct AnthropicFormat {
+pub struct OllamaFormat {
     config: Config,
     url: String,
     auth: String,
 }
 
-impl<'a> Provider<'a> for AnthropicFormat {
+impl<'a> Provider<'a> for OllamaFormat {
     type Prompt = ChatRequest<'a>;
     type Response = ChatResponse;
     type Config = Config;
-    type Error = Error;
+    type Error = OllamaError;
 
     fn from_config(url: String, api_key: &str, config: Self::Config) -> Self {
         let auth = format!("Bearer {api_key}");
@@ -93,7 +91,7 @@ impl<'a> Provider<'a> for AnthropicFormat {
 
 // ── DynProvider (type-erased) ─────────────────────────────
 
-impl DynProvider for AnthropicFormat {
+impl DynProvider for OllamaFormat {
     fn url(&self) -> &str {
         Provider::url(self)
     }
@@ -110,20 +108,20 @@ impl DynProvider for AnthropicFormat {
     fn parse_response(
         &self,
         response: &[u8],
-    ) -> Result<Message, crate::llm::providers::ports::Error> {
+    ) -> Result<Message, crate::llm::formats::ports::Error> {
         Provider::parse_response(self, response)
-            .map_err(|e| crate::llm::providers::ports::Error::Provider(e.to_string()))
+            .map_err(|e| crate::llm::formats::ports::Error::Provider(e.to_string()))
     }
 }
 
 // ── Factory ───────────────────────────────────────────────
 
 #[derive(Debug)]
-pub struct AnthropicFactory;
+pub struct OllamaFactory;
 
-impl ProviderFactory for AnthropicFactory {
+impl ProviderFactory for OllamaFactory {
     fn provider_name(&self) -> &str {
-        "anthropic"
+        "ollama"
     }
 
     fn build(
@@ -132,10 +130,10 @@ impl ProviderFactory for AnthropicFactory {
         model: &config::Model,
     ) -> Result<Box<dyn DynProvider>, RegistryError> {
         let cfg = match model {
-            config::Model::Anthropic(cfg) => (*cfg).clone(),
-            _ => return Err(RegistryError::UnknownProvider("anthropic".into())),
+            config::Model::Ollama(cfg) => (*cfg).clone(),
+            _ => return Err(RegistryError::UnknownProvider("ollama".into())),
         };
-        Ok(Box::new(AnthropicFormat::from_config(
+        Ok(Box::new(OllamaFormat::from_config(
             provider.url().to_string(),
             provider.api_key().unwrap_or(""),
             cfg,

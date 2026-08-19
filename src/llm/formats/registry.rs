@@ -3,7 +3,7 @@ use std::fmt::Debug;
 
 use crate::llm::{
     config::{Model, Provider},
-    providers::ports::DynProvider,
+    formats::ports::DynProvider,
 };
 
 #[derive(Debug)]

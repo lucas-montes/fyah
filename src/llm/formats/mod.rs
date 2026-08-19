@@ -1,9 +1,10 @@
 mod anthropic;
 mod ollama;
 mod openai;
-pub mod ports;
+mod ports;
 mod registry;
 
+pub use ports::Error as PortsError;
 pub use anthropic::adapters::AnthropicFactory;
 pub use anthropic::dtos::Config as AnthropicConfig;
 pub use ollama::adapters::OllamaFactory;

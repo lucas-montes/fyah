@@ -5,11 +5,11 @@ use reqwest::RequestBuilder;
 
 use crate::context::{Message, Prompt};
 use crate::llm::config;
-use crate::llm::providers::ProviderFactory;
-use crate::llm::providers::registry::Error as RegistryError;
+use crate::llm::formats::ProviderFactory;
+use crate::llm::formats::registry::Error as RegistryError;
 
 use super::dtos::{ChatRequest, ChatResponse, Config};
-use crate::llm::providers::ports::{DynProvider, Provider};
+use crate::llm::formats::ports::{DynProvider, Provider};
 
 #[derive(Debug)]
 pub enum OpenAIError {
@@ -109,9 +109,9 @@ impl DynProvider for OpenAIFormat {
     fn parse_response(
         &self,
         response: &[u8],
-    ) -> Result<Message, crate::llm::providers::ports::Error> {
+    ) -> Result<Message, crate::llm::formats::ports::Error> {
         Provider::parse_response(self, response)
-            .map_err(|e| crate::llm::providers::ports::Error::Provider(e.to_string()))
+            .map_err(|e| crate::llm::formats::ports::Error::Provider(e.to_string()))
     }
 }
 
