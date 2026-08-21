@@ -1,7 +1,7 @@
 mod anthropic;
 mod ollama;
 mod openai;
-mod ports;
+pub(crate) mod ports;
 mod registry;
 
 pub use anthropic::adapters::AnthropicFactory;
