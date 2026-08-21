@@ -256,14 +256,14 @@ pub enum ToolChoice {
 ///
 /// Sampling and provider-specific parameters are not part of the IR — they
 /// live in the provider's config, set from the config file.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Prompt {
+#[derive(Clone, Debug, Serialize)]
+pub struct Prompt<'a> {
     /// System prompt content. Omitted when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<Vec<SystemBlock>>,
 
     /// The conversation history.
-    messages: Vec<Message>,
+    messages: &'a [Message],
 
     /// Tools available to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,10 +274,10 @@ pub struct Prompt {
     tool_choice: Option<ToolChoice>,
 }
 
-impl Prompt {
+impl<'a> Prompt<'a> {
     pub fn new(
         system: Option<Vec<SystemBlock>>,
-        messages: Vec<Message>,
+        messages: &'a [Message],
         tools: Option<Vec<ToolDefinition>>,
         tool_choice: Option<ToolChoice>,
     ) -> Self {
