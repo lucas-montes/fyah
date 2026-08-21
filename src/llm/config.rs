@@ -6,14 +6,14 @@ use super::middlewares::{
     ContextBuilderCfg, ContextCompactionCfg, PromptBuilderCfg, ToolsFilterCfg,
 };
 
-use super::providers::{AnthropicConfig, OllamaConfig, OpenAIConfig};
+use super::formats::{AnthropicConfig, OllamaConfig, OpenAIConfig};
 
 /// A fully-resolved agent/provider/model combo for one step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Binding {
-    pub agent: String,
-    pub provider: String,
-    pub model: String,
+pub struct Binding<'a> {
+    pub agent: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
 }
 
 /// Default per-agent iteration budget used when `max_iterations` is absent.

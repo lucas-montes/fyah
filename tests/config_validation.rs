@@ -7,7 +7,7 @@
 //! [`fyah::config_store::ConfigStore::new`] — the same path startup uses —
 //! and must produce exactly the expected list of errors.
 
-use fyah::config::{Config,ConfigStore, StartupError};
+use fyah::config::{Config, ConfigStore, StartupError};
 
 /// Parse a fixture file the way `Config::load` would, minus the XDG/default
 /// config merge so tests stay hermetic.

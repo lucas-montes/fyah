@@ -29,6 +29,7 @@ pub trait LlmClient: std::fmt::Debug {
     fn create_request(&self, method: reqwest::Method, url: &str) -> RequestBuilder;
 
     fn send_request(
+        &self,
         request: RequestBuilder,
     ) -> impl futures::Future<Output = Result<impl AsRef<[u8]>, Error>> {
         request

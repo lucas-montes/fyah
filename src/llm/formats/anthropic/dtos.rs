@@ -484,73 +484,70 @@ mod tests {
     fn test_config() -> Config {
         serde_json::from_value(json!({"model": "claude-3", "max_tokens": 100})).unwrap()
     }
-
-    fn sample_prompt() -> Prompt {
-        Prompt::new(
+    #[test]
+    fn from_prompt_serializes_wire_format() {
+        let msgs = [
+            Message::System {
+                content: vec![SystemBlock::Text {
+                    text: "Extra system".into(),
+                }],
+            },
+            Message::User {
+                content: vec![
+                    UserBlock::Text { text: "Hi".into() },
+                    UserBlock::Image {
+                        source: ImageSource::new(
+                            ImageSourceKind::Base64,
+                            "image/png".into(),
+                            "AAAA".into(),
+                        ),
+                    },
+                    UserBlock::Audio {
+                        data: "wavdata".into(),
+                        format: AudioFormat::Wav,
+                    },
+                ],
+            },
+            Message::Assistant {
+                content: vec![
+                    AssistantBlock::Text {
+                        text: "Hello".into(),
+                    },
+                    AssistantBlock::ToolCall {
+                        id: "toolu_1".into(),
+                        name: "lookup".into(),
+                        arguments: json!({"q": "x"}),
+                    },
+                    AssistantBlock::Thinking {
+                        text: "hmm".into(),
+                        signature: None,
+                    },
+                ],
+            },
+            Message::Tool {
+                content: vec![ToolBlock::new(
+                    "toolu_1".into(),
+                    vec![ContentBlock::Text {
+                        text: "found".into(),
+                    }],
+                    true,
+                )],
+            },
+        ];
+        let prompt = Prompt::new(
             Some(vec![SystemBlock::Text {
                 text: "Be helpful".into(),
             }]),
-            vec![
-                Message::System {
-                    content: vec![SystemBlock::Text {
-                        text: "Extra system".into(),
-                    }],
-                },
-                Message::User {
-                    content: vec![
-                        UserBlock::Text { text: "Hi".into() },
-                        UserBlock::Image {
-                            source: ImageSource::new(
-                                ImageSourceKind::Base64,
-                                "image/png".into(),
-                                "AAAA".into(),
-                            ),
-                        },
-                        UserBlock::Audio {
-                            data: "wavdata".into(),
-                            format: AudioFormat::Wav,
-                        },
-                    ],
-                },
-                Message::Assistant {
-                    content: vec![
-                        AssistantBlock::Text {
-                            text: "Hello".into(),
-                        },
-                        AssistantBlock::ToolCall {
-                            id: "toolu_1".into(),
-                            name: "lookup".into(),
-                            arguments: json!({"q": "x"}),
-                        },
-                        AssistantBlock::Thinking {
-                            text: "hmm".into(),
-                            signature: None,
-                        },
-                    ],
-                },
-                Message::Tool {
-                    content: vec![ToolBlock::new(
-                        "toolu_1".into(),
-                        vec![ContentBlock::Text {
-                            text: "found".into(),
-                        }],
-                        true,
-                    )],
-                },
-            ],
+            &msgs,
             Some(vec![ToolDefinition::new(
                 "lookup".into(),
                 "Look up".into(),
                 json!({"type": "object"}),
             )]),
             Some(ToolChoice::Specific("lookup".into())),
-        )
-    }
-
-    #[test]
-    fn from_prompt_serializes_wire_format() {
+        );
         let config = test_config();
-        let request = ChatRequest::from_prompt(&sample_prompt(), &config);
+        let request = ChatRequest::from_prompt(&prompt, &config);
         let value: Value = serde_json::to_value(&request).unwrap();
 
         // system is a top-level field, merging prompt.system + system messages

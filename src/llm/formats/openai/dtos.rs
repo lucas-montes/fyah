@@ -1185,72 +1185,71 @@ mod tests {
         serde_json::from_value(json!({"model": "gpt-4o"})).unwrap()
     }
 
-    fn sample_prompt() -> Prompt {
-        Prompt::new(
+    #[test]
+    fn from_prompt_serializes_wire_format() {
+        let msgs = [
+            Message::User {
+                content: vec![
+                    UserBlock::Text {
+                        text: "Look at this".into(),
+                    },
+                    UserBlock::Image {
+                        source: ImageSource::new(
+                            ImageSourceKind::Base64,
+                            "image/png".into(),
+                            "AAAA".into(),
+                        ),
+                    },
+                    UserBlock::Audio {
+                        data: "wavdata".into(),
+                        format: AudioFormat::Wav,
+                    },
+                ],
+            },
+            Message::Assistant {
+                content: vec![
+                    AssistantBlock::Text { text: "Hi".into() },
+                    AssistantBlock::ToolCall {
+                        id: "call_1".into(),
+                        name: "get_weather".into(),
+                        arguments: json!({"city": "London"}),
+                    },
+                ],
+            },
+            Message::Tool {
+                content: vec![
+                    ToolBlock::new(
+                        "call_1".into(),
+                        vec![ContentBlock::Text {
+                            text: "Sunny".into(),
+                        }],
+                        false,
+                    ),
+                    ToolBlock::new(
+                        "call_2".into(),
+                        vec![ContentBlock::Text {
+                            text: "boom".into(),
+                        }],
+                        true,
+                    ),
+                ],
+            },
+        ];
+        let prompt = Prompt::new(
             Some(vec![SystemBlock::Text {
                 text: "You are helpful".into(),
             }]),
-            vec![
-                Message::User {
-                    content: vec![
-                        UserBlock::Text {
-                            text: "Look at this".into(),
-                        },
-                        UserBlock::Image {
-                            source: ImageSource::new(
-                                ImageSourceKind::Base64,
-                                "image/png".into(),
-                                "AAAA".into(),
-                            ),
-                        },
-                        UserBlock::Audio {
-                            data: "wavdata".into(),
-                            format: AudioFormat::Wav,
-                        },
-                    ],
-                },
-                Message::Assistant {
-                    content: vec![
-                        AssistantBlock::Text { text: "Hi".into() },
-                        AssistantBlock::ToolCall {
-                            id: "call_1".into(),
-                            name: "get_weather".into(),
-                            arguments: json!({"city": "London"}),
-                        },
-                    ],
-                },
-                Message::Tool {
-                    content: vec![
-                        ToolBlock::new(
-                            "call_1".into(),
-                            vec![ContentBlock::Text {
-                                text: "Sunny".into(),
-                            }],
-                            false,
-                        ),
-                        ToolBlock::new(
-                            "call_2".into(),
-                            vec![ContentBlock::Text {
-                                text: "boom".into(),
-                            }],
-                            true,
-                        ),
-                    ],
-                },
-            ],
+            &msgs,
             Some(vec![ToolDefinition::new(
                 "get_weather".into(),
                 "Get the weather".into(),
                 json!({"type": "object", "properties": {}}),
             )]),
             Some(ToolChoice::Specific("get_weather".into())),
-        )
-    }
+        );
 
-    #[test]
-    fn from_prompt_serializes_wire_format() {
         let config = test_config();
-        let request = ChatRequest::from_prompt(&sample_prompt(), &config);
+        let request = ChatRequest::from_prompt(&prompt, &config);
         let value: Value = serde_json::to_value(&request).unwrap();
 
         let messages = value["messages"].as_array().unwrap();

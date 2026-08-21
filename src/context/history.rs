@@ -36,4 +36,8 @@ impl<T> Session<T> {
     pub fn push(&mut self, message: T) {
         self.messages.push(message);
     }
+
+    pub fn append(&mut self, messages: &mut Vec<T>) {
+        self.messages.append(messages);
+    }
 }

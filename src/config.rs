@@ -352,17 +352,14 @@ pub struct ConfigView {
 }
 
 impl ConfigView {
-    /// Subscribe to the LLM config.
     pub fn llm(&self) -> Ref<'_, LlmConfig> {
         self.llm.borrow()
     }
 
-    /// Subscribe to the tool registry.
     pub fn tools(&self) -> watch::Receiver<ToolRegistry> {
         self.tools.clone()
     }
 
-    /// Subscribe to the workflow plan map.
     pub fn workflow(&mut self) -> &mut watch::Receiver<PlanMap> {
         &mut self.workflow
     }
