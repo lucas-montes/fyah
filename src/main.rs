@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use fyah::runtime::CancellationGuard;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -13,7 +13,7 @@ use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use fyah::config::{Config, ConfigStore};
+use fyah::config::{Config, ConfigStore, StartupError};
 use fyah::context::Message;
 use fyah::context::Session;
 use fyah::context::SessionContext;
@@ -93,14 +93,14 @@ fn spawn_stdin_reader(
 
 /// Two-stage cancellation: the first Ctrl+C requests a graceful stop at the
 /// next step boundary (soft), the second aborts any in-flight step (hard).
-fn spawn_cancellation_handler(soft: CancellationToken, hard: CancellationToken) {
+fn spawn_cancellation_handler(cancelation: CancellationGuard) {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         info!("Ctrl+C received — graceful shutdown at next step boundary");
-        soft.cancel();
+        cancelation.soft_cancel();
         tokio::signal::ctrl_c().await.ok();
         info!("Second Ctrl+C received — aborting in-flight step");
-        hard.cancel();
+        cancelation.hard_cancel();
     });
 }
 
@@ -129,10 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (input_tx, input_rx) = watch::channel(false);
     spawn_stdin_reader(user_tx, input_rx);
 
-    // Two-stage cancellation: first Ctrl+C is graceful, second aborts.
-    let soft = CancellationToken::new();
-    let hard = CancellationToken::new();
-    spawn_cancellation_handler(soft.clone(), hard.clone());
+    let cancelation = CancellationGuard::default();
+    spawn_cancellation_handler(cancelation.clone());
 
     // The store owns every reloadable config part and publishes changes on
     // watch channels. It converts the raw config into its runtime parts;
@@ -143,19 +141,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = ConfigStore::new(config)?;
     let view = store.subscribe();
 
+    let _fs_watcher = FsWatcher::spawn(store, config_path, None);
+
     //TODO: if we know all the providers, maybe we don't ned a Dyn and we can use a regular ass enum
+    // TODO: providers also should come from the config, those are actually wire formats
     let mut providers = ProviderRegistry::default();
     providers.register("openai", Box::new(OpenAIFactory));
     providers.register("ollama", Box::new(OllamaFactory));
     providers.register("anthropic", Box::new(AnthropicFactory));
 
     //TODO: the context should either be created or populated from somewhere if it already exists, also we should have the whole Hisotry struct, not just a session
-    let session = SessionContext::new(view, providers, Client::default(), Session::new());
-    let _fs_watcher = FsWatcher::spawn(store, config_path, None);
+    let mut session = SessionContext::new(view, providers, Session::new());
 
     //TODO: maybe we should pass and keep in the runtime only one workflow plan and we don't need to keep all the other around?
     info!("workflow starting");
-    let mut runtime = Runtime::new(cli.workflow, input_tx, session, user_rx, soft, hard)?;
+    let client = Client::default();
+    let current_step = session
+        .get_initial_step(&cli.workflow)
+        .ok_or_else(|| StartupError::UnknownWorkflow(cli.workflow.clone()))?;
+    let mut runtime = Runtime::new(
+        client,
+        current_step,
+        cli.workflow,
+        input_tx,
+        session,
+        user_rx,
+        cancelation,
+    );
     runtime.run().await;
 
     info!("Fyah stopped");

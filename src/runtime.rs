@@ -15,29 +15,69 @@
 //! of the plan completes the workflow instead of leaving it dangling.
 
 use tokio::sync::{mpsc, watch};
-use tokio_util::sync::CancellationToken;
-use tracing::{info, trace, warn};
+use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
+use tracing::{error, info, trace, warn};
 
-use crate::config::StartupError;
 use crate::context::{Message, SessionContext};
-use crate::workflows::{DONE, Step, StepOutcome, WorkflowPlan};
+use crate::llm::LlmClient;
+use crate::workflows::{DONE, Step, StepOutcome};
 
-/// Deterministic harness: walks the step graph, applies cancellations and
-/// plan reloads, and reflects the current step's input state on a watch.
-pub struct Runtime {
-    plan: WorkflowPlan,
-    /// Name of the step currently being walked. Resolved against the current
-    /// plan before each step; a missing name completes the workflow.
-    current: String,
-    active_workflow: String,
-    input_tx: watch::Sender<bool>,
-    session: SessionContext,
-    user_input: mpsc::UnboundedReceiver<Message>,
+#[derive(Clone)]
+pub struct CancellationGuard {
     soft: CancellationToken,
     hard: CancellationToken,
 }
 
-impl Runtime {
+impl CancellationGuard {
+    pub fn soft_cancel(&self) {
+        self.soft.cancel();
+    }
+
+    pub fn hard_cancel(&self) {
+        self.hard.cancel();
+    }
+
+    pub fn soft_cancelled(&self) -> WaitForCancellationFuture<'_> {
+        self.soft.cancelled()
+    }
+
+    pub fn hard_cancelled(&self) -> WaitForCancellationFuture<'_> {
+        self.hard.cancelled()
+    }
+
+    fn is_soft_cancelled(&self) -> bool {
+        self.soft.is_cancelled()
+    }
+}
+
+impl Default for CancellationGuard {
+    fn default() -> Self {
+        Self {
+            soft: CancellationToken::new(),
+            hard: CancellationToken::new(),
+        }
+    }
+}
+
+/// Deterministic harness: walks the step graph, applies cancellations and
+/// plan reloads, and reflects the current step's input state on a watch.
+pub struct Runtime<Client: LlmClient> {
+    /// Name of the step currently being walked. Resolved against the current
+    /// plan before each step; a missing name completes the workflow.
+    current_step: String,
+    active_workflow: String,
+
+    client: Client,
+
+    input_tx: watch::Sender<bool>,
+    user_rx: mpsc::UnboundedReceiver<Message>,
+
+    session: SessionContext,
+
+    cancelation: CancellationGuard,
+}
+
+impl<Client: LlmClient> Runtime<Client> {
     /// Build a runtime from the workflow plan map watch and the channels it
     /// drives from. The current step starts at the active workflow's initial
     /// step, which is derived from the watch's current value.
@@ -48,33 +88,23 @@ impl Runtime {
     /// loaded config (workflows are config-defined; there is no built-in
     /// default).
     pub fn new(
+        client: Client,
+        current_step: String,
         active_workflow: String,
         input_tx: watch::Sender<bool>,
-        mut session: SessionContext,
-        user_input: mpsc::UnboundedReceiver<Message>,
-        soft: CancellationToken,
-        hard: CancellationToken,
-    ) -> Result<Self, StartupError> {
-        let plan = {
-            let cfg = session.view();
-            let plans = cfg.workflow().borrow();
-
-            plans
-                .get(&active_workflow)
-                .cloned()
-                .ok_or_else(|| StartupError::UnknownWorkflow(active_workflow.clone()))?
-        };
-        let current = plan.initial().to_string();
-        Ok(Self {
-            plan,
-            current,
+        session: SessionContext,
+        user_rx: mpsc::UnboundedReceiver<Message>,
+        cancelation: CancellationGuard,
+    ) -> Self {
+        Self {
+            current_step,
             active_workflow,
             input_tx,
             session,
-            user_input,
-            soft,
-            hard,
-        })
+            client,
+            user_rx,
+            cancelation,
+        }
     }
 
     /// Run the workflow until it completes, is cancelled, or exhausts its
@@ -85,6 +115,14 @@ impl Runtime {
     /// the loop it is set to `false`.
     pub async fn run(&mut self) {
         let mut iterations = 0;
+        let Some(mut plan) = self.session.get_plan(&self.active_workflow) else {
+            warn!(
+                workflow = %self.active_workflow,
+                "active workflow not defined; completing"
+            );
+            return;
+        };
+//TODO: this loop and iterations counter doesn't make much sense, we should be following the plan. A while let Some(next_step) is more suiteable and reflects what we are doing better
         loop {
             // Apply the latest plan map, if one changed since the last step
             // boundary. The watch coalesces reloads: only the newest map is
@@ -96,28 +134,26 @@ impl Runtime {
                 .has_changed()
                 .unwrap_or(false)
             {
-                let plan = {
-                    let plans = self.session.view().workflow().borrow_and_update();
-                    plans.get(&self.active_workflow).cloned()
-                };
-                let Some(plan) = plan else {
-                    info!(
+                let Some(next) = self.session.get_plan(&self.active_workflow) else {
+                    warn!(
                         workflow = %self.active_workflow,
                         "active workflow no longer defined; completing"
                     );
+                    //TODO: should be stop? if the current active workflow doesn't exists anymore, do we want to stop? maybe this could be a config
                     break;
                 };
-                self.plan = plan;
+
+                plan = next;
                 iterations = 0;
             }
 
-            if self.soft.is_cancelled() {
+            if self.cancelation.is_soft_cancelled() {
                 info!("graceful shutdown requested at step boundary");
                 break;
             }
-            if self.plan.max_iterations() > 0 && iterations >= self.plan.max_iterations() {
+            if plan.max_iterations() > 0 && iterations >= plan.max_iterations() {
                 warn!(
-                    max_iterations = self.plan.max_iterations(),
+                    max_iterations = plan.max_iterations(),
                     "max iterations reached"
                 );
                 break;
@@ -126,23 +162,31 @@ impl Runtime {
             // Resolve the current step name against the (possibly reloaded)
             // plan. A name that is no longer part of the plan terminates the
             // workflow.
-            let Some(step) = self.plan.resolve(&self.current) else {
-                info!("workflow complete");
+            let Some(step) = plan.resolve(&self.current_step) else {
+                warn!(
+                    step = &self.current_step,
+                    "next step not found, workflow completed"
+                );
                 break;
             };
 
-            let _ = self.input_tx.send(step.accepts_input());
+            // If the step expects user input, we notify the input source (stdin, http, …) via the watch.
+            // The step itself decides whether to consume user input; the channel is always handed over.
+            // After the loop, we set the watch to false to indicate that no step is currently running.
+            if self.input_tx.send(step.accepts_input()).is_err() {
+                error!("failed to notify input source about step input state");
+            };
 
-            info!(step = self.current, step_kind = %step, "step start");
+            info!(step = self.current_step, step_kind = %step, "step start");
             let outcome = run_step(
+                &self.client,
                 step,
                 &mut self.session,
-                &self.soft,
-                &self.hard,
-                &mut self.user_input,
+                &self.cancelation,
+                &mut self.user_rx,
             )
             .await;
-            trace!(step = self.current, ?outcome, "step end");
+            trace!(step = self.current_step, ?outcome, "step end");
 
             // Transitions are step names from the plan the step just ran
             // against. `DONE` — or a name that no longer exists after a
@@ -152,14 +196,17 @@ impl Runtime {
                 StepOutcome::Failure => step.on_failure().to_string(),
                 StepOutcome::Cancelled | StepOutcome::Aborted => break,
             };
-            if target == DONE || self.plan.resolve(&target).is_none() {
+            if target == DONE || plan.resolve(&target).is_none() {
                 info!("workflow complete");
                 break;
             }
-            self.current = target;
+            self.current_step = target;
             iterations += 1;
         }
-        let _ = self.input_tx.send(false);
+
+        if self.input_tx.send(false).is_err() {
+            error!("failed to notify input source about step input state");
+        }
     }
 }
 
@@ -169,22 +216,21 @@ impl Runtime {
 /// or hard cancel) also drops a running command process, which `kill_on_drop`
 /// then terminates.
 async fn run_step(
+    client: &impl LlmClient,
     step: &Step,
     session: &mut SessionContext,
-    soft: &CancellationToken,
-    hard: &CancellationToken,
-    user_input: &mut mpsc::UnboundedReceiver<Message>,
+    cancelation: &CancellationGuard,
+    user_rx: &mut mpsc::UnboundedReceiver<Message>,
 ) -> StepOutcome {
-    let binding = step.to_binding();
     tokio::select! {
-        _ = hard.cancelled() => StepOutcome::Aborted,
+        _ = cancelation.hard_cancelled() => StepOutcome::Aborted,
         outcome = async {
-            let run = step.run(session, soft, user_input, binding.as_ref());
+            let run = step.run(client, session, cancelation, user_rx);
             match step.timeout() {
                 Some(secs) => match tokio::time::timeout(secs, run).await {
                     Ok(outcome) => outcome,
                     Err(_) => {
-                        warn!("step timed out");
+                        warn!(secs=?secs, "step timed out");
                         StepOutcome::Failure
                     }
                 },
