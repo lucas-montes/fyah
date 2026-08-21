@@ -2,6 +2,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
+
+use crate::context::ToolDefinition;
 
 /// Central registry of all available [`Tool`] definitions.
 ///
@@ -18,18 +21,61 @@ pub struct ToolRegistry {
     builtins: Vec<Tool>,
     /// Tools parsed from `fyah.toml` `[tools]` section.
     config_tools: Vec<Tool>,
+    /// Execution command per custom tool name, retained from
+    /// [`CustomToolConfig`] so custom function tools can actually run.
+    commands: HashMap<String, String>,
 }
 
 impl From<Config> for ToolRegistry {
     /// Build the registry from a parsed [`Config`].
     ///
-    /// Takes ownership of the config and moves data out — no cloning. Each
-    /// enabled entry is converted into the corresponding [`Tool`] variant.
+    /// Takes ownership of the config and moves data out — no cloning of tool
+    /// definitions. Each enabled entry is converted into the corresponding
+    /// [`Tool`] variant, and each custom tool's command is retained by name.
     fn from(cfg: Config) -> Self {
+        let mut commands = HashMap::new();
+        for custom in &cfg.custom {
+            commands.insert(custom.function.name.to_string(), custom.command.clone());
+        }
+        let config_tools = cfg.into_tools();
         ToolRegistry {
             builtins: Vec::new(),
-            config_tools: cfg.into_tools(),
+            config_tools,
+            commands,
         }
+    }
+}
+
+impl ToolRegistry {
+    /// Every registered tool: built-ins first, then config-defined ones.
+    pub fn tools(&self) -> impl Iterator<Item = &Tool> {
+        self.builtins.iter().chain(self.config_tools.iter())
+    }
+
+    /// The tool registered under `name`, if any.
+    pub fn get(&self, name: &str) -> Option<&Tool> {
+        self.tools().find(|tool| tool.name() == name)
+    }
+
+    /// The execution command configured for a custom tool.
+    pub fn command_for(&self, name: &str) -> Option<&str> {
+        self.commands.get(name).map(String::as_str)
+    }
+
+    /// Tool definitions for an agent's allow-list of names, in allow-list
+    /// order. Unknown names are warn + skipped; a name resolving to a tool
+    /// that cannot be advertised is silently skipped.
+    pub fn definitions_for(&self, allow: &[String]) -> Vec<ToolDefinition> {
+        allow
+            .iter()
+            .filter_map(|name| match self.get(name) {
+                Some(tool) => tool.to_definition(),
+                None => {
+                    warn!(tool = %name, "unknown tool in allow-list; skipping");
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -204,6 +250,50 @@ pub enum Tool {
     Shell,
 }
 
+impl Tool {
+    /// The tool's catalog name: a function's name, an MCP server's label, or
+    /// the built-in variant's `[tools]` toggle key.
+    pub fn name(&self) -> &str {
+        match self {
+            Tool::Function(function) => &function.name,
+            Tool::FileSearch(_) => "file_search",
+            Tool::WebSearch => "web_search",
+            Tool::ToolSearch => "tool_search",
+            Tool::Mcp(server) => &server.label,
+            Tool::CodeInterpreter => "code_interpreter",
+            Tool::ComputerUse => "computer_use",
+            Tool::Shell => "shell",
+        }
+    }
+
+    /// The IR definition advertised to the model. `None` for tools that are
+    /// not (yet) callable through the agentic loop and so must not be offered.
+    pub fn to_definition(&self) -> Option<ToolDefinition> {
+        match self {
+            Tool::Function(function) => Some(ToolDefinition::new(
+                function.name.to_string(),
+                function.description.to_string(),
+                function.parameters.schema(),
+            )),
+            Tool::Shell => Some(ToolDefinition::new(
+                "shell".to_string(),
+                "Execute a shell command".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            )),
+            _ => None,
+        }
+    }
+}
+
 /// JSON Schema `properties` object describing a tool's parameters.
 ///
 /// String fields (except map keys) use [`Cow<'static, str>`] since most
@@ -217,6 +307,13 @@ pub struct ToolParameters {
     properties: HashMap<Cow<'static, str>, ToolProperty>,
     /// Names of required parameters.
     required: Vec<Cow<'static, str>>,
+}
+
+impl ToolParameters {
+    /// The parameters as a JSON Schema value for [`ToolDefinition`].
+    fn schema(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
 }
 
 /// A single property within a tool's JSON Schema.
@@ -334,5 +431,61 @@ mod tests {
                 "server_url": "http://localhost:3100"
             })
         );
+    }
+
+    #[test]
+    fn registry_resolves_names_commands_and_definitions() {
+        use super::{Config, CustomToolConfig, ToolRegistry};
+
+        let config = Config {
+            shell: true,
+            custom: vec![CustomToolConfig {
+                function: FunctionTool {
+                    name: Cow::Borrowed("read_file"),
+                    description: Cow::Borrowed("Read a file from disk"),
+                    parameters: ToolParameters {
+                        param_type: Cow::Borrowed("object"),
+                        properties: HashMap::from([(
+                            Cow::Borrowed("path"),
+                            ToolProperty {
+                                property_type: Cow::Borrowed("string"),
+                                description: Cow::Borrowed("The file path"),
+                            },
+                        )]),
+                        required: vec![Cow::Borrowed("path")],
+                    },
+                },
+                command: "execute_read_file".to_string(),
+            }],
+            ..Default::default()
+        };
+        let registry = ToolRegistry::from(config);
+
+        // Names resolve across built-in toggles and custom tools.
+        assert_eq!(registry.get("shell").map(|t| t.name()), Some("shell"));
+        assert_eq!(
+            registry.get("read_file").map(|t| t.name()),
+            Some("read_file")
+        );
+        assert_eq!(registry.get("web_search"), None);
+        assert_eq!(registry.command_for("read_file"), Some("execute_read_file"));
+        assert_eq!(registry.command_for("shell"), None);
+
+        // Definitions follow allow-list order; unknown names are skipped.
+        let definitions = registry.definitions_for(&[
+            "read_file".to_string(),
+            "nope".to_string(),
+            "shell".to_string(),
+        ]);
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|d| d.name().to_string())
+                .collect::<Vec<_>>(),
+            ["read_file", "shell"]
+        );
+
+        // An empty allow-list exposes no tools.
+        assert!(registry.definitions_for(&[]).is_empty());
     }
 }

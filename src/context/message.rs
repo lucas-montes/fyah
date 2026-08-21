@@ -165,11 +165,63 @@ pub enum Message {
     Tool { content: Vec<ToolBlock> },
 }
 
+/// A tool call requested by the model inside an assistant message.
+#[derive(Clone, Debug)]
+pub struct ToolCall {
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
+}
+
+impl ToolCall {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn arguments(&self) -> &serde_json::Value {
+        &self.arguments
+    }
+}
+
 impl Message {
     /// Build a user message from a single text block.
     pub fn user(text: impl Into<String>) -> Self {
         Message::User {
             content: vec![UserBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// The tool calls requested in an assistant message, in order. Empty for
+    /// every other role.
+    pub fn tool_calls(&self) -> Vec<ToolCall> {
+        match self {
+            Message::Assistant { content } => content
+                .iter()
+                .filter_map(|block| match block {
+                    AssistantBlock::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } => Some(ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A tool result message referencing the originating tool call.
+    pub fn tool_result(id: String, content: Vec<ContentBlock>, is_error: bool) -> Self {
+        Message::Tool {
+            content: vec![ToolBlock::new(id, content, is_error)],
         }
     }
 }

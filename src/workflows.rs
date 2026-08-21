@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::context::{Message, SessionContext};
-use crate::llm::{Binding, run_agent};
+use crate::llm::{Binding, LlmClient, run_agent_loop};
+use crate::runtime::CancellationGuard;
 
 /// Name of the terminal state. A step may not be named `done`; `initial` and
 /// the transition targets may use it to end the workflow.
@@ -47,7 +47,20 @@ pub const DONE: &str = "done";
 pub struct Config(HashMap<String, WorkflowConfig>);
 
 /// The compiled workflow map consumed by the runtime, keyed by workflow name.
-pub type PlanMap = HashMap<String, WorkflowPlan>;
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanMap(HashMap<String, WorkflowPlan>);
+
+impl PlanMap {
+    /// The plan for one named workflow, if it is defined by the config.
+    pub fn get(&self, name: &str) -> Option<&WorkflowPlan> {
+        self.0.get(name)
+    }
+
+    /// The compiled plans, keyed by workflow name.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &WorkflowPlan)> {
+        self.0.iter()
+    }
+}
 
 /// One structural problem in a workflow config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +159,7 @@ impl TryFrom<Config> for PlanMap {
             }
         }
         if errors.is_empty() {
-            Ok(plans)
+            Ok(PlanMap(plans))
         } else {
             Err(errors)
         }
@@ -307,6 +320,7 @@ pub struct ImplementConfig {
 /// binding — the test stages are configured later).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct ValidateConfig {
+    //TODO: add validations configs such as tests commands to run
     /// Name of the step to run next on success, or [`DONE`].
     on_success: String,
     /// Name of the step to run next on failure, or [`DONE`].
@@ -396,6 +410,91 @@ pub enum Step {
     /// Any other step, executed according to its [`Backend`].
     Custom(CustomConfig),
 }
+//TODO: maybe we should change a bit how the Step struct is defined
+
+/// Build the step's complete binding from its three optional names, or `None`
+/// when any of them is missing.
+fn config_binding<'a>(
+    agent: &'a Option<String>,
+    provider: &'a Option<String>,
+    model: &'a Option<String>,
+) -> Option<Binding<'a>> {
+    Some(Binding {
+        agent: agent.as_deref()?,
+        provider: provider.as_deref()?,
+        model: model.as_deref()?,
+    })
+}
+
+async fn run_plan_step(
+    client: &impl LlmClient,
+    step: &PlanConfig,
+    session: &mut SessionContext,
+    cancelation: &CancellationGuard,
+    user_rx: &mut mpsc::UnboundedReceiver<Message>,
+) -> StepOutcome {
+    let binding = config_binding(&step.agent, &step.provider, &step.model);
+    let mut ctx = StepContext::new(session, cancelation, user_rx, binding).listen();
+    run_listening_step(client, &mut ctx).await
+}
+
+async fn run_implement_step(
+    client: &impl LlmClient,
+    step: &ImplementConfig,
+    session: &mut SessionContext,
+    cancelation: &CancellationGuard,
+    user_rx: &mut mpsc::UnboundedReceiver<Message>,
+) -> StepOutcome {
+    let binding = config_binding(&step.agent, &step.provider, &step.model);
+    let mut ctx = StepContext::new(session, cancelation, user_rx, binding);
+    ctx.run_agent_turn(client).await
+}
+
+async fn run_validate_step(
+    client: &impl LlmClient,
+    _step: &ValidateConfig,
+    session: &mut SessionContext,
+    cancelation: &CancellationGuard,
+    user_rx: &mut mpsc::UnboundedReceiver<Message>,
+) -> StepOutcome {
+    // No binding is possible yet (test stages are unconfigured), so the turn
+    // keeps its documented stub behavior: warn + succeed.
+    let mut ctx = StepContext::new(session, cancelation, user_rx, None);
+    ctx.run_agent_turn(client).await
+}
+
+async fn run_commit_step(
+    client: &impl LlmClient,
+    step: &CommitConfig,
+    session: &mut SessionContext,
+    cancelation: &CancellationGuard,
+    user_rx: &mut mpsc::UnboundedReceiver<Message>,
+) -> StepOutcome {
+    let binding = config_binding(&step.agent, &step.provider, &step.model);
+    let mut ctx = StepContext::new(session, cancelation, user_rx, binding).listen();
+    run_listening_step(client, &mut ctx).await
+}
+
+async fn run_custom_step(
+    client: &impl LlmClient,
+    step: &CustomConfig,
+    session: &mut SessionContext,
+    cancelation: &CancellationGuard,
+    user_rx: &mut mpsc::UnboundedReceiver<Message>,
+) -> StepOutcome {
+    let binding = config_binding(&step.agent, &step.provider, &step.model);
+    match &step.backend {
+        Backend::Llm => {
+            let mut ctx = StepContext::new(session, cancelation, user_rx, binding);
+            ctx.run_agent_turn(client).await
+        }
+        Backend::Command { command } => run_command(command).await,
+        Backend::Wasm { .. } | Backend::Native { .. } => {
+            error!("unsupported backend");
+            StepOutcome::Failure
+        }
+    }
+}
 
 impl Step {
     /// Whether this step consumes user input. The runtime reflects this on a
@@ -409,32 +508,28 @@ impl Step {
     /// Run this step's work. The user channel is always handed over; whether
     /// it is attached for listening is decided per variant. The resolved
     /// binding, when present, lets an agent-involving step perform a real agent
-    /// turn instead of the stub behavior.
+    /// turn instead of the stub behavior. The client is only used for the
+    /// request's `create_request` half; `send_request` is static on the trait.
     pub async fn run(
         &self,
+        client: &impl LlmClient,
         session: &mut SessionContext,
-        soft: &CancellationToken,
+        cancelation: &CancellationGuard,
         user_input: &mut mpsc::UnboundedReceiver<Message>,
-        binding: Option<&Binding>,
     ) -> StepOutcome {
-        let mut silent = StepContext::new(session, soft, user_input, binding);
         match self {
-            Step::Plan(_) | Step::Commit(_) => run_listening_step(&mut silent.listen()).await,
-            Step::Implement(_) | Step::Validate(_) => silent.run_agent_turn().await,
-            Step::Custom(CustomConfig {
-                backend: Backend::Llm,
-                ..
-            }) => silent.run_agent_turn().await,
-            Step::Custom(CustomConfig {
-                backend: Backend::Command { command },
-                ..
-            }) => run_command(command).await,
-            Step::Custom(CustomConfig {
-                backend: Backend::Wasm { .. } | Backend::Native { .. },
-                ..
-            }) => {
-                error!("unsupported backend: wasm and native steps are not implemented yet");
-                StepOutcome::Failure
+            Self::Plan(cfg) => run_plan_step(client, cfg, session, cancelation, user_input).await,
+            Self::Implement(cfg) => {
+                run_implement_step(client, cfg, session, cancelation, user_input).await
+            }
+            Self::Validate(cfg) => {
+                run_validate_step(client, cfg, session, cancelation, user_input).await
+            }
+            Self::Commit(cfg) => {
+                run_commit_step(client, cfg, session, cancelation, user_input).await
+            }
+            Self::Custom(cfg) => {
+                run_custom_step(client, cfg, session, cancelation, user_input).await
             }
         }
     }
@@ -508,11 +603,11 @@ impl Step {
 
     /// The step's complete binding, or `None` when any of the three names is
     /// missing.
-    pub fn to_binding(&self) -> Option<Binding> {
+    pub fn to_binding(&self) -> Option<Binding<'_>> {
         Some(Binding {
-            agent: self.agent()?.to_string(),
-            provider: self.provider()?.to_string(),
-            model: self.model()?.to_string(),
+            agent: self.agent()?,
+            provider: self.provider()?,
+            model: self.model()?,
         })
     }
 }
@@ -531,11 +626,14 @@ impl fmt::Display for Step {
 
 /// Listening step handler: wait for one user message, push it into the session,
 /// then run an agent turn. `None` when cancelled while waiting.
-async fn run_listening_step(ctx: &mut StepContext<'_, Listening>) -> StepOutcome {
+async fn run_listening_step<C: LlmClient>(
+    client: &C,
+    ctx: &mut StepContext<'_, Listening>,
+) -> StepOutcome {
     match ctx.next_user_input().await {
         Some(msg) => {
             ctx.session.push_message(msg);
-            ctx.run_agent_turn().await
+            ctx.run_agent_turn(client).await
         }
         None => StepOutcome::Cancelled,
     }
@@ -596,10 +694,10 @@ struct Silent;
 /// name the method, so "may this step listen?" is enforced by the compiler.
 pub struct StepContext<'a, Mode> {
     session: &'a mut SessionContext,
-    soft: &'a CancellationToken,
+    cancelation: &'a CancellationGuard,
     user_input: &'a mut mpsc::UnboundedReceiver<Message>,
     /// The step's resolved agent binding, if any.
-    binding: Option<&'a Binding>,
+    binding: Option<Binding<'a>>,
     _mode: PhantomData<fn() -> Mode>,
 }
 
@@ -608,13 +706,13 @@ impl<'a> StepContext<'a, Silent> {
     /// [`StepContext::listen`].
     fn new(
         session: &'a mut SessionContext,
-        soft: &'a CancellationToken,
+        cancelation: &'a CancellationGuard,
         user_input: &'a mut mpsc::UnboundedReceiver<Message>,
-        binding: Option<&'a Binding>,
+        binding: Option<Binding<'a>>,
     ) -> Self {
         StepContext {
             session,
-            soft,
+            cancelation,
             user_input,
             binding,
             _mode: PhantomData,
@@ -626,7 +724,7 @@ impl<'a> StepContext<'a, Silent> {
     fn listen(self) -> StepContext<'a, Listening> {
         StepContext {
             session: self.session,
-            soft: self.soft,
+            cancelation: self.cancelation,
             user_input: self.user_input,
             binding: self.binding,
             _mode: PhantomData,
@@ -636,19 +734,20 @@ impl<'a> StepContext<'a, Silent> {
 
 impl<'a, Mode> StepContext<'a, Mode> {
     /// Run one agent turn for this step's resolved binding. Without a binding
-    /// the step keeps its stub behavior and succeeds.
-    async fn run_agent_turn(&mut self) -> StepOutcome {
-        let Some(binding) = self.binding else {
+    /// the step keeps its stub behavior and succeeds. The generic client
+    /// threads through to the runner; `send_request` itself stays static.
+    async fn run_agent_turn<C: LlmClient>(&mut self, client: &C) -> StepOutcome {
+        let Some(binding) = self.binding.as_ref() else {
             warn!("step has no agent binding; running as stub");
             return StepOutcome::Success;
         };
-        match run_agent(self.session, binding).await {
-            Ok(message) => {
-                debug!(?message, "agent responded");
+        match run_agent_loop(client, self.session, binding).await {
+            Ok(()) => {
+                debug!("agent loop finished");
                 StepOutcome::Success
             }
             Err(err) => {
-                error!(%err, "agent call failed");
+                error!(%err, "agent loop failed");
                 StepOutcome::Failure
             }
         }
@@ -659,11 +758,13 @@ impl StepContext<'_, Listening> {
     /// Wait for the next user message; `None` if cancelled while waiting.
     async fn next_user_input(&mut self) -> Option<Message> {
         let Self {
-            user_input, soft, ..
+            user_input,
+            cancelation,
+            ..
         } = self;
         tokio::select! {
             msg = user_input.recv() => msg,
-            _ = soft.cancelled() => None,
+            _ = cancelation.soft_cancelled() => None,
         }
     }
 }
