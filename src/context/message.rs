@@ -304,56 +304,56 @@ pub enum ToolChoice {
     Specific(String),
 }
 
-/// The full request sent to an LLM: system prompt, conversation, and tools.
+/// The shape of one LLM request: system prompt, conversation, and tools.
 ///
-/// Sampling and provider-specific parameters are not part of the IR — they
-/// live in the provider's config, set from the config file.
-#[derive(Clone, Debug, Serialize)]
-pub struct Prompt {
-    /// System prompt content. Omitted when `None`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<Vec<SystemBlock>>,
+/// Shape only — every field is a reference into data that already exists (the
+/// session conversation, the agent config text, the precomputed tool
+/// definitions), so assembling a prompt never clones. It is consumed
+/// synchronously to encode a provider request and dropped before anything is
+/// awaited.
+#[derive(Debug)]
+pub struct Prompt<'a> {
+    /// System prompt text. Omitted when `None`.
+    system: Option<std::borrow::Cow<'a, str>>,
 
     /// The conversation history.
-    messages: Vec<Message>,
+    messages: &'a [Message],
 
-    /// Tools available to the model.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
+    /// Tools available to the model — references into the precomputed set.
+    tools: Option<Vec<&'a ToolDefinition>>,
 
     /// How the model should choose which tool to call.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<ToolChoice>,
+    tool_choice: Option<&'a ToolChoice>,
 }
 
-impl Prompt {
+impl<'a> Prompt<'a> {
     pub fn new(
-        system: Option<Vec<SystemBlock>>,
-        messages: &[Message],
-        tools: Option<Vec<ToolDefinition>>,
-        tool_choice: Option<ToolChoice>,
+        system: Option<std::borrow::Cow<'a, str>>,
+        messages: &'a [Message],
+        tools: Option<Vec<&'a ToolDefinition>>,
+        tool_choice: Option<&'a ToolChoice>,
     ) -> Self {
         Self {
             system,
-            messages: messages.to_vec(),
+            messages,
             tools,
             tool_choice,
         }
     }
 
-    pub fn system(&self) -> Option<&[SystemBlock]> {
+    pub fn system(&self) -> Option<&str> {
         self.system.as_deref()
     }
 
     pub fn messages(&self) -> &[Message] {
-        &self.messages
+        self.messages
     }
 
-    pub fn tools(&self) -> Option<&[ToolDefinition]> {
+    pub fn tools(&self) -> Option<&[&ToolDefinition]> {
         self.tools.as_deref()
     }
 
     pub fn tool_choice(&self) -> Option<&ToolChoice> {
-        self.tool_choice.as_ref()
+        self.tool_choice
     }
 }

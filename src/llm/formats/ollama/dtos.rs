@@ -91,9 +91,12 @@ impl<'a> ChatRequest<'a> {
                 .iter()
                 .flat_map(|message| <Vec<Message>>::from(message)),
         );
-        let tools = prompt
-            .tools()
-            .map(|tools| tools.iter().map(ToolDefinition::from).collect());
+        let tools = prompt.tools().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| ToolDefinition::from(*tool))
+                .collect()
+        });
         Self::new(messages, tools, config)
     }
 }
@@ -123,7 +126,18 @@ impl From<&IrMessage> for Vec<Message> {
     /// `role: "tool"` message (the tool call id is dropped).
     fn from(message: &IrMessage) -> Self {
         match message {
-            IrMessage::System { content } => vec![system_message(content)],
+            IrMessage::System { content } => {
+                let mut texts = Vec::new();
+                for block in content {
+                    match block {
+                        IrSystemBlock::Text { text } => texts.push(text.clone()),
+                        IrSystemBlock::Image { .. } => {
+                            tracing::warn!("Ollama: skipping image in system message");
+                        }
+                    }
+                }
+                vec![system_message(&texts.join("\n"))]
+            }
             IrMessage::User { content } => {
                 let mut texts = Vec::new();
                 let mut images = Vec::new();
@@ -195,20 +209,11 @@ impl From<&IrMessage> for Vec<Message> {
     }
 }
 
-/// Convert IR system blocks into a `role: "system"` wire message.
-fn system_message(blocks: &[IrSystemBlock]) -> Message {
-    let mut texts = Vec::new();
-    for block in blocks {
-        match block {
-            IrSystemBlock::Text { text } => texts.push(text.clone()),
-            IrSystemBlock::Image { .. } => {
-                tracing::warn!("Ollama: skipping image in system message");
-            }
-        }
-    }
+/// Convert the prompt's system text into a `role: "system"` wire message.
+fn system_message(text: &str) -> Message {
     Message {
         role: MessageRole::System,
-        content: texts.join("\n"),
+        content: text.to_string(),
         images: None,
         tool_calls: None,
     }

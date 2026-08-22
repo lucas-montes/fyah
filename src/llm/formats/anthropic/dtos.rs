@@ -78,7 +78,9 @@ impl<'a> ChatRequest<'a> {
     pub fn from_prompt(prompt: &Prompt, config: &'a Config) -> Self {
         let mut system = Vec::new();
         if let Some(sys) = prompt.system() {
-            extend_system(&mut system, sys);
+            system.push(MessageContentBlock::Text {
+                text: sys.to_string(),
+            });
         }
 
         let mut messages = Vec::new();
@@ -98,9 +100,12 @@ impl<'a> ChatRequest<'a> {
         } else {
             Some(PromptContent::Blocks(system))
         };
-        let tools = prompt
-            .tools()
-            .map(|tools| tools.iter().map(ToolDefinition::from).collect());
+        let tools = prompt.tools().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| ToolDefinition::from(*tool))
+                .collect()
+        });
         let tool_choice = prompt.tool_choice().and_then(|choice| choice.into());
         Self::new(system, messages, tools, tool_choice, config)
     }
@@ -534,17 +539,14 @@ mod tests {
                 )],
             },
         ];
+        let tool =
+            ToolDefinition::new("lookup".into(), "Look up".into(), json!({"type": "object"}));
+        let choice = ToolChoice::Specific("lookup".into());
         let prompt = Prompt::new(
-            Some(vec![SystemBlock::Text {
-                text: "Be helpful".into(),
-            }]),
+            Some("Be helpful".into()),
             &msgs,
-            Some(vec![ToolDefinition::new(
-                "lookup".into(),
-                "Look up".into(),
-                json!({"type": "object"}),
-            )]),
-            Some(ToolChoice::Specific("lookup".into())),
+            Some(vec![&tool]),
+            Some(&choice),
         );
         let config = test_config();
         let request = ChatRequest::from_prompt(&prompt, &config);

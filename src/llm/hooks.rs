@@ -16,7 +16,6 @@
 //! runs, and `kill_on_drop` terminates the child when the future drops.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -65,7 +64,7 @@ pub(crate) enum HookError {
 /// hooks are rejected at startup rather than failing silently mid-run.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct LoopHooks {
-    hooks: HashMap<String, Arc<HookSet>>,
+    hooks: HashMap<String, HookSet>,
 }
 
 impl TryFrom<LoopHooksConfig> for LoopHooks {
@@ -84,19 +83,13 @@ impl TryFrom<LoopHooksConfig> for LoopHooks {
                 }
             }
         }
-        Ok(Self {
-            hooks: config
-                .into_iter()
-                .map(|(name, set)| (name, Arc::new(set)))
-                .collect(),
-        })
+        Ok(Self { hooks: config })
     }
 }
 
 impl LoopHooks {
-    /// The compiled hook set for a pipeline part name, if any. Shared behind
-    /// an `Arc` so per-turn resolution is a refcount bump, not a deep clone.
-    pub fn get(&self, name: &str) -> Option<&Arc<HookSet>> {
+    /// The compiled hook set for a pipeline part name, if any.
+    pub fn get(&self, name: &str) -> Option<&HookSet> {
         self.hooks.get(name)
     }
 
@@ -106,34 +99,59 @@ impl LoopHooks {
     }
 }
 
-/// Run every hook in `list` sequentially. Cancels abort the whole list.
+/// The owned minimum a hook process needs to run: its command and optional
+/// timeout. Extracted synchronously from the borrowed hook set right before
+/// the stage's hooks run, so no borrow crosses an await — and parts without
+/// hooks allocate nothing at all.
+pub(crate) struct HookJob {
+    command: String,
+    timeout_secs: Option<u64>,
+}
+
+impl From<&Hook> for HookJob {
+    fn from(hook: &Hook) -> Self {
+        let Backend::Command { command } = &hook.backend else {
+            // Unreachable: compilation rejects non-command backends.
+            return Self {
+                command: String::new(),
+                timeout_secs: None,
+            };
+        };
+        Self {
+            command: command.clone(),
+            timeout_secs: hook.timeout_secs,
+        }
+    }
+}
+
+/// Copy the runnable jobs out of a borrowed list. Empty for an empty list.
+pub(crate) fn jobs(list: &[Hook]) -> Vec<HookJob> {
+    list.iter().map(HookJob::from).collect()
+}
+
+/// Run every job sequentially. Cancels abort the whole list.
 pub(crate) async fn run_hooks(
-    list: &[Hook],
+    jobs: &[HookJob],
     part: &str,
     phase: &'static str,
     cancelation: &CancellationGuard,
 ) -> Result<(), HookError> {
-    for hook in list {
-        run_one(hook, part, phase, cancelation).await?;
+    for job in jobs {
+        run_one(job, part, phase, cancelation).await?;
     }
     Ok(())
 }
 
 async fn run_one(
-    hook: &Hook,
+    job: &HookJob,
     part: &str,
     phase: &'static str,
     cancelation: &CancellationGuard,
 ) -> Result<(), HookError> {
-    let Backend::Command { command } = &hook.backend else {
-        // Unreachable: compilation rejects non-command backends.
-        return Ok(());
-    };
-
     let mut process = Command::new("sh");
     process
         .arg("-c")
-        .arg(command)
+        .arg(&job.command)
         .env("FYAH_LOOP_PART", part)
         .env("FYAH_HOOK_PHASE", phase);
 
@@ -144,7 +162,7 @@ async fn run_one(
         _ = cancelation.hard_cancelled() => return Err(HookError::Aborted),
         output = async {
             let run = process.kill_on_drop(true).output();
-            match hook.timeout_secs {
+            match job.timeout_secs {
                 Some(secs) => tokio::time::timeout(Duration::from_secs(secs), run)
                     .await
                     .map_err(|_| format!("timed out after {secs}s"))?

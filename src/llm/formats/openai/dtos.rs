@@ -131,7 +131,7 @@ impl<'a> ChatRequest<'a> {
         let mut messages = Vec::new();
         if let Some(system) = prompt.system() {
             messages.push(Message::System {
-                content: system_content(system),
+                content: Content::Text(system.to_string()),
                 name: None,
             });
         }
@@ -143,7 +143,7 @@ impl<'a> ChatRequest<'a> {
         );
         let tools = prompt
             .tools()
-            .map(|tools| tools.iter().map(Tool::from).collect());
+            .map(|tools| tools.iter().map(|tool| Tool::from(*tool)).collect());
         let tool_choice = prompt.tool_choice().map(ToolChoice::from);
         Self::new(messages, tools, tool_choice, config)
     }
@@ -1235,17 +1235,17 @@ mod tests {
                 ],
             },
         ];
+        let tool = ToolDefinition::new(
+            "get_weather".into(),
+            "Get the weather".into(),
+            json!({"type": "object", "properties": {}}),
+        );
+        let choice = ToolChoice::Specific("get_weather".into());
         let prompt = Prompt::new(
-            Some(vec![SystemBlock::Text {
-                text: "You are helpful".into(),
-            }]),
+            Some("You are helpful".into()),
             &msgs,
-            Some(vec![ToolDefinition::new(
-                "get_weather".into(),
-                "Get the weather".into(),
-                json!({"type": "object", "properties": {}}),
-            )]),
-            Some(ToolChoice::Specific("get_weather".into())),
+            Some(vec![&tool]),
+            Some(&choice),
         );
 
         let config = test_config();

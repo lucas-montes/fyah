@@ -22,7 +22,7 @@ use std::fmt::{Debug, Display};
 use reqwest::Method;
 use tokio::process::Command;
 
-use crate::context::{ContentBlock, Message, Prompt, SessionContext, SystemBlock, ToolCall};
+use crate::context::{ContentBlock, Message, Prompt, SessionContext, ToolCall};
 use crate::llm::client::LlmClient;
 use crate::llm::config::Binding;
 use crate::llm::formats::ports::DynProvider;
@@ -119,39 +119,37 @@ pub async fn run_agent_loop(
         )
     };
 
+    // Owned watch receivers for this run; the guards they produce are always
+    // scoped to synchronous extraction and dropped before any await.
+    let parts_rx = session.config().loop_parts();
+    let hooks_rx = session.config().loop_hooks();
+
     for _ in 0..max_iterations {
         // Turn-boundary check: react to a pending cancel without waiting for
         // the next await point inside a stage.
         stop_if_cancelled(cancelation).await?;
 
-        // Resolve this turn's stages and their hooks from the watches in one
-        // synchronous pass. Parts are `Copy`; hook sets are shared behind
-        // `Arc`, so this is refcount bumps, not deep clones. Reloads apply at
-        // the next turn.
-        let mut stages = Vec::with_capacity(order.len());
-        {
-            let parts = session.config().loop_parts();
-            let hooks = session.config().loop_hooks();
-            let registry = parts.borrow();
-            let hook_sets = hooks.borrow();
-            for name in order.names() {
-                let Some(part) = registry.get(name) else {
-                    return Err(RunError::Config(format!(
-                        "loop part {name:?} is not defined"
-                    )));
-                };
-                stages.push((name, *part, hook_sets.get(name).cloned()));
-            }
-        }
-
         // Run the pipeline over fresh per-turn state, weaving each stage's
-        // pre/post hooks around it.
+        // pre/post hooks around it. Parts resolve by name per turn, so
+        // reloads apply at the next turn.
         let mut turn = TurnState::default();
-        for (name, part, hook_set) in &stages {
-            if let Some(hook_set) = hook_set {
-                // Pre hooks gate the stage: a failure skips it (the turn then
-                // fails through the usual prerequisite path downstream).
-                match hooks::run_hooks(&hook_set.pre, name, "pre", cancelation).await {
+        for name in order.names() {
+            let part = {
+                let registry = parts_rx.borrow();
+                *registry
+                    .get(name)
+                    .ok_or_else(|| RunError::Config(format!("loop part {name:?} is not defined")))?
+            };
+
+            // Pre hooks gate the stage: a failure skips it (the turn then
+            // fails through the usual prerequisite path downstream). The jobs
+            // are copied out of the borrowed set synchronously.
+            let pre = {
+                let compiled = hooks_rx.borrow();
+                compiled.get(name).map(|set| hooks::jobs(&set.pre))
+            };
+            if let Some(pre) = pre {
+                match hooks::run_hooks(&pre, name, "pre", cancelation).await {
                     Ok(()) => {}
                     Err(HookError::Failed(reason)) => {
                         tracing::warn!(part = name, %reason, "pre hook failed; skipping part");
@@ -162,12 +160,16 @@ pub async fn run_agent_loop(
                 }
             }
 
-            run_part(part, client, session, binding, cancelation, &mut turn).await?;
+            run_part(&part, client, session, binding, cancelation, &mut turn).await?;
 
-            if let Some(hook_set) = hook_set {
-                // Post hooks observe the stage: a failure flips the successful
-                // stage into a failure for transition purposes.
-                match hooks::run_hooks(&hook_set.post, name, "post", cancelation).await {
+            // Post hooks observe the stage: a failure flips the successful
+            // stage into a failure for transition purposes.
+            let post = {
+                let compiled = hooks_rx.borrow();
+                compiled.get(name).map(|set| hooks::jobs(&set.post))
+            };
+            if let Some(post) = post {
+                match hooks::run_hooks(&post, name, "post", cancelation).await {
                     Ok(()) => {}
                     Err(HookError::Failed(reason)) => {
                         return Err(RunError::Hook(format!(
@@ -196,13 +198,6 @@ enum Order {
 }
 
 impl Order {
-    fn len(&self) -> usize {
-        match self {
-            Order::Default => parts::DEFAULT_PIPELINE.len(),
-            Order::Custom(names) => names.len(),
-        }
-    }
-
     fn names(&self) -> Names<'_> {
         match self {
             Order::Default => Names::Default(parts::DEFAULT_PIPELINE.iter()),
@@ -242,13 +237,16 @@ async fn stop_if_cancelled(cancelation: &CancellationGuard) -> Result<(), RunErr
 /// Everything one agentic turn produces, threaded through the pipeline.
 ///
 /// All fields are owned, so any part can borrow the session freely between
-/// stages; prerequisites are checked at dispatch time.
+/// stages; prerequisites are checked at dispatch time. The request prompt is
+/// deliberately absent: it is shape-only and assembled inside the send stage,
+/// living just long enough to encode the wire request.
 #[derive(Default)]
 struct TurnState {
-    /// Wire-format provider built by the prompt part.
+    /// Wire-format provider built by the build-prompt part.
     provider: Option<Box<dyn DynProvider>>,
-    /// Assembled request prompt.
-    prompt: Option<Prompt>,
+    /// Tool selection chosen by the build-prompt part, applied when the send
+    /// stage assembles the prompt.
+    tool_selection: Option<ToolSelection>,
     /// Raw response bytes from the send part.
     raw: Option<Vec<u8>>,
     /// Parsed assistant message from the parse part.
@@ -287,22 +285,61 @@ async fn run_part(
 ) -> Result<(), RunError> {
     match part {
         Part::BuildPromptFromAgent => {
-            build_prompt(session, binding, ToolSelection::AllowList, turn)
+            resolve_binding(session, binding, ToolSelection::AllowList, turn)
         }
-        Part::BuildPromptAllTools => build_prompt(session, binding, ToolSelection::All, turn),
+        Part::BuildPromptAllTools => resolve_binding(session, binding, ToolSelection::All, turn),
         Part::SendRequest => {
             let Some(provider) = turn.provider.as_ref() else {
                 return turn.prerequisite("send_request", "prompt");
             };
-            let Some(prompt) = turn.prompt.as_ref() else {
+            let Some(selection) = turn.tool_selection else {
                 return turn.prerequisite("send_request", "prompt");
             };
-            // The transport is interruptible: a soft or hard cancel drops the
-            // in-flight request and discards the partial turn.
+
+            // Assemble the shape-only prompt and encode the wire request.
+            // Every borrow — conversation, agent config, tool definitions —
+            // ends inside this block: nothing crosses the await below, and
+            // nothing was cloned. The encoded body is owned by the builder.
+            let request = {
+                let view = session.config();
+                let llm = view.llm();
+                let agent = llm.get_agent(binding.agent).ok_or_else(|| {
+                    RunError::Config(format!("unknown agent {:?}", binding.agent))
+                })?;
+                let system = agent.system_prompt().map(std::borrow::Cow::Borrowed);
+                let tools_rx = view.tools();
+                let registry = tools_rx.borrow();
+                let tools = match selection {
+                    ToolSelection::AllowList => {
+                        let mut tools = Vec::with_capacity(agent.tools().len());
+                        for name in agent.tools() {
+                            match registry.definition(name) {
+                                Some(definition) => tools.push(definition),
+                                None => tracing::warn!(
+                                    tool = %name,
+                                    "unknown tool in allow-list; skipping"
+                                ),
+                            }
+                        }
+                        tools
+                    }
+                    ToolSelection::All => registry.all_definitions().iter().collect(),
+                };
+                let prompt = Prompt::new(
+                    system,
+                    session.conversation(),
+                    (!tools.is_empty()).then_some(tools),
+                    None,
+                );
+                let request = client.create_request(Method::POST, provider.url());
+                provider.create_request(&prompt, request)
+            };
+
+            // Transport-only await: interruptible.
             let raw = tokio::select! {
                 _ = cancelation.soft_cancelled() => return Err(RunError::Cancelled),
                 _ = cancelation.hard_cancelled() => return Err(RunError::Aborted),
-                raw = send_request(client, provider.as_ref(), prompt) => raw?,
+                raw = transmit(client, request) => raw?,
             };
             turn.raw = Some(raw);
             Ok(())
@@ -336,15 +373,11 @@ async fn run_part(
     }
 }
 
-/// Resolve the turn's request from config: read the agent/provider/model
-/// straight out of the watch borrows, resolve the advertised tool
-/// definitions from the precomputed registry set, build the provider, and
-/// assemble the prompt over the current conversation.
-///
-/// Entirely synchronous — no config value is ever cloned to cross an await,
-/// because nothing here awaits. The only per-turn string is the system
-/// prompt moving into the owned prompt IR.
-fn build_prompt(
+/// Resolve the turn's provider from config: read the agent/provider/model
+/// straight out of the watch borrows and build the wire provider. Entirely
+/// synchronous — nothing is cloned to cross an await. The prompt itself is
+/// assembled later, inside the send stage, from references.
+fn resolve_binding(
     session: &mut SessionContext,
     binding: &Binding<'_>,
     selection: ToolSelection,
@@ -352,9 +385,12 @@ fn build_prompt(
 ) -> Result<(), RunError> {
     let view = session.config();
     let llm = view.llm();
-    let agent = llm
-        .get_agent(binding.agent)
-        .ok_or_else(|| RunError::Config(format!("unknown agent {:?}", binding.agent)))?;
+    if llm.get_agent(binding.agent).is_none() {
+        return Err(RunError::Config(format!(
+            "unknown agent {:?}",
+            binding.agent
+        )));
+    }
     let provider_cfg = llm
         .get_provider(binding.provider)
         .ok_or_else(|| RunError::Config(format!("unknown provider {:?}", binding.provider)))?;
@@ -362,47 +398,24 @@ fn build_prompt(
         .get_model(binding.model)
         .ok_or_else(|| RunError::Config(format!("unknown model {:?}", binding.model)))?;
 
-    // Advertisable tool definitions, cloned out of the precomputed set (the
-    // tools receiver is an owned clone, so its borrow never touches the
-    // session).
-    let tools_rx = view.tools();
-    let definitions = {
-        let registry = tools_rx.borrow();
-        match selection {
-            ToolSelection::AllowList => registry.definitions_for(agent.tools()),
-            ToolSelection::All => registry.all_definitions().to_vec(),
-        }
-    };
-    let tools = (!definitions.is_empty()).then_some(definitions);
-
     turn.provider = session
         .providers()
         .build(binding.provider, provider_cfg, model_cfg)
         .map_err(|err| RunError::Build(err.to_string()))
         .map(Some)?;
-
-    let system = agent.system_prompt().map(|text| {
-        vec![SystemBlock::Text {
-            text: text.to_string(),
-        }]
-    });
-    turn.prompt = Some(Prompt::new(system, session.conversation(), tools, None));
+    turn.tool_selection = Some(selection);
     Ok(())
 }
 
-/// Send the assembled prompt and return the raw response bytes. Pure
-/// transport: touches only the client, the built provider, and the prompt.
+/// Transmit the encoded request and return the raw response bytes.
 ///
 /// # Errors
 ///
 /// Returns [`RunError::Request`] when the HTTP round-trip fails.
-async fn send_request(
+async fn transmit(
     client: &impl LlmClient,
-    provider: &dyn DynProvider,
-    prompt: &Prompt,
+    request: reqwest::RequestBuilder,
 ) -> Result<Vec<u8>, RunError> {
-    let request = client.create_request(Method::POST, provider.url());
-    let request = provider.create_request(prompt, request);
     let response = client
         .send_request(request)
         .await

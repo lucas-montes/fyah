@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use crate::context::ToolDefinition;
 
@@ -72,26 +71,11 @@ impl ToolRegistry {
         self.commands.get(name).map(String::as_str)
     }
 
-    /// Tool definitions for an agent's allow-list of names, in allow-list
-    /// order. Unknown names are warn + skipped; a name resolving to a tool
-    /// that cannot be advertised is silently skipped.
-    /// Definitions for an agent's allow-list of names, in allow-list order.
-    /// Clones out of the precomputed set — no re-serialization per call.
-    /// Unknown names are warn + skipped; a name resolving to a tool that
-    /// cannot be advertised is silently skipped.
-    pub fn definitions_for(&self, allow: &[String]) -> Vec<ToolDefinition> {
-        allow
-            .iter()
-            .filter_map(
-                |name| match self.definitions.iter().find(|d| d.name() == name) {
-                    Some(definition) => Some(definition.clone()),
-                    None => {
-                        warn!(tool = %name, "unknown tool in allow-list; skipping");
-                        None
-                    }
-                },
-            )
-            .collect()
+    /// The precomputed definition for an allow-listed name. Unknown names
+    /// return `None` (callers warn + skip); a name resolving to a tool that
+    /// cannot be advertised also returns `None`.
+    pub fn definition(&self, name: &str) -> Option<&ToolDefinition> {
+        self.definitions.iter().find(|d| d.name() == name)
     }
 
     /// Every advertisable definition, in registry order.
@@ -492,21 +476,25 @@ mod tests {
         assert_eq!(registry.command_for("read_file"), Some("execute_read_file"));
         assert_eq!(registry.command_for("shell"), None);
 
-        // Definitions follow allow-list order; unknown names are skipped.
-        let definitions = registry.definitions_for(&[
-            "read_file".to_string(),
-            "nope".to_string(),
-            "shell".to_string(),
-        ]);
+        // Definitions resolve by name; unknown names are None (callers warn).
         assert_eq!(
-            definitions
+            registry.definition("read_file").map(|d| d.name()),
+            Some("read_file")
+        );
+        assert_eq!(
+            registry.definition("shell").map(|d| d.name()),
+            Some("shell")
+        );
+        assert_eq!(registry.definition("nope"), None);
+
+        // Every advertisable definition, in registry order.
+        assert_eq!(
+            registry
+                .all_definitions()
                 .iter()
                 .map(|d| d.name().to_string())
                 .collect::<Vec<_>>(),
-            ["read_file", "shell"]
+            ["shell", "read_file"]
         );
-
-        // An empty allow-list exposes no tools.
-        assert!(registry.definitions_for(&[]).is_empty());
     }
 }
