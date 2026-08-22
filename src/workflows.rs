@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::context::{Message, SessionContext};
-use crate::llm::{Binding, LlmClient, run_agent_loop};
+use crate::llm::{Binding, LlmClient, RunError, run_agent_loop};
 use crate::runtime::CancellationGuard;
 
 /// Name of the terminal state. A step may not be named `done`; `initial` and
@@ -741,10 +741,18 @@ impl<'a, Mode> StepContext<'a, Mode> {
             warn!("step has no agent binding; running as stub");
             return StepOutcome::Success;
         };
-        match run_agent_loop(client, self.session, binding).await {
+        match run_agent_loop(client, self.session, binding, self.cancelation).await {
             Ok(()) => {
                 debug!("agent loop finished");
                 StepOutcome::Success
+            }
+            Err(RunError::Cancelled) => {
+                debug!("agent loop cancelled");
+                StepOutcome::Cancelled
+            }
+            Err(RunError::Aborted) => {
+                debug!("agent loop aborted");
+                StepOutcome::Aborted
             }
             Err(err) => {
                 error!(%err, "agent loop failed");

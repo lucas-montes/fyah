@@ -27,6 +27,7 @@ use crate::llm::client::LlmClient;
 use crate::llm::config::Binding;
 use crate::llm::formats::ports::DynProvider;
 use crate::llm::parts::{self, Part};
+use crate::runtime::CancellationGuard;
 use crate::tools::Tool;
 
 /// Why an agent turn (or the loop around it) failed.
@@ -42,6 +43,10 @@ pub enum RunError {
     Parse(crate::llm::formats::PortsError),
     /// A pipeline stage ran before its prerequisite produced output.
     Pipeline(String),
+    /// A soft cancel arrived mid-turn; the partial turn was discarded.
+    Cancelled,
+    /// A hard cancel arrived mid-turn; the partial turn was discarded.
+    Aborted,
     /// The agent never produced a final answer within its iteration budget.
     Exhausted,
 }
@@ -54,6 +59,8 @@ impl Display for RunError {
             Self::Request(err) => write!(f, "request error: {err}"),
             Self::Parse(err) => write!(f, "response parse error: {err}"),
             Self::Pipeline(msg) => write!(f, "pipeline error: {msg}"),
+            Self::Cancelled => write!(f, "cancelled"),
+            Self::Aborted => write!(f, "aborted"),
             Self::Exhausted => {
                 write!(
                     f,
@@ -74,16 +81,22 @@ impl std::error::Error for RunError {}
 /// tool registry and both the assistant message and its results are recorded
 /// before the next turn sees them.
 ///
+/// Cancellation is checked at every await point (the transport round-trip and
+/// each tool process) plus once per turn boundary: a soft cancel stops
+/// progress cooperatively ([`RunError::Cancelled`], partial turn discarded),
+/// a hard cancel abandons it immediately ([`RunError::Aborted`]).
+///
 /// # Errors
 ///
 /// Returns [`RunError`] when the binding cannot be resolved, the provider
 /// cannot be built, a request or response fails, a stage is missing its
-/// prerequisite output, or the agent exhausts its `max_iterations` budget
-/// while still requesting tool calls.
+/// prerequisite output, the run is cancelled or aborted, or the agent
+/// exhausts its `max_iterations` budget while still requesting tool calls.
 pub async fn run_agent_loop(
     client: &impl LlmClient,
     session: &mut SessionContext,
     binding: &Binding<'_>,
+    cancelation: &CancellationGuard,
 ) -> Result<(), RunError> {
     // Copy the budget out of the watch borrow — a `watch::Ref` guard is never
     // held across an `.await`.
@@ -95,6 +108,10 @@ pub async fn run_agent_loop(
         .max_iterations();
 
     for _ in 0..max_iterations {
+        // Turn-boundary check: react to a pending cancel without waiting for
+        // the next await point inside a stage.
+        stop_if_cancelled(cancelation).await?;
+
         // Resolve this turn's pipeline from the registry. Copied out of the
         // watch borrow synchronously; reloads apply at the next turn.
         let pipeline = {
@@ -117,7 +134,7 @@ pub async fn run_agent_loop(
         // Run the pipeline over fresh per-turn state.
         let mut turn = TurnState::default();
         for part in &pipeline {
-            run_part(part, client, session, binding, &mut turn).await?;
+            run_part(part, client, session, binding, cancelation, &mut turn).await?;
         }
 
         if turn.tool_calls.is_empty() {
@@ -126,6 +143,16 @@ pub async fn run_agent_loop(
     }
 
     Err(RunError::Exhausted)
+}
+
+/// Stop immediately if a cancel is already pending. Both futures are polled
+/// once against an always-ready third branch, so this never blocks.
+async fn stop_if_cancelled(cancelation: &CancellationGuard) -> Result<(), RunError> {
+    tokio::select! {
+        _ = cancelation.soft_cancelled() => Err(RunError::Cancelled),
+        _ = cancelation.hard_cancelled() => Err(RunError::Aborted),
+        _ = std::future::ready(()) => Ok(()),
+    }
 }
 
 /// Everything one agentic turn produces, threaded through the pipeline.
@@ -171,6 +198,7 @@ async fn run_part(
     client: &impl LlmClient,
     session: &mut SessionContext,
     binding: &Binding<'_>,
+    cancelation: &CancellationGuard,
     turn: &mut TurnState,
 ) -> Result<(), RunError> {
     match part {
@@ -185,7 +213,14 @@ async fn run_part(
             let Some(prompt) = turn.prompt.as_ref() else {
                 return turn.prerequisite("send_request", "prompt");
             };
-            turn.raw = Some(send_request(client, provider.as_ref(), prompt).await?);
+            // The transport is interruptible: a soft or hard cancel drops the
+            // in-flight request and discards the partial turn.
+            let raw = tokio::select! {
+                _ = cancelation.soft_cancelled() => return Err(RunError::Cancelled),
+                _ = cancelation.hard_cancelled() => return Err(RunError::Aborted),
+                raw = send_request(client, provider.as_ref(), prompt) => raw?,
+            };
+            turn.raw = Some(raw);
             Ok(())
         }
         Part::ParseResponse => {
@@ -204,7 +239,7 @@ async fn run_part(
             if turn.assistant.is_none() {
                 return turn.prerequisite("run_tools", "parse_response");
             }
-            turn.tool_results = run_tools(session, &turn.tool_calls).await;
+            turn.tool_results = run_tools(session, &turn.tool_calls, cancelation).await?;
             Ok(())
         }
         Part::UpdateContext => {
@@ -307,12 +342,18 @@ fn parse_response(provider: &dyn DynProvider, raw: &[u8]) -> Result<Message, Run
 }
 
 /// Execute every requested tool call against the registry, in call order.
-async fn run_tools(session: &mut SessionContext, calls: &[ToolCall]) -> Vec<Message> {
+/// Each command is interruptible; a cancel discards the remaining calls and
+/// the partial turn.
+async fn run_tools(
+    session: &mut SessionContext,
+    calls: &[ToolCall],
+    cancelation: &CancellationGuard,
+) -> Result<Vec<Message>, RunError> {
     let mut results = Vec::with_capacity(calls.len());
     for call in calls {
-        results.push(execute_tool(session, call).await);
+        results.push(execute_tool(session, call, cancelation).await?);
     }
-    results
+    Ok(results)
 }
 
 /// Record the turn in the session conversation: the assistant message first,
@@ -332,7 +373,11 @@ enum Execution {
     Custom { command: String, args: String },
 }
 
-async fn execute_tool(session: &mut SessionContext, call: &ToolCall) -> Message {
+async fn execute_tool(
+    session: &mut SessionContext,
+    call: &ToolCall,
+    cancelation: &CancellationGuard,
+) -> Result<Message, RunError> {
     let execution = {
         let tools = session.view().tools();
         let registry = tools.borrow();
@@ -354,43 +399,52 @@ async fn execute_tool(session: &mut SessionContext, call: &ToolCall) -> Message 
         }
     }; // watch Ref dropped here, before any await
 
-    let (text, is_error) = match execution {
-        Some(Execution::Shell(command)) => run_shell(&command).await,
-        Some(Execution::Custom { command, args }) => run_custom(call.name(), &command, &args).await,
+    // The process is interruptible: a cancel drops the future, and
+    // `kill_on_drop` terminates the child.
+    let outcome = match execution {
+        Some(Execution::Shell(command)) => {
+            capture(cancelation, Command::new("sh").arg("-c").arg(command)).await?
+        }
+        Some(Execution::Custom { command, args }) => {
+            capture(
+                cancelation,
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .env("FYAH_TOOL_NAME", call.name())
+                    .env("FYAH_TOOL_ARGS", args),
+            )
+            .await?
+        }
         None => (
             format!("unknown or unsupported tool {:?}", call.name()),
             true,
         ),
     };
+    let (text, is_error) = outcome;
 
     tracing::debug!(tool = %call.name(), is_error, "tool executed");
 
-    Message::tool_result(
+    Ok(Message::tool_result(
         call.id().to_string(),
         vec![ContentBlock::Text { text }],
         is_error,
-    )
-}
-
-async fn run_shell(command: &str) -> (String, bool) {
-    capture(Command::new("sh").arg("-c").arg(command)).await
-}
-
-async fn run_custom(name: &str, command: &str, args: &str) -> (String, bool) {
-    capture(
-        Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .env("FYAH_TOOL_NAME", name)
-            .env("FYAH_TOOL_ARGS", args),
-    )
-    .await
+    ))
 }
 
 /// Run a command and collect `(combined output, is_error)`; the process is
-/// killed on drop so cancellation (a later phase) terminates it mid-flight.
-async fn capture(command: &mut Command) -> (String, bool) {
-    match command.kill_on_drop(true).output().await {
+/// killed on drop so a cancellation that drops this future terminates it
+/// mid-flight. Both cancel tokens are selected against while it runs.
+async fn capture(
+    cancelation: &CancellationGuard,
+    command: &mut Command,
+) -> Result<(String, bool), RunError> {
+    let output = tokio::select! {
+        _ = cancelation.soft_cancelled() => return Err(RunError::Cancelled),
+        _ = cancelation.hard_cancelled() => return Err(RunError::Aborted),
+        output = command.kill_on_drop(true).output() => output,
+    };
+    Ok(match output {
         Ok(output) => {
             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -403,5 +457,5 @@ async fn capture(command: &mut Command) -> (String, bool) {
             (text, !output.status.success())
         }
         Err(err) => (err.to_string(), true),
-    }
+    })
 }

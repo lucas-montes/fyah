@@ -11,7 +11,8 @@ use std::sync::Mutex;
 
 use fyah::config::{Config, ConfigStore};
 use fyah::context::{Message, Session, SessionContext};
-use fyah::llm::{Binding, LlmClient, OpenAIFactory, ProviderRegistry, run_agent_loop};
+use fyah::llm::{Binding, LlmClient, OpenAIFactory, ProviderRegistry, RunError, run_agent_loop};
+use fyah::runtime::CancellationGuard;
 
 const FINAL_RESPONSE: &str = r#"{
     "id": "chatcmpl-test",
@@ -192,9 +193,14 @@ async fn loop_executes_tool_call_then_finishes_on_final_answer() {
         model: "fake",
     };
 
-    run_agent_loop(&client, &mut session, &binding)
-        .await
-        .expect("loop finishes within budget");
+    run_agent_loop(
+        &client,
+        &mut session,
+        &binding,
+        &CancellationGuard::default(),
+    )
+    .await
+    .expect("loop finishes within budget");
 
     let conversation = session.conversation();
     assert_eq!(
@@ -251,9 +257,14 @@ async fn loop_part_override_selects_advertised_tools() {
         model: "fake",
     };
 
-    run_agent_loop(&client, &mut session, &binding)
-        .await
-        .expect("loop finishes");
+    run_agent_loop(
+        &client,
+        &mut session,
+        &binding,
+        &CancellationGuard::default(),
+    )
+    .await
+    .expect("loop finishes");
 
     // The all-tools prompt part ignores the agent's allow-list and advertises
     // everything the registry can offer.
@@ -287,17 +298,100 @@ async fn hot_reload_applies_to_the_next_turn() {
 
     // Turn 1: built-in prompt part — strict allow-list.
     let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
-    run_agent_loop(&client, &mut session, &binding)
-        .await
-        .expect("first turn finishes");
+    run_agent_loop(
+        &client,
+        &mut session,
+        &binding,
+        &CancellationGuard::default(),
+    )
+    .await
+    .expect("first turn finishes");
     assert_eq!(client.advertised_tools(), vec![vec!["shell"]]);
 
     // Hot reload: publish the overridden parts; the next turn picks them up.
     store.apply(hot).expect("hot config converts");
 
     let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
-    run_agent_loop(&client, &mut session, &binding)
-        .await
-        .expect("second turn finishes");
+    run_agent_loop(
+        &client,
+        &mut session,
+        &binding,
+        &CancellationGuard::default(),
+    )
+    .await
+    .expect("second turn finishes");
     assert_eq!(client.advertised_tools(), vec![vec!["read_file", "shell"]]);
+}
+
+/// Test double whose transport never completes: the loop can only escape via
+/// cancellation.
+#[derive(Debug)]
+struct HangingClient {
+    inner: reqwest::Client,
+}
+
+impl LlmClient for HangingClient {
+    fn create_request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        self.inner.request(method, url)
+    }
+
+    fn send_request(
+        &self,
+        _request: reqwest::RequestBuilder,
+    ) -> impl std::future::Future<Output = Result<impl AsRef<[u8]>, fyah::llm::Error>> {
+        std::future::pending::<Result<Vec<u8>, fyah::llm::Error>>()
+    }
+}
+
+fn test_session() -> SessionContext {
+    let path = write_test_config("cancel", "");
+    let config = load_config(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let store = ConfigStore::new(config).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    SessionContext::new(view, providers, Session::new())
+}
+
+const BINDING: Binding = Binding {
+    agent: "primary",
+    provider: "openai",
+    model: "fake",
+};
+
+#[tokio::test]
+async fn soft_cancel_mid_send_stops_the_loop_and_discards_the_turn() {
+    let mut session = test_session();
+    let cancelation = CancellationGuard::default();
+    cancelation.soft_cancel();
+
+    let client = HangingClient {
+        inner: reqwest::Client::new(),
+    };
+
+    let outcome = run_agent_loop(&client, &mut session, &BINDING, &cancelation).await;
+
+    assert!(matches!(outcome, Err(RunError::Cancelled)));
+    // Nothing was recorded: the partial turn is discarded.
+    assert!(session.conversation().is_empty());
+}
+
+#[tokio::test]
+async fn hard_cancel_mid_send_aborts_immediately() {
+    let mut session = test_session();
+    let cancelation = CancellationGuard::default();
+    cancelation.hard_cancel();
+
+    let client = HangingClient {
+        inner: reqwest::Client::new(),
+    };
+
+    let outcome = run_agent_loop(&client, &mut session, &BINDING, &cancelation).await;
+
+    assert!(matches!(outcome, Err(RunError::Aborted)));
+    assert!(session.conversation().is_empty());
 }
