@@ -2,10 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::middlewares::{
-    ContextBuilderCfg, ContextCompactionCfg, PromptBuilderCfg, ToolsFilterCfg,
-};
-
 use super::formats::{AnthropicConfig, OllamaConfig, OpenAIConfig};
 
 /// A fully-resolved agent/provider/model combo for one step.
@@ -28,14 +24,6 @@ pub struct Agent {
     /// Default system prompt for the agent; the runtime may override it.
     #[serde(default)]
     system_prompt: Option<String>,
-    #[serde(default)]
-    prompt_builder: PromptBuilderCfg,
-    #[serde(default)]
-    context_builder: ContextBuilderCfg,
-    #[serde(default)]
-    context_compaction: ContextCompactionCfg,
-    #[serde(default)]
-    tools_filter: ToolsFilterCfg,
     /// Strict allow-list of tool names from the `[tools]` catalog. Empty means
     /// the agent exposes no tools.
     #[serde(default)]
@@ -51,18 +39,6 @@ impl Agent {
     }
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
-    }
-    pub fn prompt_builder(&self) -> &PromptBuilderCfg {
-        &self.prompt_builder
-    }
-    pub fn context_builder(&self) -> &ContextBuilderCfg {
-        &self.context_builder
-    }
-    pub fn context_compaction(&self) -> &ContextCompactionCfg {
-        &self.context_compaction
-    }
-    pub fn tools_filter(&self) -> &ToolsFilterCfg {
-        &self.tools_filter
     }
     pub fn tools(&self) -> &[String] {
         &self.tools

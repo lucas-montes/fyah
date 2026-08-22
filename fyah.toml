@@ -26,16 +26,12 @@ format = "openai"
 model = "phi3:mini"
 temperature = 0.3
 
-# ── Agents: middleware bundle + system prompt + strict tool allow-list. ──
+# ── Agents: system prompt + strict tool allow-list + optional pipeline. ──
 # tools = [...] restricts the [tools] catalog to the listed names; empty means
 # no tools. The system prompt is a default the runtime may override.
 [agents.primary]
 system_prompt = "You are Fyah, an AI coding assistant."
 max_iterations = 25
-prompt_builder = "default"
-context_builder = "default"
-context_compaction = "default"
-tools_filter = "default"
 tools = ["shell", "code_interpreter", "file_search", "read_file", "filesystem"]
 
 # ── Tools catalog: what fyah can expose. Agents pick from it by name. ──

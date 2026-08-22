@@ -2,17 +2,8 @@ use crate::config::ConfigView;
 use crate::llm::ProviderRegistry;
 use crate::workflows::WorkflowPlan;
 
-use super::{
-    history::{Branch, Session},
-    message::Message,
-};
-
-#[derive(Debug)]
-pub struct AgentContext {
-    view: ConfigView,
-    providers: ProviderRegistry,
-    conversation: Branch<Message>,
-}
+use super::history::Session;
+use super::message::Message;
 
 #[derive(Debug)]
 pub struct SessionContext {
@@ -78,11 +69,5 @@ impl SessionContext {
 
     pub fn append_messages(&mut self, messages: &mut Vec<Message>) {
         self.conversation.append(messages);
-    }
-
-    /// Merge an agent context's conversation back into the session.
-    pub fn merge(&mut self, agent_context: &AgentContext) {
-        // TODO: implement actual conversation merging
-        let _ = agent_context;
     }
 }

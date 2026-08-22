@@ -1,13 +1,9 @@
 {
   "agents": {
     "primary": {
-      "context_builder": "default",
-      "context_compaction": "default",
       "max_iterations": 25,
-      "prompt_builder": "default",
       "system_prompt": "You are Fyah, an AI coding assistant.",
-      "tools": [],
-      "tools_filter": "default"
+      "tools": []
     }
   },
   "models": {

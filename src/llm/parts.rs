@@ -38,13 +38,6 @@ pub enum Part {
     UpdateContext,
 }
 
-impl Part {
-    /// Whether this part assembles the turn's prompt.
-    fn is_build_prompt(&self) -> bool {
-        matches!(self, Part::BuildPromptFromAgent | Part::BuildPromptAllTools)
-    }
-}
-
 /// Raw `[loop_parts]` configuration section: named part definitions.
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Config {

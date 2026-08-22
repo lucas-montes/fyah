@@ -96,11 +96,13 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
 - **Providers are independent from models.** `[providers.<name>]` is a bare endpoint
   (`url`, `api_key`). The static `ProviderRegistry` (built once in `main`, keyed
   `openai`/`ollama`/`anthropic`) supplies the client factories.
-- **Agents are middleware-only** (prompt builder / context builder / context compaction
-  / tools filter), decoupled from provider and model, plus a `system_prompt` (config
-  default, runtime-overridable) and a **strict tools allow-list** (`tools = [...]`;
+- **Agents are behavior, not middleware.** An agent carries a `system_prompt` (config
+  default, runtime-overridable), a **strict tools allow-list** (`tools = [...]`;
   empty = the agent exposes **no** tools; unknown names are warn + skip — naming
-  scheme: built-ins use their `[tools]` toggle keys, custom = its `name`, mcp = its `name`).
+  scheme: built-ins use their `[tools]` toggle keys, custom = its `name`, mcp = its
+  `name`), and an optional `loop` pipeline order — see [agent-loop.md](agent-loop.md).
+  (The old prompt/context-builder middleware config was removed; per-stage behavior
+  is now selected through loop parts.)
 - **Multiple named workflows; no built-in default.** Every workflow is
   config-defined; `--workflow <name>` (CLI default `"default"`) must name an
   existing workflow or startup aborts with `unknown workflow "<name>"` — no
@@ -170,10 +172,6 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
 - **Part variants**: one implementation per stage beyond the two prompt
   builders (no mock transport, context sliding/compaction, result redaction,
   custom stop conditions yet).
-- **Legacy middleware stubs**: the `Agent` fields
-  `prompt_builder`/`context_builder`/`context_compaction`/`tools_filter`
-  (and `src/llm/middlewares.rs`) predate the parts mechanism and are unused —
-  candidates for removal or reimplementation as parts.
 - **Binding follow-ups**: flags-based binding precedence and mid-run binding
   switching; binding validation is deliberately dropped (a missing/unknown binding
   warns + stubs rather than failing startup or reload).
@@ -182,8 +180,6 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
 - **Context-dir watcher + SCE integration**: the old watcher watched
   `config_path.parent()/context`; dropped in the `fs_watcher.rs` rewrite.
 - **HTTP input** (reserved) and the input-gate-agnostic transport.
-- **Unused scaffolding**: `SessionContext::merge`, `Branch`, `AgentContext`,
-  `src/map.rs` (self-contained lock-free-map experiment, referenced nowhere).
 
 ## Open design questions (thinking required)
 
