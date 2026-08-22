@@ -7,6 +7,7 @@ Discoverability index for the durable project memory in `context/`.
 | File | What it covers |
 |---|---|
 | [overview.md](overview.md) | Current architecture, config pipeline, reload, rationale, What works / What's left |
+| [agent-loop.md](agent-loop.md) | The agent loop in detail: parts pipeline, `[loop_parts]`/`[loop_hooks]`/agent `loop`, cancellation points, tool execution |
 | [config.md](config.md) | Config structure (TOML shape), workflow step model, structural validation (TryFrom) |
 | [glossary.md](glossary.md) | Canonical terms (built-in steps, backends, `DONE`, `WorkflowPlan`, structural validation, …) |
 | [sota-references.md](sota-references.md) | SOTA context-management reference notes (for the context-builder middleware) |
@@ -23,7 +24,8 @@ Discoverability index for the durable project memory in `context/`.
 | `src/workflows.rs` (step model, plan + conversion) | [config.md](config.md) → Workflow step model / Validation |
 | `src/runtime.rs` (executor) | [overview.md](overview.md) → Current architecture |
 | `src/config.rs`, `src/config_store.rs`, `src/fs_watcher.rs` | [overview.md](overview.md) → Current architecture / reload; [config.md](config.md) |
-| `src/llm/**` (runner, providers, DTOs) | [overview.md](overview.md) → What works today |
+| `src/llm/runner.rs`, `parts.rs`, `hooks.rs` (agent loop) | [agent-loop.md](agent-loop.md); [glossary.md](glossary.md) → Loop part / Loop hooks / RunError |
+| `src/llm/**` (providers, DTOs) | [overview.md](overview.md) → What works today |
 | `src/context/**` (IR messages, session) | [overview.md](overview.md) |
 
 ## Notes

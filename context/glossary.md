@@ -94,4 +94,37 @@ two stop the run.
 ## Input gate
 A watch the runtime drives with `accepts_input()` so external input sources (stdin,
 http) only read while a listening step runs. Two-stage Ctrl+C: soft cancels at step
-boundaries, hard aborts the in-flight step.
+boundaries **and at every agent-loop await point** (partial turns are discarded), hard
+aborts in-flight work immediately.
+
+## Loop part
+One configurable stage of the agent loop — a variant of the `Part` enum in
+`src/llm/parts.rs`, dispatched by `match` (no trait objects). Built-ins:
+`BuildPromptFromAgent`/`BuildPromptAllTools`, `SendRequest`, `ParseResponse`,
+`RunTools`, `UpdateContext`. Defined under `[loop_parts.<name>]`; user entries
+shadow the built-in names (`prompt`, `send_request`, `parse_response`,
+`run_tools`, `update_context`). Hot-reloadable; applies at the next turn.
+
+## Agent pipeline (loop order)
+The ordered list of loop-part names an agent runs per turn — `[agents.<name>]
+loop = [...]`. Absent means the built-in default order. Resolved through the
+loop registry once per turn; unknown names fail with a clean config error.
+
+## Loop hooks
+Per-part pre/post command hooks under `[loop_hooks.<part>]` (`src/llm/hooks.rs`)
+— distinct from parts: parts implement a stage, hooks observe/gate it. Run via
+`sh -c` with `FYAH_LOOP_PART`/`FYAH_HOOK_PHASE` exported. A failed pre hook
+skips its part; a failed post hook flips the stage to failure. Command backends
+only this pass; others rejected at startup.
+
+## Borrow-then-drop
+The rule for reading config inside async code: copy the needed values out of
+the `watch::Ref` guard inside a synchronous scope, drop the guard, then `.await`
+— a `watch::Ref` is never held across an await (it would block reloads).
+
+## RunError
+Why an agent turn failed (`src/llm/runner.rs`): `Config`, `Build`, `Request`,
+`Parse`, `Pipeline` (missing prerequisite output), `Hook` (post-hook failure),
+`Cancelled`/`Aborted` (soft/hard cancel mid-turn; partial turn discarded),
+`Exhausted` (still tool-calling past `max_iterations`). `run_agent_turn` maps
+these onto `StepOutcome`.

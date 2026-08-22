@@ -34,7 +34,13 @@ fyah.toml ──> Config::load (merge XDG → local → --config)        [parse]
             └─ view.workflow ─┘
                   │ plan_updates (whole map, precompiled)
                   ▼
-            Runtime  (walks active WorkflowPlan: resolve name → run step → transition)
+            Runtime  (follows the active WorkflowPlan hop by hop: resolve
+             │        name → run step → transition; while-let walk)
+             ▼
+            Agent loop  (per agent-involving step; see agent-loop.md)
+              pipeline of config-selected Parts (prompt → send → parse →
+              tools → record), per-part pre/post hooks, cancelled at every
+              await; hot-reloadable [loop_parts] / [loop_hooks] / agent `loop`
                   ▲
             FsWatcher owns the ConfigStore; reloads on disk change (same conversion,
             StoreError::Convert keeps last-good on error)
@@ -118,12 +124,18 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
 - **Custom `command` steps** run via `sh -c`; exit 0 ⇒ `Success`, non-zero ⇒
   `Failure`, killed on abort/timeout. `wasm`/`native` log "unsupported backend" ⇒
   `Failure` (modeled, not executed).
-- **Real LLM round-trip per step** (`src/llm/runner.rs`): `run_agent` borrows the
-  binding, builds a `DynProvider` via the registry, sends the chat request, parses the
-  assistant `Message`, and appends it to the session conversation. `plan`/`commit` push
-  a user line first; `implement`/`test`/custom-`llm` run silently. LLM/HTTP errors become
-  `StepOutcome::Failure`, driving the step's `on_failure` transition. A step without a
-  binding warns and keeps stub behavior.
+- **Real agent loop per step** (`src/llm/runner.rs`, detailed in
+  [agent-loop.md](agent-loop.md)): a pipeline of config-selected `Part`s —
+  prompt → send → parse → run tools → record context — repeated while the
+  model requests tool calls, bounded by the agent's `max_iterations`.
+  Tool calls really execute (shell; custom function tools via their retained
+  command). Parts come from the hot-reloadable `[loop_parts]` registry, order
+  from the agent's `loop` key, per-part pre/post command hooks from
+  `[loop_hooks]`; both reloads apply at the next turn. Soft/hard cancel is
+  selected at every await point and discards the partial turn.
+  LLM/HTTP errors become `StepOutcome::Failure`, driving the step's
+  `on_failure` transition. A step without a binding warns and keeps stub
+  behavior.
 - **Fail-fast startup validation (conversion)** (`ConfigStore::new` →
   `Parts::try_from` → `StartupError`): structural checks (initial, transition
   targets, step named `done`, empty command) with every problem listed;
@@ -133,31 +145,35 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
   config, loaded at startup (XDG → local → `--config`); the config-dependent
   fixture tests were removed with the old model (plan `workflows-rewrite` T01).
   The whole workflow runs for real against local Ollama.
-- Two-stage Ctrl+C cancellation (soft at step boundary, hard abort mid-step), input
-  gate watch so stdin is only read while a listening step (`plan`/`commit`) runs.
+- Two-stage Ctrl+C cancellation — soft drains at boundaries and mid-await
+  (the agent loop selects both tokens at every await), hard aborts in-flight;
+  input gate watch so stdin is only read while a listening step
+  (`plan`/`commit`) runs.
 - Config hot-reload with last-good-on-error and changed-part-only broadcast (the
   same `TryFrom<Config> for Parts` conversion backs startup and reload; an invalid
   reload ⇒ `StoreError::Convert`, last-good kept); all named
   workflows compile, re-select on reload, and the current step re-resolves by name
   (missing name ⇒ workflow completes; iteration budget resets).
 - IR message/prompt layer + per-provider wire DTOs + adapters for anthropic / ollama /
-  openai, factories registered in the registry, plus the `#[ignore]`d live Ollama test.
-- 17 tests passing (map, tools, llm dto serde, and config validation in
-  `tests/config_validation.rs` — a real integration test over the lib crate's
-  public API: valid configs are asserted verbatim against `tests/configs/`
-  JSON snapshots, invalid ones against their expected error lists),
-  `cargo clippy --all-targets` clean of errors
-  (33 pre-existing warnings in the lib target, none in the touched files).
+  openai, factories registered in the registry.
+- 34 tests passing — unit (tools registry, loop parts/hooks compile+dispatch,
+  llm dto serde), a fake-client end-to-end suite for the agent loop
+  (`tests/agent_loop.rs`: tool-call round-trip, part override, hot reload,
+  explicit pipeline order, both cancel flavors, hook failure policies), and
+  config validation (`tests/config_validation.rs` against `tests/configs/`
+  JSON snapshots). `cargo clippy --all-targets` clean of errors.
 
 ## What's left / gaps
 
-- **Tool execution**: `DefaultToolsFilter` is a stub; custom `command` tools and
-  built-ins are not run; the allow-list matching (`Tool::name()`) is unimplemented.
-- **Middleware implementations**: `DefaultPromptBuilder::build` is `todo!()`;
-  context builder/compaction and tools filter are placeholders (the `run_agent` runner
-  builds a minimal default prompt itself).
-- **Agentic loop**: the agent's `max_iterations` (single-turn per step today) and
-  tool-calling loop are not wired.
+- **Hook backends**: only `command` hooks run today; `llm`/`wasm`/`native`
+  hook backends are rejected at startup rather than failing silently.
+- **Part variants**: one implementation per stage beyond the two prompt
+  builders (no mock transport, context sliding/compaction, result redaction,
+  custom stop conditions yet).
+- **Legacy middleware stubs**: the `Agent` fields
+  `prompt_builder`/`context_builder`/`context_compaction`/`tools_filter`
+  (and `src/llm/middlewares.rs`) predate the parts mechanism and are unused —
+  candidates for removal or reimplementation as parts.
 - **Binding follow-ups**: flags-based binding precedence and mid-run binding
   switching; binding validation is deliberately dropped (a missing/unknown binding
   warns + stubs rather than failing startup or reload).
@@ -167,7 +183,7 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
   `config_path.parent()/context`; dropped in the `fs_watcher.rs` rewrite.
 - **HTTP input** (reserved) and the input-gate-agnostic transport.
 - **Unused scaffolding**: `SessionContext::merge`, `Branch`, `AgentContext`,
-  `src/map.rs` (dead until the agentic loop lands).
+  `src/map.rs` (self-contained lock-free-map experiment, referenced nowhere).
 
 ## Open design questions (thinking required)
 
@@ -182,8 +198,12 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
 
 ## References
 
+- [agent-loop.md](agent-loop.md) — the agent loop in detail: parts, hooks,
+  cancellation, tool execution.
 - `../NOTES.md` — historical architecture sketch; superseded by this document.
 - `sota-references.md` — SOTA context-management reference notes.
 - `plans/workflows-step-enum.md` — completed plan (tagged `Step` enum; all tasks
   done, validation report inside); `plans/workflows-rewrite.md` — predecessor;
-  `plans/runtime-rework-hooks.md` — active plan (runtime/hook rework; T00 done).
+  `plans/runtime-rework-hooks.md` — active plan (runtime/hook rework; T00 done;
+  its interceptor/session-persistence tasks predate and are partly superseded by
+  the parts/hooks design in agent-loop.md).
