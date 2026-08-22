@@ -108,13 +108,12 @@ impl<Client: LlmClient> Runtime<Client> {
     }
 
     /// Run the workflow until it completes, is cancelled, or exhausts its
-    /// iteration budget. Plan updates published on `plan_updates` are applied
-    /// at step boundaries: the step currently running finishes against the old
+    /// cycle budget. Plan updates published on `plan_updates` are applied at
+    /// step boundaries: the step currently running finishes against the old
     /// plan, the next one resolves against the new plan. Before each step the
     /// input watch reflects whether the current step accepts user input; after
     /// the loop it is set to `false`.
     pub async fn run(&mut self) {
-        let mut iterations = 0;
         let Some(mut plan) = self.session.get_plan(&self.active_workflow) else {
             warn!(
                 workflow = %self.active_workflow,
@@ -122,62 +121,21 @@ impl<Client: LlmClient> Runtime<Client> {
             );
             return;
         };
-//TODO: this loop and iterations counter doesn't make much sense, we should be following the plan. A while let Some(next_step) is more suiteable and reflects what we are doing better
-        loop {
-            // Apply the latest plan map, if one changed since the last step
-            // boundary. The watch coalesces reloads: only the newest map is
-            // ever applied, and the active workflow is re-selected from it.
-            if self
-                .session
-                .view()
-                .workflow()
-                .has_changed()
-                .unwrap_or(false)
-            {
-                let Some(next) = self.session.get_plan(&self.active_workflow) else {
-                    warn!(
-                        workflow = %self.active_workflow,
-                        "active workflow no longer defined; completing"
-                    );
-                    //TODO: should be stop? if the current active workflow doesn't exists anymore, do we want to stop? maybe this could be a config
-                    break;
-                };
 
-                plan = next;
-                iterations = 0;
-            }
-
-            if self.cancelation.is_soft_cancelled() {
-                info!("graceful shutdown requested at step boundary");
-                break;
-            }
-            if plan.max_iterations() > 0 && iterations >= plan.max_iterations() {
-                warn!(
-                    max_iterations = plan.max_iterations(),
-                    "max iterations reached"
-                );
-                break;
-            }
-
-            // Resolve the current step name against the (possibly reloaded)
-            // plan. A name that is no longer part of the plan terminates the
-            // workflow.
-            let Some(step) = plan.resolve(&self.current_step) else {
-                warn!(
-                    step = &self.current_step,
-                    "next step not found, workflow completed"
-                );
-                break;
-            };
-
-            // If the step expects user input, we notify the input source (stdin, http, …) via the watch.
-            // The step itself decides whether to consume user input; the channel is always handed over.
-            // After the loop, we set the watch to false to indicate that no step is currently running.
+        // Follow the plan: each hop resolves the cursor's step name against
+        // the (possibly reloaded) plan and advances to its transition target.
+        // A missing hop ends the walk. `hops` is a cycle guard for failure
+        // loops (e.g. on_failure back-edges), not a progress counter.
+        let mut hops: u16 = 0;
+        while let Some((name, step)) = self.next_hop(&mut plan, &mut hops) {
+            // If the step expects user input, we notify the input source
+            // (stdin, http, …) via the watch. The step itself decides whether
+            // to consume user input; the channel is always handed over.
             if self.input_tx.send(step.accepts_input()).is_err() {
                 error!("failed to notify input source about step input state");
-            };
+            }
 
-            info!(step = self.current_step, step_kind = %step, "step start");
+            info!(step = name, step_kind = %step, "step start");
             let outcome = run_step(
                 &self.client,
                 step,
@@ -186,11 +144,11 @@ impl<Client: LlmClient> Runtime<Client> {
                 &mut self.user_rx,
             )
             .await;
-            trace!(step = self.current_step, ?outcome, "step end");
+            trace!(step = name, ?outcome, "step end");
 
             // Transitions are step names from the plan the step just ran
             // against. `DONE` — or a name that no longer exists after a
-            // reload — completes the workflow.
+            // reload — ends the walk.
             let target = match outcome {
                 StepOutcome::Success => step.on_success().to_string(),
                 StepOutcome::Failure => step.on_failure().to_string(),
@@ -201,12 +159,64 @@ impl<Client: LlmClient> Runtime<Client> {
                 break;
             }
             self.current_step = target;
-            iterations += 1;
+            hops += 1;
         }
 
         if self.input_tx.send(false).is_err() {
             error!("failed to notify input source about step input state");
         }
+    }
+
+    /// Resolve one boundary of the walk: apply any reloaded plan, honor
+    /// cancellation and the cycle budget, then resolve the cursor's step name.
+    /// `None` ends the walk; the returned step borrows the plan so the caller
+    /// can read its transitions after running it.
+    fn next_hop<'p>(
+        &mut self,
+        plan: &'p mut crate::workflows::WorkflowPlan,
+        hops: &mut u16,
+    ) -> Option<(String, &'p crate::workflows::Step)> {
+        // Apply the latest plan map, if one changed since the last step
+        // boundary. The watch coalesces reloads: only the newest map is ever
+        // applied, and the active workflow is re-selected from it.
+        if self
+            .session
+            .view()
+            .workflow()
+            .has_changed()
+            .unwrap_or(false)
+        {
+            match self.session.get_plan(&self.active_workflow) {
+                Some(next) => {
+                    *plan = next;
+                    *hops = 0;
+                }
+                None => {
+                    warn!(
+                        workflow = %self.active_workflow,
+                        "active workflow no longer defined; completing"
+                    );
+                    //TODO: should be stop? if the current active workflow doesn't exists anymore, do we want to stop? maybe this could be a config
+                    return None;
+                }
+            }
+        }
+
+        if self.cancelation.is_soft_cancelled() {
+            info!("graceful shutdown requested at step boundary");
+            return None;
+        }
+        if plan.max_iterations() > 0 && *hops >= plan.max_iterations() {
+            warn!(
+                max_iterations = plan.max_iterations(),
+                "max iterations reached"
+            );
+            return None;
+        }
+
+        // A name that is no longer part of the (reloaded) plan ends the walk.
+        let step = plan.resolve(&self.current_step)?;
+        Some((self.current_step.clone(), step))
     }
 }
 
