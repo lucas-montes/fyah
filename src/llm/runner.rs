@@ -103,20 +103,19 @@ pub async fn run_agent_loop(
     cancelation: &CancellationGuard,
 ) -> Result<(), RunError> {
     // Copy the budget and the agent's pipeline order out of the watch borrow
-    // — a `watch::Ref` guard is never held across an `.await`.
-    let (max_iterations, pipeline_order) = {
-        let llm = session.view().llm();
+    // — a `watch::Ref` guard is never held across an `.await`. The built-in
+    // default order allocates nothing; a custom `loop` is owned once per run.
+    let (max_iterations, order) = {
+        let llm = session.config().llm();
         let agent = llm
             .get_agent(binding.agent)
             .ok_or_else(|| RunError::Config(format!("unknown agent {:?}", binding.agent)))?;
         (
             agent.max_iterations(),
-            agent.pipeline().map(<[String]>::to_vec).unwrap_or_else(|| {
-                parts::DEFAULT_PIPELINE
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect()
-            }),
+            match agent.pipeline() {
+                Some(pipeline) => Order::Custom(pipeline.to_vec()),
+                None => Order::Default,
+            },
         )
     };
 
@@ -125,65 +124,59 @@ pub async fn run_agent_loop(
         // the next await point inside a stage.
         stop_if_cancelled(cancelation).await?;
 
-        // Resolve this turn's pipeline and its hooks from the watches. Copied
-        // out synchronously; reloads apply at the next turn.
-        let stages = {
-            let receiver = session.view().loop_parts();
-            let registry = receiver.borrow();
-            let mut resolved = Vec::with_capacity(pipeline_order.len());
-            for name in &pipeline_order {
-                match registry.get(name) {
-                    Some(part) => resolved.push((name.as_str(), part.clone())),
-                    None => {
-                        return Err(RunError::Config(format!(
-                            "loop part {name:?} is not defined"
-                        )));
-                    }
-                }
+        // Resolve this turn's stages and their hooks from the watches in one
+        // synchronous pass. Parts are `Copy`; hook sets are shared behind
+        // `Arc`, so this is refcount bumps, not deep clones. Reloads apply at
+        // the next turn.
+        let mut stages = Vec::with_capacity(order.len());
+        {
+            let parts = session.config().loop_parts();
+            let hooks = session.config().loop_hooks();
+            let registry = parts.borrow();
+            let hook_sets = hooks.borrow();
+            for name in order.names() {
+                let Some(part) = registry.get(name) else {
+                    return Err(RunError::Config(format!(
+                        "loop part {name:?} is not defined"
+                    )));
+                };
+                stages.push((name, *part, hook_sets.get(name).cloned()));
             }
-            resolved
-        };
-        let hook_sets = {
-            let receiver = session.view().loop_hooks();
-            let hooks = receiver.borrow();
-            pipeline_order
-                .iter()
-                .filter_map(|name| hooks.get(name).map(|set| (name.clone(), set.clone())))
-                .collect::<std::collections::HashMap<_, _>>()
-        };
+        }
 
         // Run the pipeline over fresh per-turn state, weaving each stage's
         // pre/post hooks around it.
         let mut turn = TurnState::default();
-        for (name, part) in &stages {
-            let empty = hooks::HookSet::default();
-            let hook_set = hook_sets.get(*name).unwrap_or(&empty);
-
-            // Pre hooks gate the stage: a failure skips it (the turn then
-            // fails through the usual prerequisite path downstream).
-            match hooks::run_hooks(&hook_set.pre, name, "pre", cancelation).await {
-                Ok(()) => {}
-                Err(HookError::Failed(reason)) => {
-                    tracing::warn!(part = *name, %reason, "pre hook failed; skipping part");
-                    continue;
+        for (name, part, hook_set) in &stages {
+            if let Some(hook_set) = hook_set {
+                // Pre hooks gate the stage: a failure skips it (the turn then
+                // fails through the usual prerequisite path downstream).
+                match hooks::run_hooks(&hook_set.pre, name, "pre", cancelation).await {
+                    Ok(()) => {}
+                    Err(HookError::Failed(reason)) => {
+                        tracing::warn!(part = name, %reason, "pre hook failed; skipping part");
+                        continue;
+                    }
+                    Err(HookError::Cancelled) => return Err(RunError::Cancelled),
+                    Err(HookError::Aborted) => return Err(RunError::Aborted),
                 }
-                Err(HookError::Cancelled) => return Err(RunError::Cancelled),
-                Err(HookError::Aborted) => return Err(RunError::Aborted),
             }
 
             run_part(part, client, session, binding, cancelation, &mut turn).await?;
 
-            // Post hooks observe the stage: a failure flips the successful
-            // stage into a failure for transition purposes.
-            match hooks::run_hooks(&hook_set.post, name, "post", cancelation).await {
-                Ok(()) => {}
-                Err(HookError::Failed(reason)) => {
-                    return Err(RunError::Hook(format!(
-                        "post hook on {name:?} failed: {reason}"
-                    )));
+            if let Some(hook_set) = hook_set {
+                // Post hooks observe the stage: a failure flips the successful
+                // stage into a failure for transition purposes.
+                match hooks::run_hooks(&hook_set.post, name, "post", cancelation).await {
+                    Ok(()) => {}
+                    Err(HookError::Failed(reason)) => {
+                        return Err(RunError::Hook(format!(
+                            "post hook on {name:?} failed: {reason}"
+                        )));
+                    }
+                    Err(HookError::Cancelled) => return Err(RunError::Cancelled),
+                    Err(HookError::Aborted) => return Err(RunError::Aborted),
                 }
-                Err(HookError::Cancelled) => return Err(RunError::Cancelled),
-                Err(HookError::Aborted) => return Err(RunError::Aborted),
             }
         }
 
@@ -193,6 +186,47 @@ pub async fn run_agent_loop(
     }
 
     Err(RunError::Exhausted)
+}
+
+/// The pipeline order for one run: the built-in sequence (allocation-free) or
+/// an agent's owned custom `loop`.
+enum Order {
+    Default,
+    Custom(Vec<String>),
+}
+
+impl Order {
+    fn len(&self) -> usize {
+        match self {
+            Order::Default => parts::DEFAULT_PIPELINE.len(),
+            Order::Custom(names) => names.len(),
+        }
+    }
+
+    fn names(&self) -> Names<'_> {
+        match self {
+            Order::Default => Names::Default(parts::DEFAULT_PIPELINE.iter()),
+            Order::Custom(names) => Names::Custom(names.iter()),
+        }
+    }
+}
+
+/// Concrete iterator over the pipeline names, so the default path never
+/// allocates.
+enum Names<'a> {
+    Default(std::slice::Iter<'static, &'static str>),
+    Custom(std::slice::Iter<'a, String>),
+}
+
+impl<'a> Iterator for Names<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Names::Default(iter) => iter.next().copied(),
+            Names::Custom(iter) => iter.next().map(String::as_str),
+        }
+    }
 }
 
 /// Stop immediately if a cancel is already pending. Both futures are polled
@@ -302,61 +336,56 @@ async fn run_part(
     }
 }
 
-/// Resolve the turn's request from config: copy the system prompt, provider
-/// and model config, and tool selection out of their watch borrows, resolve
-/// the advertised tool definitions, build the provider, and assemble the
-/// prompt over the current conversation.
+/// Resolve the turn's request from config: read the agent/provider/model
+/// straight out of the watch borrows, resolve the advertised tool
+/// definitions from the precomputed registry set, build the provider, and
+/// assemble the prompt over the current conversation.
+///
+/// Entirely synchronous — no config value is ever cloned to cross an await,
+/// because nothing here awaits. The only per-turn string is the system
+/// prompt moving into the owned prompt IR.
 fn build_prompt(
     session: &mut SessionContext,
     binding: &Binding<'_>,
     selection: ToolSelection,
     turn: &mut TurnState,
 ) -> Result<(), RunError> {
-    // Copy the config values out of the watch borrow — a `watch::Ref` guard is
-    // never held across an `.await`.
-    let (system_prompt, provider_cfg, model_cfg, allow) = {
-        let llm = session.view().llm();
-        let agent = llm
-            .get_agent(binding.agent)
-            .ok_or_else(|| RunError::Config(format!("unknown agent {:?}", binding.agent)))?;
-        let provider = llm
-            .get_provider(binding.provider)
-            .ok_or_else(|| RunError::Config(format!("unknown provider {:?}", binding.provider)))?
-            .clone();
-        let model = llm
-            .get_model(binding.model)
-            .ok_or_else(|| RunError::Config(format!("unknown model {:?}", binding.model)))?
-            .clone();
-        (
-            agent.system_prompt().map(str::to_string),
-            provider,
-            model,
-            agent.tools().to_vec(),
-        )
-    };
+    let view = session.config();
+    let llm = view.llm();
+    let agent = llm
+        .get_agent(binding.agent)
+        .ok_or_else(|| RunError::Config(format!("unknown agent {:?}", binding.agent)))?;
+    let provider_cfg = llm
+        .get_provider(binding.provider)
+        .ok_or_else(|| RunError::Config(format!("unknown provider {:?}", binding.provider)))?;
+    let model_cfg = llm
+        .get_model(binding.model)
+        .ok_or_else(|| RunError::Config(format!("unknown model {:?}", binding.model)))?;
 
-    // Resolve the advertised tool definitions in their own synchronous scope;
-    // the watch Ref is dropped before anything is awaited.
-    let tools = {
-        let receivers = session.view().tools();
-        let registry = receivers.borrow();
-        let definitions = match selection {
-            ToolSelection::AllowList => registry.definitions_for(&allow),
-            ToolSelection::All => registry
-                .tools()
-                .filter_map(|tool| tool.to_definition())
-                .collect(),
-        };
-        (!definitions.is_empty()).then_some(definitions)
+    // Advertisable tool definitions, cloned out of the precomputed set (the
+    // tools receiver is an owned clone, so its borrow never touches the
+    // session).
+    let tools_rx = view.tools();
+    let definitions = {
+        let registry = tools_rx.borrow();
+        match selection {
+            ToolSelection::AllowList => registry.definitions_for(agent.tools()),
+            ToolSelection::All => registry.all_definitions().to_vec(),
+        }
     };
+    let tools = (!definitions.is_empty()).then_some(definitions);
 
     turn.provider = session
         .providers()
-        .build(binding.provider, &provider_cfg, &model_cfg)
+        .build(binding.provider, provider_cfg, model_cfg)
         .map_err(|err| RunError::Build(err.to_string()))
         .map(Some)?;
 
-    let system = system_prompt.map(|text| vec![SystemBlock::Text { text }]);
+    let system = agent.system_prompt().map(|text| {
+        vec![SystemBlock::Text {
+            text: text.to_string(),
+        }]
+    });
     turn.prompt = Some(Prompt::new(system, session.conversation(), tools, None));
     Ok(())
 }
@@ -407,10 +436,11 @@ async fn run_tools(
 }
 
 /// Record the turn in the session conversation: the assistant message first,
-/// then its tool results, so providers see them in request order.
+/// then its tool results, so providers see them in request order. Both are
+/// moved in — no re-boxing.
 fn update_context(session: &mut SessionContext, assistant: Message, tool_results: Vec<Message>) {
     session.push_message(assistant);
-    session.append_messages(&mut tool_results.into_iter().collect());
+    session.append_messages(tool_results);
 }
 
 /// One resolved tool execution. Built synchronously from the registry so no

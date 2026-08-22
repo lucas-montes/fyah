@@ -22,7 +22,8 @@ impl<T> Session<T> {
         self.messages.push(message);
     }
 
-    pub fn append(&mut self, messages: &mut Vec<T>) {
-        self.messages.append(messages);
+    /// Take every message out of `messages`, preserving order.
+    pub fn append(&mut self, messages: Vec<T>) {
+        self.messages.extend(messages);
     }
 }

@@ -24,6 +24,9 @@ pub struct ToolRegistry {
     /// Execution command per custom tool name, retained from
     /// [`CustomToolConfig`] so custom function tools can actually run.
     commands: HashMap<String, String>,
+    /// Advertisable definitions precomputed at compile time, in registry
+    /// order (`builtins` first, then `config_tools`).
+    definitions: Vec<ToolDefinition>,
 }
 
 impl From<Config> for ToolRegistry {
@@ -31,17 +34,24 @@ impl From<Config> for ToolRegistry {
     ///
     /// Takes ownership of the config and moves data out — no cloning of tool
     /// definitions. Each enabled entry is converted into the corresponding
-    /// [`Tool`] variant, and each custom tool's command is retained by name.
+    /// [`Tool`] variant, each custom tool's command is retained by name, and
+    /// the advertisable [`ToolDefinition`]s are precomputed once (registry
+    /// order) so per-turn prompt assembly is a clone, not a re-serialization.
     fn from(cfg: Config) -> Self {
         let mut commands = HashMap::new();
         for custom in &cfg.custom {
             commands.insert(custom.function.name.to_string(), custom.command.clone());
         }
         let config_tools = cfg.into_tools();
+        let definitions: Vec<ToolDefinition> = config_tools
+            .iter()
+            .filter_map(|tool| tool.to_definition())
+            .collect();
         ToolRegistry {
             builtins: Vec::new(),
             config_tools,
             commands,
+            definitions,
         }
     }
 }
@@ -65,17 +75,28 @@ impl ToolRegistry {
     /// Tool definitions for an agent's allow-list of names, in allow-list
     /// order. Unknown names are warn + skipped; a name resolving to a tool
     /// that cannot be advertised is silently skipped.
+    /// Definitions for an agent's allow-list of names, in allow-list order.
+    /// Clones out of the precomputed set — no re-serialization per call.
+    /// Unknown names are warn + skipped; a name resolving to a tool that
+    /// cannot be advertised is silently skipped.
     pub fn definitions_for(&self, allow: &[String]) -> Vec<ToolDefinition> {
         allow
             .iter()
-            .filter_map(|name| match self.get(name) {
-                Some(tool) => tool.to_definition(),
-                None => {
-                    warn!(tool = %name, "unknown tool in allow-list; skipping");
-                    None
-                }
-            })
+            .filter_map(
+                |name| match self.definitions.iter().find(|d| d.name() == name) {
+                    Some(definition) => Some(definition.clone()),
+                    None => {
+                        warn!(tool = %name, "unknown tool in allow-list; skipping");
+                        None
+                    }
+                },
+            )
             .collect()
+    }
+
+    /// Every advertisable definition, in registry order.
+    pub fn all_definitions(&self) -> &[ToolDefinition] {
+        &self.definitions
     }
 }
 

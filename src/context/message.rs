@@ -260,7 +260,7 @@ impl ToolBlock {
 }
 
 /// A normalized tool definition exposed to the model.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
     name: String,
     description: String,

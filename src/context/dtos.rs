@@ -47,7 +47,15 @@ impl SessionContext {
     }
 
     /// The config-part receivers; agents read the current llm config and tool
-    /// registry from here.
+    /// registry from here. Immutable on purpose: read-only watch access
+    /// (`llm`, `tools`, `loop_parts`, `loop_hooks`) composes with the other
+    /// `&self` accessors without cloning config out first.
+    pub fn config(&self) -> &ConfigView {
+        &self.view
+    }
+
+    /// Mutable watch access for parts that acknowledge updates
+    /// (`borrow_and_update`); the workflow plan swap needs this.
     pub fn view(&mut self) -> &mut ConfigView {
         &mut self.view
     }
@@ -67,7 +75,8 @@ impl SessionContext {
         self.conversation.push(message);
     }
 
-    pub fn append_messages(&mut self, messages: &mut Vec<Message>) {
+    /// Append several messages to the session conversation, taking ownership.
+    pub fn append_messages(&mut self, messages: Vec<Message>) {
         self.conversation.append(messages);
     }
 }

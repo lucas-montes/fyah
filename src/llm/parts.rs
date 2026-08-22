@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Data-only: each variant selects one implementation for its stage. New
 /// variants must keep every stage dispatchable by [`run_part`]-style matches.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Part {
     /// Assemble the prompt from the agent's system prompt and its strict
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn parts_serialize_with_their_type_tag() {
         let part = Part::BuildPromptAllTools;
-        let value = serde_json::to_value(&part).expect("serializes");
+        let value = serde_json::to_value(part).expect("serializes");
         assert_eq!(value["type"], "build_prompt_all_tools");
         let parsed: Part = serde_json::from_value(value).expect("deserializes");
         assert_eq!(parsed, part);

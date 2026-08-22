@@ -16,6 +16,7 @@
 //! runs, and `kill_on_drop` terminates the child when the future drops.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,7 @@ pub(crate) enum HookError {
 /// hooks are rejected at startup rather than failing silently mid-run.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct LoopHooks {
-    hooks: HashMap<String, HookSet>,
+    hooks: HashMap<String, Arc<HookSet>>,
 }
 
 impl TryFrom<LoopHooksConfig> for LoopHooks {
@@ -83,13 +84,19 @@ impl TryFrom<LoopHooksConfig> for LoopHooks {
                 }
             }
         }
-        Ok(Self { hooks: config })
+        Ok(Self {
+            hooks: config
+                .into_iter()
+                .map(|(name, set)| (name, Arc::new(set)))
+                .collect(),
+        })
     }
 }
 
 impl LoopHooks {
-    /// The compiled hook set for a pipeline part name, if any.
-    pub fn get(&self, name: &str) -> Option<&HookSet> {
+    /// The compiled hook set for a pipeline part name, if any. Shared behind
+    /// an `Arc` so per-turn resolution is a refcount bump, not a deep clone.
+    pub fn get(&self, name: &str) -> Option<&Arc<HookSet>> {
         self.hooks.get(name)
     }
 
