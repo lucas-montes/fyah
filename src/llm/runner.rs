@@ -26,6 +26,7 @@ use crate::context::{ContentBlock, Message, Prompt, SessionContext, SystemBlock,
 use crate::llm::client::LlmClient;
 use crate::llm::config::Binding;
 use crate::llm::formats::ports::DynProvider;
+use crate::llm::hooks::{self, HookError};
 use crate::llm::parts::{self, Part};
 use crate::runtime::CancellationGuard;
 use crate::tools::Tool;
@@ -43,6 +44,8 @@ pub enum RunError {
     Parse(crate::llm::formats::PortsError),
     /// A pipeline stage ran before its prerequisite produced output.
     Pipeline(String),
+    /// A loop hook failed after its stage succeeded.
+    Hook(String),
     /// A soft cancel arrived mid-turn; the partial turn was discarded.
     Cancelled,
     /// A hard cancel arrived mid-turn; the partial turn was discarded.
@@ -59,6 +62,7 @@ impl Display for RunError {
             Self::Request(err) => write!(f, "request error: {err}"),
             Self::Parse(err) => write!(f, "response parse error: {err}"),
             Self::Pipeline(msg) => write!(f, "pipeline error: {msg}"),
+            Self::Hook(msg) => write!(f, "hook error: {msg}"),
             Self::Cancelled => write!(f, "cancelled"),
             Self::Aborted => write!(f, "aborted"),
             Self::Exhausted => {
@@ -121,15 +125,15 @@ pub async fn run_agent_loop(
         // the next await point inside a stage.
         stop_if_cancelled(cancelation).await?;
 
-        // Resolve this turn's pipeline from the registry. Copied out of the
-        // watch borrow synchronously; reloads apply at the next turn.
-        let pipeline = {
+        // Resolve this turn's pipeline and its hooks from the watches. Copied
+        // out synchronously; reloads apply at the next turn.
+        let stages = {
             let receiver = session.view().loop_parts();
             let registry = receiver.borrow();
             let mut resolved = Vec::with_capacity(pipeline_order.len());
             for name in &pipeline_order {
                 match registry.get(name) {
-                    Some(part) => resolved.push(part.clone()),
+                    Some(part) => resolved.push((name.as_str(), part.clone())),
                     None => {
                         return Err(RunError::Config(format!(
                             "loop part {name:?} is not defined"
@@ -139,11 +143,48 @@ pub async fn run_agent_loop(
             }
             resolved
         };
+        let hook_sets = {
+            let receiver = session.view().loop_hooks();
+            let hooks = receiver.borrow();
+            pipeline_order
+                .iter()
+                .filter_map(|name| hooks.get(name).map(|set| (name.clone(), set.clone())))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
 
-        // Run the pipeline over fresh per-turn state.
+        // Run the pipeline over fresh per-turn state, weaving each stage's
+        // pre/post hooks around it.
         let mut turn = TurnState::default();
-        for part in &pipeline {
+        for (name, part) in &stages {
+            let empty = hooks::HookSet::default();
+            let hook_set = hook_sets.get(*name).unwrap_or(&empty);
+
+            // Pre hooks gate the stage: a failure skips it (the turn then
+            // fails through the usual prerequisite path downstream).
+            match hooks::run_hooks(&hook_set.pre, name, "pre", cancelation).await {
+                Ok(()) => {}
+                Err(HookError::Failed(reason)) => {
+                    tracing::warn!(part = *name, %reason, "pre hook failed; skipping part");
+                    continue;
+                }
+                Err(HookError::Cancelled) => return Err(RunError::Cancelled),
+                Err(HookError::Aborted) => return Err(RunError::Aborted),
+            }
+
             run_part(part, client, session, binding, cancelation, &mut turn).await?;
+
+            // Post hooks observe the stage: a failure flips the successful
+            // stage into a failure for transition purposes.
+            match hooks::run_hooks(&hook_set.post, name, "post", cancelation).await {
+                Ok(()) => {}
+                Err(HookError::Failed(reason)) => {
+                    return Err(RunError::Hook(format!(
+                        "post hook on {name:?} failed: {reason}"
+                    )));
+                }
+                Err(HookError::Cancelled) => return Err(RunError::Cancelled),
+                Err(HookError::Aborted) => return Err(RunError::Aborted),
+            }
         }
 
         if turn.tool_calls.is_empty() {

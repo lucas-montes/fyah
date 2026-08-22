@@ -96,3 +96,11 @@ provider = "openai"
 model = "phi3"
 on_success = "done"
 on_failure = "implement"
+
+# ── Loop hooks: pre/post commands around each agentic-loop part. ──
+# Keys are pipeline part names; hooks run via sh -c with FYAH_LOOP_PART and
+# FYAH_HOOK_PHASE exported; exit 0 = success. A failed pre hook skips its
+# part; a failed post hook flips the stage into a failure.
+# [loop_hooks.prompt]
+# pre = [{ type = "command", command = "echo starting turn" }]
+# post = [{ type = "command", command = "echo turn prompt done", timeout_secs = 5 }]

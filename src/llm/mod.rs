@@ -1,6 +1,7 @@
 mod client;
 mod config;
 mod formats;
+pub mod hooks;
 mod middlewares;
 pub mod parts;
 mod runner;

@@ -476,3 +476,116 @@ async fn unknown_loop_part_fails_with_a_clean_error() {
     }
     assert!(session.conversation().is_empty());
 }
+
+const HOOKS_CONFIG: &str = concat!(
+    "\n[loop_hooks.prompt]\n",
+    "pre = [{ type = \"command\", command = \"echo pre >> HOOKFILE\" }]\n",
+    "post = [{ type = \"command\", command = \"echo post >> HOOKFILE\" }]\n",
+);
+
+fn hook_log_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("fyah-hook-log-{tag}"))
+}
+
+#[tokio::test]
+async fn hooks_run_around_their_part_in_order() {
+    let log = hook_log_path("order");
+    let _ = std::fs::remove_file(&log);
+    let log_arg = log.to_string_lossy().replace('\\', "/");
+    let config_section = HOOKS_CONFIG.replace("HOOKFILE", &log_arg);
+    let path = write_test_config("hooks-order", None, &config_section);
+    let config = load_config(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let store = ConfigStore::new(config).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    let mut session = SessionContext::new(view, providers, Session::new());
+
+    // Two turns => the prompt part runs twice => pre,post twice, in order.
+    let client = FakeLlmClient::new(&[TOOL_CALL_RESPONSE, FINAL_RESPONSE]);
+
+    run_agent_loop(
+        &client,
+        &mut session,
+        &BINDING,
+        &CancellationGuard::default(),
+    )
+    .await
+    .expect("loop with hooks finishes");
+
+    let recorded = std::fs::read_to_string(&log).expect("hook log written");
+    let lines: Vec<&str> = recorded.lines().collect();
+    assert_eq!(lines, ["pre", "post", "pre", "post"]);
+}
+
+#[tokio::test]
+async fn failed_pre_hook_skips_the_part_and_fails_the_turn() {
+    let config_section =
+        "\n[loop_hooks.prompt]\npre = [{ type = \"command\", command = \"false\" }]\n";
+    let path = write_test_config("hooks-pre-fail", None, config_section);
+    let config = load_config(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let store = ConfigStore::new(config).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    let mut session = SessionContext::new(view, providers, Session::new());
+
+    // The prompt stage is skipped, so send_request hits its prerequisite.
+    let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
+    let outcome = run_agent_loop(
+        &client,
+        &mut session,
+        &BINDING,
+        &CancellationGuard::default(),
+    )
+    .await;
+
+    match outcome {
+        Err(RunError::Pipeline(msg)) => assert!(msg.contains("\"prompt\""), "{msg}"),
+        other => panic!("expected a pipeline prerequisite error, got {other:?}"),
+    }
+    assert!(session.conversation().is_empty());
+}
+
+#[tokio::test]
+async fn failed_post_hook_flips_a_successful_turn() {
+    let config_section =
+        "\n[loop_hooks.update_context]\npost = [{ type = \"command\", command = \"false\" }]\n";
+    let path = write_test_config("hooks-post-fail", None, config_section);
+    let config = load_config(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let store = ConfigStore::new(config).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    let mut session = SessionContext::new(view, providers, Session::new());
+
+    // The turn itself succeeds (final answer, no tools) but the post hook on
+    // update_context flips the outcome to failure.
+    let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
+    let outcome = run_agent_loop(
+        &client,
+        &mut session,
+        &BINDING,
+        &CancellationGuard::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(&outcome, Err(RunError::Hook(msg)) if msg.contains("update_context")),
+        "got {outcome:?}"
+    );
+    // The stage itself already ran and was recorded.
+    assert_eq!(session.conversation().len(), 1);
+}

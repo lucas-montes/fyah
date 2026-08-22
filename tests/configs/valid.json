@@ -64,5 +64,6 @@
       }
     }
   },
-  "loop_parts": {}
+  "loop_parts": {},
+  "loop_hooks": {}
 }

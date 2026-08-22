@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::watch::{self, Ref};
 
 use crate::llm::Config as LlmConfig;
+use crate::llm::hooks::{LoopHooks, LoopHooksConfig};
 use crate::llm::parts::{Config as LoopPartsConfig, LoopRegistry};
 use crate::tools::{Config as ToolsConfig, ToolRegistry};
 use crate::workflows::{Config as WorkflowsConfig, PlanMap, WorkflowErrors};
@@ -39,6 +40,9 @@ pub struct Config {
     /// Named agentic-loop part definitions (`[loop_parts.<name>]`).
     #[serde(default)]
     loop_parts: LoopPartsConfig,
+    /// Pre/post hooks per pipeline part (`[loop_hooks.<name>]`).
+    #[serde(default)]
+    loop_hooks: LoopHooksConfig,
     /// The filesystem path this config was loaded from (set by `load()`).
     #[serde(skip)]
     path: PathBuf,
@@ -52,9 +56,24 @@ impl Config {
 
     /// Consume `Config` and return its inner parts.
     ///
-    /// Order: `(llm_config, tools_config, workflow_config, loop_parts_config)`.
-    pub fn into_parts(self) -> (LlmConfig, ToolsConfig, WorkflowsConfig, LoopPartsConfig) {
-        (self.llm, self.tools, self.workflows, self.loop_parts)
+    /// Order: `(llm_config, tools_config, workflow_config, loop_parts_config,
+    /// loop_hooks_config)`.
+    pub fn into_parts(
+        self,
+    ) -> (
+        LlmConfig,
+        ToolsConfig,
+        WorkflowsConfig,
+        LoopPartsConfig,
+        LoopHooksConfig,
+    ) {
+        (
+            self.llm,
+            self.tools,
+            self.workflows,
+            self.loop_parts,
+            self.loop_hooks,
+        )
     }
     /// Load and merge config from all sources in precedence order.
     ///
@@ -100,6 +119,8 @@ pub enum StartupError {
     UnknownWorkflow(String),
     /// The `[loop_parts]` definitions are invalid.
     InvalidLoopParts(String),
+    /// The `[loop_hooks]` definitions are invalid.
+    InvalidLoopHooks(String),
 }
 
 /// User-facing errors render through [`Display`]: the standard `?`/`Termination`
@@ -118,6 +139,7 @@ impl std::fmt::Display for StartupError {
                 write!(f, "cannot start: unknown workflow {name:?}")
             }
             Self::InvalidLoopParts(msg) => write!(f, "cannot start: invalid loop parts: {msg}"),
+            Self::InvalidLoopHooks(msg) => write!(f, "cannot start: invalid loop hooks: {msg}"),
             Self::InvalidConfig(workflows) => {
                 write!(f, "cannot start: invalid config")?;
                 for workflow in workflows {
@@ -264,13 +286,15 @@ pub struct ConfigStore {
     /// Named agentic-loop parts, compiled. Hot reloads recompile the set and
     /// publish it whole; the loop re-resolves its pipeline each turn.
     loop_parts: PartStore<LoopRegistry>,
+    /// Pre/post hooks per pipeline part, compiled. Same reload semantics.
+    loop_hooks: PartStore<LoopHooks>,
 }
 
 impl ConfigStore {
     /// Convert every part of a raw config into its runtime form and seed the
     /// store. Any problem aborts before the run.
     pub fn new(config: Config) -> Result<Self, StartupError> {
-        let (llm, tools, workflows, loop_parts) = config.into_parts();
+        let (llm, tools, workflows, loop_parts, loop_hooks) = config.into_parts();
         let plans = match PlanMap::try_from(workflows) {
             Ok(plans) => plans,
             Err(problems) => return Err(StartupError::InvalidConfig(problems)),
@@ -278,6 +302,7 @@ impl ConfigStore {
         let tools = tools.into();
         let loop_parts =
             LoopRegistry::try_from(loop_parts).map_err(StartupError::InvalidLoopParts)?;
+        let loop_hooks = LoopHooks::try_from(loop_hooks).map_err(StartupError::InvalidLoopHooks)?;
 
         Ok(Self {
             generation: 0,
@@ -285,6 +310,7 @@ impl ConfigStore {
             tools: PartStore::new(tools),
             workflow: PartStore::new(plans),
             loop_parts: PartStore::new(loop_parts),
+            loop_hooks: PartStore::new(loop_hooks),
         })
     }
 
@@ -295,7 +321,7 @@ impl ConfigStore {
     /// already changed. A conversion error leaves the store untouched, so
     /// subscribers keep serving the last good config.
     pub fn apply(&mut self, config: Config) -> Result<bool, StartupError> {
-        let (llm, tools, workflows, loop_parts) = config.into_parts();
+        let (llm, tools, workflows, loop_parts, loop_hooks) = config.into_parts();
         let plans = match PlanMap::try_from(workflows) {
             Ok(plans) => plans,
             Err(problems) => return Err(StartupError::InvalidConfig(problems)),
@@ -303,11 +329,13 @@ impl ConfigStore {
         let tools = tools.into();
         let loop_parts =
             LoopRegistry::try_from(loop_parts).map_err(StartupError::InvalidLoopParts)?;
+        let loop_hooks = LoopHooks::try_from(loop_hooks).map_err(StartupError::InvalidLoopHooks)?;
 
         let changed = self.llm.update(llm)
             | self.tools.update(tools)
             | self.workflow.update(plans)
-            | self.loop_parts.update(loop_parts);
+            | self.loop_parts.update(loop_parts)
+            | self.loop_hooks.update(loop_hooks);
         if changed {
             self.generation += 1;
         }
@@ -329,6 +357,7 @@ impl ConfigStore {
             tools: self.tools.subscribe(),
             workflow: self.workflow.subscribe(),
             loop_parts: self.loop_parts.subscribe(),
+            loop_hooks: self.loop_hooks.subscribe(),
         }
     }
 }
@@ -369,6 +398,7 @@ pub struct ConfigView {
     tools: watch::Receiver<ToolRegistry>,
     workflow: watch::Receiver<PlanMap>,
     loop_parts: watch::Receiver<LoopRegistry>,
+    loop_hooks: watch::Receiver<LoopHooks>,
 }
 
 impl ConfigView {
@@ -388,5 +418,11 @@ impl ConfigView {
     /// receiver once per turn, so reloads apply at the next turn.
     pub fn loop_parts(&self) -> watch::Receiver<LoopRegistry> {
         self.loop_parts.clone()
+    }
+
+    /// The per-part pre/post hooks. Copied out once per turn like the
+    /// pipeline; reloads apply at the next turn.
+    pub fn loop_hooks(&self) -> watch::Receiver<LoopHooks> {
+        self.loop_hooks.clone()
     }
 }
