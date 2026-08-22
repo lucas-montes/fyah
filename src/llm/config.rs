@@ -40,6 +40,10 @@ pub struct Agent {
     /// the agent exposes no tools.
     #[serde(default)]
     tools: Vec<String>,
+    /// The agent's assembled agentic pipeline: an ordered list of
+    /// `[loop_parts]` names. Absent means the built-in default order.
+    #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
+    pipeline: Option<Vec<String>>,
 }
 impl Agent {
     pub fn max_iterations(&self) -> u32 {
@@ -62,6 +66,11 @@ impl Agent {
     }
     pub fn tools(&self) -> &[String] {
         &self.tools
+    }
+    /// The agent's assembled pipeline (ordered `[loop_parts]` names), or
+    /// `None` for the built-in default order.
+    pub fn pipeline(&self) -> Option<&[String]> {
+        self.pipeline.as_deref()
     }
 }
 

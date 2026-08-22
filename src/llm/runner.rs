@@ -98,14 +98,23 @@ pub async fn run_agent_loop(
     binding: &Binding<'_>,
     cancelation: &CancellationGuard,
 ) -> Result<(), RunError> {
-    // Copy the budget out of the watch borrow — a `watch::Ref` guard is never
-    // held across an `.await`.
-    let max_iterations = session
-        .view()
-        .llm()
-        .get_agent(binding.agent)
-        .ok_or_else(|| RunError::Config(format!("unknown agent {:?}", binding.agent)))?
-        .max_iterations();
+    // Copy the budget and the agent's pipeline order out of the watch borrow
+    // — a `watch::Ref` guard is never held across an `.await`.
+    let (max_iterations, pipeline_order) = {
+        let llm = session.view().llm();
+        let agent = llm
+            .get_agent(binding.agent)
+            .ok_or_else(|| RunError::Config(format!("unknown agent {:?}", binding.agent)))?;
+        (
+            agent.max_iterations(),
+            agent.pipeline().map(<[String]>::to_vec).unwrap_or_else(|| {
+                parts::DEFAULT_PIPELINE
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            }),
+        )
+    };
 
     for _ in 0..max_iterations {
         // Turn-boundary check: react to a pending cancel without waiting for
@@ -117,10 +126,10 @@ pub async fn run_agent_loop(
         let pipeline = {
             let receiver = session.view().loop_parts();
             let registry = receiver.borrow();
-            let mut parts = Vec::with_capacity(parts::DEFAULT_PIPELINE.len());
-            for name in parts::DEFAULT_PIPELINE {
+            let mut resolved = Vec::with_capacity(pipeline_order.len());
+            for name in &pipeline_order {
                 match registry.get(name) {
-                    Some(part) => parts.push(part.clone()),
+                    Some(part) => resolved.push(part.clone()),
                     None => {
                         return Err(RunError::Config(format!(
                             "loop part {name:?} is not defined"
@@ -128,7 +137,7 @@ pub async fn run_agent_loop(
                     }
                 }
             }
-            parts
+            resolved
         };
 
         // Run the pipeline over fresh per-turn state.

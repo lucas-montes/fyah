@@ -119,10 +119,20 @@ impl LlmClient for FakeLlmClient {
     }
 }
 
-/// A minimal valid config. `extra` lets a case append sections such as
-/// `[loop_parts.*]` overrides.
-fn write_test_config(name: &str, extra: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("fyah-agent-loop-{name}.toml"));
+/// A minimal valid config. `agent_loop` is spliced into the `[agents.primary]`
+/// table (e.g. `loop = [...]`); `extra` appends other top-level sections such
+/// as `[loop_parts.*]` overrides. The filename is unique per call because the
+/// test cases run in parallel threads.
+fn write_test_config(name: &str, agent_loop: Option<&str>, extra: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "fyah-agent-loop-{name}-{}.toml",
+        CALLS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let agent_loop = agent_loop
+        .map(|order| format!("loop = [{order}]\n"))
+        .unwrap_or_default();
     std::fs::write(
         &path,
         format!(
@@ -139,7 +149,7 @@ model = "fake"
 max_iterations = 3
 system_prompt = "you are a test agent"
 tools = ["shell"]
-
+{agent_loop}
 [tools]
 shell = true
 
@@ -174,7 +184,7 @@ fn load_config(path: &std::path::Path) -> Config {
 
 #[tokio::test]
 async fn loop_executes_tool_call_then_finishes_on_final_answer() {
-    let path = write_test_config("e2e", "");
+    let path = write_test_config("e2e", None, "");
     let config = load_config(&path);
     let _ = std::fs::remove_file(&path);
 
@@ -237,6 +247,7 @@ async fn loop_executes_tool_call_then_finishes_on_final_answer() {
 async fn loop_part_override_selects_advertised_tools() {
     let path = write_test_config(
         "override",
+        None,
         "\n[loop_parts.prompt]\ntype = \"build_prompt_all_tools\"\n",
     );
     let config = load_config(&path);
@@ -273,9 +284,10 @@ async fn loop_part_override_selects_advertised_tools() {
 
 #[tokio::test]
 async fn hot_reload_applies_to_the_next_turn() {
-    let base_path = write_test_config("reload-base", "");
+    let base_path = write_test_config("reload-base", None, "");
     let hot_path = write_test_config(
         "reload-hot",
+        None,
         "\n[loop_parts.prompt]\ntype = \"build_prompt_all_tools\"\n",
     );
     let base = load_config(&base_path);
@@ -344,7 +356,7 @@ impl LlmClient for HangingClient {
 }
 
 fn test_session() -> SessionContext {
-    let path = write_test_config("cancel", "");
+    let path = write_test_config("cancel", None, "");
     let config = load_config(&path);
     let _ = std::fs::remove_file(&path);
 
@@ -393,5 +405,74 @@ async fn hard_cancel_mid_send_aborts_immediately() {
     let outcome = run_agent_loop(&client, &mut session, &BINDING, &cancelation).await;
 
     assert!(matches!(outcome, Err(RunError::Aborted)));
+    assert!(session.conversation().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_agent_loop_order_matches_the_default() {
+    let path = write_test_config(
+        "explicit-order",
+        Some("\"prompt\", \"send_request\", \"parse_response\", \"run_tools\", \"update_context\""),
+        "",
+    );
+    let config = load_config(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let store = ConfigStore::new(config).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    let mut session = SessionContext::new(view, providers, Session::new());
+
+    // Two turns: a tool call, then the final answer — the explicit pipeline
+    // must behave exactly like the built-in order.
+    let client = FakeLlmClient::new(&[TOOL_CALL_RESPONSE, FINAL_RESPONSE]);
+
+    run_agent_loop(
+        &client,
+        &mut session,
+        &BINDING,
+        &CancellationGuard::default(),
+    )
+    .await
+    .expect("explicit pipeline finishes");
+
+    assert_eq!(session.conversation().len(), 3);
+    assert_eq!(
+        client.advertised_tools(),
+        vec![vec!["shell"], vec!["shell"]],
+        "allow-list advertised on both turns"
+    );
+}
+
+#[tokio::test]
+async fn unknown_loop_part_fails_with_a_clean_error() {
+    let path = write_test_config("unknown-part", Some("\"prompt\", \"nope\""), "");
+    let config = load_config(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let store = ConfigStore::new(config).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    let mut session = SessionContext::new(view, providers, Session::new());
+
+    let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
+    let outcome = run_agent_loop(
+        &client,
+        &mut session,
+        &BINDING,
+        &CancellationGuard::default(),
+    )
+    .await;
+
+    match outcome {
+        Err(RunError::Config(msg)) => assert!(msg.contains("\"nope\""), "got: {msg}"),
+        other => panic!("expected a config error naming the unknown part, got {other:?}"),
+    }
     assert!(session.conversation().is_empty());
 }
