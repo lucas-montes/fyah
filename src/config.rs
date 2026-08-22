@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::watch::{self, Ref};
 
 use crate::llm::Config as LlmConfig;
+use crate::llm::parts::{Config as LoopPartsConfig, LoopRegistry};
 use crate::tools::{Config as ToolsConfig, ToolRegistry};
 use crate::workflows::{Config as WorkflowsConfig, PlanMap, WorkflowErrors};
 
@@ -35,6 +36,9 @@ pub struct Config {
     /// Workflow / state-machine step definitions.
     #[serde(default)]
     workflows: WorkflowsConfig,
+    /// Named agentic-loop part definitions (`[loop_parts.<name>]`).
+    #[serde(default)]
+    loop_parts: LoopPartsConfig,
     /// The filesystem path this config was loaded from (set by `load()`).
     #[serde(skip)]
     path: PathBuf,
@@ -48,9 +52,9 @@ impl Config {
 
     /// Consume `Config` and return its inner parts.
     ///
-    /// Order: `(llm_config, tools_config, workflow_config)`.
-    pub fn into_parts(self) -> (LlmConfig, ToolsConfig, WorkflowsConfig) {
-        (self.llm, self.tools, self.workflows)
+    /// Order: `(llm_config, tools_config, workflow_config, loop_parts_config)`.
+    pub fn into_parts(self) -> (LlmConfig, ToolsConfig, WorkflowsConfig, LoopPartsConfig) {
+        (self.llm, self.tools, self.workflows, self.loop_parts)
     }
     /// Load and merge config from all sources in precedence order.
     ///
@@ -94,6 +98,8 @@ pub enum StartupError {
     InvalidConfig(Vec<WorkflowErrors>),
     /// The workflow requested via `--workflow` is not defined by the config.
     UnknownWorkflow(String),
+    /// The `[loop_parts]` definitions are invalid.
+    InvalidLoopParts(String),
 }
 
 /// User-facing errors render through [`Display`]: the standard `?`/`Termination`
@@ -111,6 +117,7 @@ impl std::fmt::Display for StartupError {
             Self::UnknownWorkflow(name) => {
                 write!(f, "cannot start: unknown workflow {name:?}")
             }
+            Self::InvalidLoopParts(msg) => write!(f, "cannot start: invalid loop parts: {msg}"),
             Self::InvalidConfig(workflows) => {
                 write!(f, "cannot start: invalid config")?;
                 for workflow in workflows {
@@ -254,24 +261,30 @@ pub struct ConfigStore {
     /// All named workflows, compiled. The runtime selects the active one by
     /// name; hot reloads recompile every workflow and publish the whole map.
     workflow: PartStore<PlanMap>,
+    /// Named agentic-loop parts, compiled. Hot reloads recompile the set and
+    /// publish it whole; the loop re-resolves its pipeline each turn.
+    loop_parts: PartStore<LoopRegistry>,
 }
 
 impl ConfigStore {
     /// Convert every part of a raw config into its runtime form and seed the
     /// store. Any problem aborts before the run.
     pub fn new(config: Config) -> Result<Self, StartupError> {
-        let (llm, tools, workflows) = config.into_parts();
+        let (llm, tools, workflows, loop_parts) = config.into_parts();
         let plans = match PlanMap::try_from(workflows) {
             Ok(plans) => plans,
             Err(problems) => return Err(StartupError::InvalidConfig(problems)),
         };
         let tools = tools.into();
+        let loop_parts =
+            LoopRegistry::try_from(loop_parts).map_err(StartupError::InvalidLoopParts)?;
 
         Ok(Self {
             generation: 0,
             llm: PartStore::new(llm),
             tools: PartStore::new(tools),
             workflow: PartStore::new(plans),
+            loop_parts: PartStore::new(loop_parts),
         })
     }
 
@@ -282,14 +295,19 @@ impl ConfigStore {
     /// already changed. A conversion error leaves the store untouched, so
     /// subscribers keep serving the last good config.
     pub fn apply(&mut self, config: Config) -> Result<bool, StartupError> {
-        let (llm, tools, workflows) = config.into_parts();
+        let (llm, tools, workflows, loop_parts) = config.into_parts();
         let plans = match PlanMap::try_from(workflows) {
             Ok(plans) => plans,
             Err(problems) => return Err(StartupError::InvalidConfig(problems)),
         };
         let tools = tools.into();
+        let loop_parts =
+            LoopRegistry::try_from(loop_parts).map_err(StartupError::InvalidLoopParts)?;
 
-        let changed = self.llm.update(llm) | self.tools.update(tools) | self.workflow.update(plans);
+        let changed = self.llm.update(llm)
+            | self.tools.update(tools)
+            | self.workflow.update(plans)
+            | self.loop_parts.update(loop_parts);
         if changed {
             self.generation += 1;
         }
@@ -310,6 +328,7 @@ impl ConfigStore {
             llm: self.llm.subscribe(),
             tools: self.tools.subscribe(),
             workflow: self.workflow.subscribe(),
+            loop_parts: self.loop_parts.subscribe(),
         }
     }
 }
@@ -349,6 +368,7 @@ pub struct ConfigView {
     llm: watch::Receiver<LlmConfig>,
     tools: watch::Receiver<ToolRegistry>,
     workflow: watch::Receiver<PlanMap>,
+    loop_parts: watch::Receiver<LoopRegistry>,
 }
 
 impl ConfigView {
@@ -362,5 +382,11 @@ impl ConfigView {
 
     pub fn workflow(&mut self) -> &mut watch::Receiver<PlanMap> {
         &mut self.workflow
+    }
+
+    /// The named agentic-loop parts. The loop copies its pipeline out of this
+    /// receiver once per turn, so reloads apply at the next turn.
+    pub fn loop_parts(&self) -> watch::Receiver<LoopRegistry> {
+        self.loop_parts.clone()
     }
 }

@@ -1,10 +1,10 @@
-//! End-to-end agentic-loop test: one tool-call turn followed by a final
-//! answer, driven by a fake LLM client (no network).
+//! End-to-end agentic-loop tests driven by a fake LLM client (no network):
 //!
-//! The fake implements [`LlmClient`] with canned OpenAI-format responses; the
-//! shell tool call is really executed (`echo`) and its output must land in the
-//! session conversation as a tool result before the loop terminates on the
-//! final assistant answer.
+//! 1. one tool-call turn followed by a final answer — the shell tool really
+//!    executes and its output lands in the conversation;
+//! 2. a `[loop_parts.prompt]` override selects which tool definitions are
+//!    advertised;
+//! 3. applying a new config mid-run hot-reloads that choice by the next turn.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -13,8 +13,20 @@ use fyah::config::{Config, ConfigStore};
 use fyah::context::{Message, Session, SessionContext};
 use fyah::llm::{Binding, LlmClient, OpenAIFactory, ProviderRegistry, run_agent_loop};
 
+const FINAL_RESPONSE: &str = r#"{
+    "id": "chatcmpl-test",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "fake",
+    "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {"role": "assistant", "content": "all done"}
+    }]
+}"#;
+
 const TOOL_CALL_RESPONSE: &str = r#"{
-    "id": "chatcmpl-test-1",
+    "id": "chatcmpl-test",
     "object": "chat.completion",
     "created": 0,
     "model": "fake",
@@ -36,24 +48,13 @@ const TOOL_CALL_RESPONSE: &str = r#"{
     }]
 }"#;
 
-const FINAL_RESPONSE: &str = r#"{
-    "id": "chatcmpl-test-2",
-    "object": "chat.completion",
-    "created": 1,
-    "model": "fake",
-    "choices": [{
-        "index": 0,
-        "finish_reason": "stop",
-        "message": {"role": "assistant", "content": "all done"}
-    }]
-}"#;
-
-/// Test double: builds request builders like the real client but answers from
-/// a canned queue without touching the network.
+/// Test double: builds request builders like the real client, captures every
+/// serialized request body, and answers from a canned queue.
 #[derive(Debug)]
 struct FakeLlmClient {
     inner: reqwest::Client,
     responses: Mutex<VecDeque<&'static str>>,
+    requests: Mutex<Vec<serde_json::Value>>,
 }
 
 impl FakeLlmClient {
@@ -61,7 +62,30 @@ impl FakeLlmClient {
         Self {
             inner: reqwest::Client::new(),
             responses: Mutex::new(responses.iter().copied().collect()),
+            requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The names of the function tools advertised in each sent request.
+    fn advertised_tools(&self) -> Vec<Vec<String>> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| {
+                body["tools"]
+                    .as_array()
+                    .map(|tools| {
+                        let mut names: Vec<String> = tools
+                            .iter()
+                            .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
+                            .collect();
+                        names.sort();
+                        names
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
     }
 }
 
@@ -72,8 +96,17 @@ impl LlmClient for FakeLlmClient {
 
     fn send_request(
         &self,
-        _request: reqwest::RequestBuilder,
+        request: reqwest::RequestBuilder,
     ) -> impl std::future::Future<Output = Result<impl AsRef<[u8]>, fyah::llm::Error>> {
+        // Capture what would go over the wire before answering.
+        if let Ok(request) = request.build()
+            && let Some(body) = request.body()
+            && let Some(bytes) = body.as_bytes()
+            && let Ok(value) = serde_json::from_slice(bytes)
+        {
+            self.requests.lock().unwrap().push(value);
+        }
+
         let body = self
             .responses
             .lock()
@@ -85,13 +118,14 @@ impl LlmClient for FakeLlmClient {
     }
 }
 
-/// A minimal valid config: one provider/model/agent, the `shell` tool enabled,
-/// and one workflow so startup conversion succeeds.
-fn write_test_config() -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("fyah-agent-loop-{}.toml", std::process::id()));
+/// A minimal valid config. `extra` lets a case append sections such as
+/// `[loop_parts.*]` overrides.
+fn write_test_config(name: &str, extra: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("fyah-agent-loop-{name}.toml"));
     std::fs::write(
         &path,
-        r#"
+        format!(
+            r#"
 [providers.openai]
 url = "http://127.0.0.1:9/v1/chat/completions"
 api_key = "test"
@@ -108,6 +142,12 @@ tools = ["shell"]
 [tools]
 shell = true
 
+[[tools.custom]]
+name = "read_file"
+description = "Read a file from disk"
+command = "cat"
+parameters = {{ type = "object", properties = {{ path = {{ type = "string", description = "The file path" }} }}, required = ["path"] }}
+
 [workflows.default]
 initial = "plan"
 max_iterations = 5
@@ -119,16 +159,22 @@ provider = "openai"
 model = "fake"
 on_success = "done"
 on_failure = "done"
-"#,
+{extra}
+"#
+        ),
     )
     .expect("write test config");
     path
 }
 
+fn load_config(path: &std::path::Path) -> Config {
+    Config::load(path.to_path_buf()).expect("config loads")
+}
+
 #[tokio::test]
 async fn loop_executes_tool_call_then_finishes_on_final_answer() {
-    let path = write_test_config();
-    let config = Config::load(path.clone()).expect("config loads");
+    let path = write_test_config("e2e", "");
+    let config = load_config(&path);
     let _ = std::fs::remove_file(&path);
 
     let store = ConfigStore::new(config).expect("startup conversion succeeds");
@@ -178,6 +224,80 @@ async fn loop_executes_tool_call_then_finishes_on_final_answer() {
     assert!(text.contains("fyah-loop-test"), "got: {text:?}");
 
     // Turn 2 answered without tools — the loop stopped there.
-    let calls = conversation[2].tool_calls();
-    assert!(calls.is_empty(), "final message must not carry tool calls");
+    assert!(conversation[2].tool_calls().is_empty());
+}
+
+#[tokio::test]
+async fn loop_part_override_selects_advertised_tools() {
+    let path = write_test_config(
+        "override",
+        "\n[loop_parts.prompt]\ntype = \"build_prompt_all_tools\"\n",
+    );
+    let config = load_config(&path);
+    let _ = std::fs::remove_file(&path);
+
+    let store = ConfigStore::new(config).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    let mut session = SessionContext::new(view, providers, Session::new());
+
+    let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
+    let binding = Binding {
+        agent: "primary",
+        provider: "openai",
+        model: "fake",
+    };
+
+    run_agent_loop(&client, &mut session, &binding)
+        .await
+        .expect("loop finishes");
+
+    // The all-tools prompt part ignores the agent's allow-list and advertises
+    // everything the registry can offer.
+    assert_eq!(client.advertised_tools(), vec![vec!["read_file", "shell"]]);
+}
+
+#[tokio::test]
+async fn hot_reload_applies_to_the_next_turn() {
+    let base_path = write_test_config("reload-base", "");
+    let hot_path = write_test_config(
+        "reload-hot",
+        "\n[loop_parts.prompt]\ntype = \"build_prompt_all_tools\"\n",
+    );
+    let base = load_config(&base_path);
+    let hot = load_config(&hot_path);
+    let _ = std::fs::remove_file(&base_path);
+    let _ = std::fs::remove_file(&hot_path);
+
+    let mut store = ConfigStore::new(base).expect("startup conversion succeeds");
+    let view = store.subscribe();
+
+    let mut providers = ProviderRegistry::default();
+    providers.register("openai", Box::new(OpenAIFactory));
+
+    let mut session = SessionContext::new(view, providers, Session::new());
+    let binding = Binding {
+        agent: "primary",
+        provider: "openai",
+        model: "fake",
+    };
+
+    // Turn 1: built-in prompt part — strict allow-list.
+    let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
+    run_agent_loop(&client, &mut session, &binding)
+        .await
+        .expect("first turn finishes");
+    assert_eq!(client.advertised_tools(), vec![vec!["shell"]]);
+
+    // Hot reload: publish the overridden parts; the next turn picks them up.
+    store.apply(hot).expect("hot config converts");
+
+    let client = FakeLlmClient::new(&[FINAL_RESPONSE]);
+    run_agent_loop(&client, &mut session, &binding)
+        .await
+        .expect("second turn finishes");
+    assert_eq!(client.advertised_tools(), vec![vec!["read_file", "shell"]]);
 }

@@ -12,5 +12,6 @@
     "tool_search": false,
     "web_search": false
   },
-  "workflows": {}
+  "workflows": {},
+  "loop_parts": {}
 }

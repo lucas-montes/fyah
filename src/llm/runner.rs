@@ -1,19 +1,21 @@
-//! The agentic loop: multi-turn LLM round-trips with tool execution.
+//! The agentic loop: a pipeline of configurable parts with tool execution.
 //!
-//! [`run_agent_loop`] drives one step's agent as a sequence of small stage
-//! functions, each with one responsibility:
+//! [`run_agent_loop`] drives one step's agent as a pipeline of [`Part`]s —
+//! small, single-responsibility stages resolved from the `[loop_parts]`
+//! registry once per turn (so hot reloads apply at the next turn):
 //!
-//! 1. [`setup_turn`] — resolve this turn's request from config (system
-//!    prompt, conversation, allowed tool definitions) and build the provider.
-//! 2. [`send_request`] — the transport round-trip; returns raw response bytes.
-//! 3. [`parse_response`] — wire bytes to an IR assistant [`Message`].
-//! 4. [`run_tools`] — execute every requested tool call against the registry.
-//! 5. [`update_context`] — record the turn in the session conversation.
+//! 1. a build-prompt part — resolve this turn's request from config (system
+//!    prompt, conversation, tool definitions) and build the provider;
+//! 2. send — the transport round-trip; returns raw response bytes;
+//! 3. parse — wire bytes to an IR assistant [`Message`];
+//! 4. run tools — execute every requested tool call against the registry;
+//! 5. record — put the assistant message and its results in the session.
 //!
-//! The loop repeats stages 1–5 until the model answers without tool calls or
-//! the agent's iteration budget runs out. Config values are always copied out
-//! of a `watch::Ref` guard inside a synchronous scope — a `watch::Ref` is
-//! never held across an `.await`.
+//! Parts are plain enum data dispatched by `match` in [`run_part`]; there are
+//! no trait objects. The loop repeats the pipeline until the model answers
+//! without tool calls or the agent's iteration budget runs out. Config values
+//! are always copied out of a `watch::Ref` guard inside a synchronous scope —
+//! a `watch::Ref` is never held across an `.await`.
 
 use std::fmt::{Debug, Display};
 
@@ -24,6 +26,7 @@ use crate::context::{ContentBlock, Message, Prompt, SessionContext, SystemBlock,
 use crate::llm::client::LlmClient;
 use crate::llm::config::Binding;
 use crate::llm::formats::ports::DynProvider;
+use crate::llm::parts::{self, Part};
 use crate::tools::Tool;
 
 /// Why an agent turn (or the loop around it) failed.
@@ -37,6 +40,8 @@ pub enum RunError {
     Request(crate::llm::client::Error),
     /// The provider response could not be parsed.
     Parse(crate::llm::formats::PortsError),
+    /// A pipeline stage ran before its prerequisite produced output.
+    Pipeline(String),
     /// The agent never produced a final answer within its iteration budget.
     Exhausted,
 }
@@ -48,6 +53,7 @@ impl Display for RunError {
             Self::Build(msg) => write!(f, "provider build error: {msg}"),
             Self::Request(err) => write!(f, "request error: {err}"),
             Self::Parse(err) => write!(f, "response parse error: {err}"),
+            Self::Pipeline(msg) => write!(f, "pipeline error: {msg}"),
             Self::Exhausted => {
                 write!(
                     f,
@@ -62,16 +68,18 @@ impl std::error::Error for RunError {}
 
 /// Drive one step's agent to completion.
 ///
-/// Each iteration runs the stage pipeline over the current conversation. When
-/// the assistant message carries no tool calls the loop is done; otherwise
-/// every call is executed against the tool registry and both the assistant
-/// message and its results are recorded before the next turn sees them.
+/// Each iteration re-resolves the pipeline from the loop-parts watch and runs
+/// it over the current conversation. When the assistant message carries no
+/// tool calls the loop is done; otherwise every call is executed against the
+/// tool registry and both the assistant message and its results are recorded
+/// before the next turn sees them.
 ///
 /// # Errors
 ///
 /// Returns [`RunError`] when the binding cannot be resolved, the provider
-/// cannot be built, a request or response fails, or the agent exhausts its
-/// `max_iterations` budget while still requesting tool calls.
+/// cannot be built, a request or response fails, a stage is missing its
+/// prerequisite output, or the agent exhausts its `max_iterations` budget
+/// while still requesting tool calls.
 pub async fn run_agent_loop(
     client: &impl LlmClient,
     session: &mut SessionContext,
@@ -87,23 +95,32 @@ pub async fn run_agent_loop(
         .max_iterations();
 
     for _ in 0..max_iterations {
-        // Stage 1 — resolve this turn from config and assemble the prompt.
-        let setup = setup_turn(session, binding)?;
+        // Resolve this turn's pipeline from the registry. Copied out of the
+        // watch borrow synchronously; reloads apply at the next turn.
+        let pipeline = {
+            let receiver = session.view().loop_parts();
+            let registry = receiver.borrow();
+            let mut parts = Vec::with_capacity(parts::DEFAULT_PIPELINE.len());
+            for name in parts::DEFAULT_PIPELINE {
+                match registry.get(name) {
+                    Some(part) => parts.push(part.clone()),
+                    None => {
+                        return Err(RunError::Config(format!(
+                            "loop part {name:?} is not defined"
+                        )));
+                    }
+                }
+            }
+            parts
+        };
 
-        // Stages 2 + 3 — transport round-trip, then wire bytes to IR.
-        let response = send_request(client, &setup).await?;
-        let assistant = parse_response(setup.provider.as_ref(), response.as_ref())?;
+        // Run the pipeline over fresh per-turn state.
+        let mut turn = TurnState::default();
+        for part in &pipeline {
+            run_part(part, client, session, binding, &mut turn).await?;
+        }
 
-        // Extract the calls before the message moves into the session.
-        let tool_calls = assistant.tool_calls();
-
-        // Stage 4 — execute every requested tool call.
-        let tool_results = run_tools(session, &tool_calls).await;
-
-        // Stage 5 — record the turn: assistant first, then its results.
-        update_context(session, assistant, tool_results);
-
-        if tool_calls.is_empty() {
+        if turn.tool_calls.is_empty() {
             return Ok(());
         }
     }
@@ -111,31 +128,108 @@ pub async fn run_agent_loop(
     Err(RunError::Exhausted)
 }
 
-/// Everything one turn needs to talk to the model, fully resolved up front so
-/// the send stage touches neither the session nor any watch channel.
-struct TurnSetup<'a> {
-    /// The wire-format provider built for this turn's binding.
-    provider: Box<dyn DynProvider>,
-    /// The assembled prompt; borrows the session conversation.
-    prompt: Prompt<'a>,
+/// Everything one agentic turn produces, threaded through the pipeline.
+///
+/// All fields are owned, so any part can borrow the session freely between
+/// stages; prerequisites are checked at dispatch time.
+#[derive(Default)]
+struct TurnState {
+    /// Wire-format provider built by the prompt part.
+    provider: Option<Box<dyn DynProvider>>,
+    /// Assembled request prompt.
+    prompt: Option<Prompt>,
+    /// Raw response bytes from the send part.
+    raw: Option<Vec<u8>>,
+    /// Parsed assistant message from the parse part.
+    assistant: Option<Message>,
+    /// Tool calls extracted while parsing.
+    tool_calls: Vec<ToolCall>,
+    /// Tool results produced by the tools part.
+    tool_results: Vec<Message>,
 }
 
-/// Resolve one turn's request from config: copy the system prompt, provider
-/// and model config, and tool allow-list out of their watch borrows, resolve
+impl TurnState {
+    fn prerequisite(&self, stage: &str, prerequisite: &str) -> Result<(), RunError> {
+        Err(RunError::Pipeline(format!(
+            "stage {stage:?} ran before {prerequisite:?} produced its output"
+        )))
+    }
+}
+
+/// Which tool definitions a build-prompt part advertises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolSelection {
+    /// The agent's strict allow-list (built-in behavior).
+    AllowList,
+    /// Every registry tool that can be advertised.
+    All,
+}
+
+/// Dispatch one pipeline stage against the shared per-turn state.
+async fn run_part(
+    part: &Part,
+    client: &impl LlmClient,
+    session: &mut SessionContext,
+    binding: &Binding<'_>,
+    turn: &mut TurnState,
+) -> Result<(), RunError> {
+    match part {
+        Part::BuildPromptFromAgent => {
+            build_prompt(session, binding, ToolSelection::AllowList, turn)
+        }
+        Part::BuildPromptAllTools => build_prompt(session, binding, ToolSelection::All, turn),
+        Part::SendRequest => {
+            let Some(provider) = turn.provider.as_ref() else {
+                return turn.prerequisite("send_request", "prompt");
+            };
+            let Some(prompt) = turn.prompt.as_ref() else {
+                return turn.prerequisite("send_request", "prompt");
+            };
+            turn.raw = Some(send_request(client, provider.as_ref(), prompt).await?);
+            Ok(())
+        }
+        Part::ParseResponse => {
+            let Some(provider) = turn.provider.as_ref() else {
+                return turn.prerequisite("parse_response", "send_request");
+            };
+            let Some(raw) = turn.raw.as_deref() else {
+                return turn.prerequisite("parse_response", "send_request");
+            };
+            let assistant = parse_response(provider.as_ref(), raw)?;
+            turn.tool_calls = assistant.tool_calls();
+            turn.assistant = Some(assistant);
+            Ok(())
+        }
+        Part::RunTools => {
+            if turn.assistant.is_none() {
+                return turn.prerequisite("run_tools", "parse_response");
+            }
+            turn.tool_results = run_tools(session, &turn.tool_calls).await;
+            Ok(())
+        }
+        Part::UpdateContext => {
+            let Some(assistant) = turn.assistant.take() else {
+                return turn.prerequisite("update_context", "parse_response");
+            };
+            update_context(session, assistant, std::mem::take(&mut turn.tool_results));
+            Ok(())
+        }
+    }
+}
+
+/// Resolve the turn's request from config: copy the system prompt, provider
+/// and model config, and tool selection out of their watch borrows, resolve
 /// the advertised tool definitions, build the provider, and assemble the
 /// prompt over the current conversation.
-///
-/// # Errors
-///
-/// Returns [`RunError`] when the binding cannot be resolved against the
-/// loaded config or the provider cannot be built.
-fn setup_turn<'a>(
-    session: &'a mut SessionContext,
+fn build_prompt(
+    session: &mut SessionContext,
     binding: &Binding<'_>,
-) -> Result<TurnSetup<'a>, RunError> {
+    selection: ToolSelection,
+    turn: &mut TurnState,
+) -> Result<(), RunError> {
     // Copy the config values out of the watch borrow — a `watch::Ref` guard is
     // never held across an `.await`.
-    let (system_prompt, provider_cfg, model_cfg, tools) = {
+    let (system_prompt, provider_cfg, model_cfg, allow) = {
         let llm = session.view().llm();
         let agent = llm
             .get_agent(binding.agent)
@@ -159,30 +253,42 @@ fn setup_turn<'a>(
     // Resolve the advertised tool definitions in their own synchronous scope;
     // the watch Ref is dropped before anything is awaited.
     let tools = {
-        let definitions = session.view().tools().borrow().definitions_for(&tools);
+        let receivers = session.view().tools();
+        let registry = receivers.borrow();
+        let definitions = match selection {
+            ToolSelection::AllowList => registry.definitions_for(&allow),
+            ToolSelection::All => registry
+                .tools()
+                .filter_map(|tool| tool.to_definition())
+                .collect(),
+        };
         (!definitions.is_empty()).then_some(definitions)
     };
 
-    let provider = session
+    turn.provider = session
         .providers()
         .build(binding.provider, &provider_cfg, &model_cfg)
-        .map_err(|err| RunError::Build(err.to_string()))?;
+        .map_err(|err| RunError::Build(err.to_string()))
+        .map(Some)?;
 
     let system = system_prompt.map(|text| vec![SystemBlock::Text { text }]);
-    let prompt = Prompt::new(system, session.conversation(), tools, None);
-
-    Ok(TurnSetup { provider, prompt })
+    turn.prompt = Some(Prompt::new(system, session.conversation(), tools, None));
+    Ok(())
 }
 
-/// Send the turn's prompt and return the raw response bytes. Pure transport:
-/// touches only the client and the pre-resolved setup.
+/// Send the assembled prompt and return the raw response bytes. Pure
+/// transport: touches only the client, the built provider, and the prompt.
 ///
 /// # Errors
 ///
 /// Returns [`RunError::Request`] when the HTTP round-trip fails.
-async fn send_request(client: &impl LlmClient, setup: &TurnSetup<'_>) -> Result<Vec<u8>, RunError> {
-    let request = client.create_request(Method::POST, setup.provider.url());
-    let request = setup.provider.create_request(&setup.prompt, request);
+async fn send_request(
+    client: &impl LlmClient,
+    provider: &dyn DynProvider,
+    prompt: &Prompt,
+) -> Result<Vec<u8>, RunError> {
+    let request = client.create_request(Method::POST, provider.url());
+    let request = provider.create_request(prompt, request);
     let response = client
         .send_request(request)
         .await
