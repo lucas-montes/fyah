@@ -5,6 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
     sce.url = "github:crocoder-dev/shared-context-engineering";
   };
@@ -13,6 +14,7 @@
     {
       self,
       nixpkgs,
+      crane,
       rust-overlay,
       flake-utils,
       sce,
@@ -32,16 +34,26 @@
             "rust-src"
           ];
         };
+
+        # Crane builds the dependency closure as its own derivation keyed by
+        # Cargo.lock/Cargo.toml, so source edits only rebuild the final crate.
+        craneLib = (crane.mkLib pkgs).overrideToolchain (_: rust);
+
+        fyahSrc = lib.cleanSourceWith {
+          src = craneLib.path ./.;
+        };
+
+        commonArgs = {
+          pname = "fyah";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+          src = fyahSrc;
+        };
       in
       {
         packages =
           let
-            fyah = pkgs.rustPlatform.buildRustPackage {
-              pname = "fyah";
-              version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
-              src = lib.cleanSource self;
-              cargoLock.lockFile = ./Cargo.lock;
-            };
+            fyahDeps = craneLib.buildDepsOnly commonArgs;
+            fyah = craneLib.buildPackage (commonArgs // { cargoArtifacts = fyahDeps; });
           in
           {
             inherit fyah;
