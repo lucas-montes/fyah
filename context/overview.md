@@ -156,6 +156,12 @@ validation *is* conversion (`TryFrom<WorkflowConfig> for WorkflowPlan` →
   reload ⇒ `StoreError::Convert`, last-good kept); all named
   workflows compile, re-select on reload, and the current step re-resolves by name
   (missing name ⇒ workflow completes; iteration budget resets).
+- **NixOS VM e2e smoke test** (`nix/tests.nix`, `checks.<system>.e2e-smoke`):
+  boots a VM with Ollama serving a baked `qwen2.5:0.5b` closure, drives one
+  agent turn through a FIFO on stdin (openai dialect), asserts the assistant
+  reply reached the session traces, the workflow completed, and a post hook
+  wrote `/tmp/marker`. Model-driven tool calling is not asserted (0.5B models
+  don't emit tool calls reliably); `packages.fyah` builds the binary.
 - IR message/prompt layer + per-provider wire DTOs + adapters for anthropic / ollama /
   openai, factories registered in the registry.
 - 34 tests passing — unit (tools registry, loop parts/hooks compile+dispatch,
