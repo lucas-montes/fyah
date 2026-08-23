@@ -5,6 +5,8 @@
 //!
 //! See <https://docs.ollama.com/api/chat> for the full spec.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::context::{
@@ -48,19 +50,23 @@ pub struct Config {
 }
 
 /// A single message in the chat history.
+///
+/// Shape-only request: borrows from the IR [`Prompt`] and the format
+/// [`Config`]. Content is a `Cow` because Ollama joins multiple blocks into
+/// one string — borrowed whenever a message has a single text block.
 #[derive(Debug, Serialize)]
 pub struct ChatRequest<'a> {
-    messages: Vec<Message>,
+    messages: Vec<Message<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
+    tools: Option<Vec<ToolDefinition<'a>>>,
     #[serde(flatten)]
     config: &'a Config,
 }
 
 impl<'a> ChatRequest<'a> {
     pub fn new(
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolDefinition>>,
+        messages: Vec<Message<'a>>,
+        tools: Option<Vec<ToolDefinition<'a>>>,
         config: &'a Config,
     ) -> Self {
         Self {
@@ -83,7 +89,7 @@ impl<'a> ChatRequest<'a> {
         }
         let mut messages = Vec::new();
         if let Some(system) = prompt.system() {
-            messages.push(system_message(system));
+            messages.push(system_message(Cow::Borrowed(system)));
         }
         messages.extend(
             prompt
@@ -101,51 +107,68 @@ impl<'a> ChatRequest<'a> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Message {
+/// Join collected block texts: borrowed for a single block, owned when the
+/// wire format forces them into one string.
+fn join_texts(texts: Vec<std::borrow::Cow<'_, str>>) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match texts.as_slice() {
+        [only] => only.clone(),
+        _ => Cow::Owned(
+            texts
+                .iter()
+                .map(std::borrow::Cow::as_ref)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct Message<'a> {
     /// Author of the message: `system`, `user`, `assistant`, or `tool`.
     role: MessageRole,
 
     /// Message text content.
-    content: String,
+    content: std::borrow::Cow<'a, str>,
 
     /// Optional list of inline base64-encoded images for multimodal models.
     #[serde(skip_serializing_if = "Option::is_none")]
-    images: Option<Vec<String>>,
+    images: Option<Vec<&'a str>>,
 
     /// Tool call requests produced by the model (present on assistant messages).
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCall>>,
+    tool_calls: Option<Vec<ToolCall<'a>>>,
 }
 
-impl From<&IrMessage> for Vec<Message> {
+impl<'a> From<&'a IrMessage> for Vec<Message<'a>> {
     /// Convert one IR message into one or more wire messages.
     ///
     /// Ollama messages are flat: content blocks are joined into a single
     /// string, images must be base64, and each tool result becomes its own
     /// `role: "tool"` message (the tool call id is dropped).
-    fn from(message: &IrMessage) -> Self {
+    fn from(message: &'a IrMessage) -> Self {
+        use std::borrow::Cow;
         match message {
             IrMessage::System { content } => {
                 let mut texts = Vec::new();
                 for block in content {
                     match block {
-                        IrSystemBlock::Text { text } => texts.push(text.clone()),
+                        IrSystemBlock::Text { text } => texts.push(Cow::Borrowed(text.as_str())),
                         IrSystemBlock::Image { .. } => {
                             tracing::warn!("Ollama: skipping image in system message");
                         }
                     }
                 }
-                vec![system_message(&texts.join("\n"))]
+                vec![system_message(join_texts(texts))]
             }
             IrMessage::User { content } => {
                 let mut texts = Vec::new();
                 let mut images = Vec::new();
                 for block in content {
                     match block {
-                        IrUserBlock::Text { text } => texts.push(text.clone()),
+                        IrUserBlock::Text { text } => texts.push(Cow::Borrowed(text.as_str())),
                         IrUserBlock::Image { source } => match source.kind() {
-                            ImageSourceKind::Base64 => images.push(source.data().to_string()),
+                            ImageSourceKind::Base64 => images.push(source.data()),
                             ImageSourceKind::Url => {
                                 tracing::warn!("Ollama: skipping URL image (base64 only)");
                             }
@@ -160,7 +183,7 @@ impl From<&IrMessage> for Vec<Message> {
                 }
                 vec![Message {
                     role: MessageRole::User,
-                    content: texts.join("\n"),
+                    content: join_texts(texts),
                     images: if images.is_empty() {
                         None
                     } else {
@@ -174,16 +197,16 @@ impl From<&IrMessage> for Vec<Message> {
                 let mut tool_calls = Vec::new();
                 for block in content {
                     match block {
-                        IrAssistantBlock::Text { text } => texts.push(text.clone()),
+                        IrAssistantBlock::Text { text } => texts.push(Cow::Borrowed(text.as_str())),
                         IrAssistantBlock::ToolCall {
                             id: _,
                             name,
                             arguments,
                         } => tool_calls.push(ToolCall {
                             function: ToolCallFunction {
-                                name: name.clone(),
+                                name,
                                 description: None,
-                                arguments: Some(arguments.clone()),
+                                arguments: Some(arguments),
                             },
                         }),
                         other => {
@@ -195,7 +218,7 @@ impl From<&IrMessage> for Vec<Message> {
                 }
                 vec![Message {
                     role: MessageRole::Assistant,
-                    content: texts.join("\n"),
+                    content: join_texts(texts),
                     images: None,
                     tool_calls: if tool_calls.is_empty() {
                         None
@@ -210,25 +233,27 @@ impl From<&IrMessage> for Vec<Message> {
 }
 
 /// Convert the prompt's system text into a `role: "system"` wire message.
-fn system_message(text: &str) -> Message {
+fn system_message(text: std::borrow::Cow<'_, str>) -> Message<'_> {
     Message {
         role: MessageRole::System,
-        content: text.to_string(),
+        content: text,
         images: None,
         tool_calls: None,
     }
 }
 
-/// Convert one IR tool result into a `role: "tool"` wire message.
-fn tool_message(block: &IrToolBlock) -> Message {
+/// Convert one IR tool result into a `role: "tool"` wire message. Texts are
+/// borrowed unless the error prefix forces a new string.
+fn tool_message(block: &IrToolBlock) -> Message<'_> {
+    use std::borrow::Cow;
     let mut texts = Vec::new();
     for content in block.content() {
         match content {
             IrContentBlock::Text { text } => {
                 let text = if block.is_error() {
-                    format!("[ERROR] {text}")
+                    Cow::Owned(format!("[ERROR] {text}"))
                 } else {
-                    text.clone()
+                    Cow::Borrowed(text.as_str())
                 };
                 texts.push(text);
             }
@@ -237,7 +262,7 @@ fn tool_message(block: &IrToolBlock) -> Message {
     }
     Message {
         role: MessageRole::Tool,
-        content: texts.join("\n"),
+        content: join_texts(texts),
         images: None,
         tool_calls: None,
     }
@@ -253,17 +278,17 @@ enum MessageRole {
     Tool,
 }
 
-/// A tool call produced by the model.
-#[derive(Debug, Serialize, Deserialize)]
-struct ToolCall {
-    function: ToolCallFunction,
+/// A tool call requested in an assistant message.
+#[derive(Debug, Serialize)]
+struct ToolCall<'a> {
+    function: ToolCallFunction<'a>,
 }
 
-/// Function details within a tool call.
-#[derive(Debug, Serialize, Deserialize)]
-struct ToolCallFunction {
+/// Function details within a request tool call.
+#[derive(Debug, Serialize)]
+struct ToolCallFunction<'a> {
     /// Name of the function to call.
-    name: String,
+    name: &'a str,
 
     /// What the function does.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,45 +296,45 @@ struct ToolCallFunction {
 
     /// JSON object of arguments to pass to the function.
     #[serde(skip_serializing_if = "Option::is_none")]
-    arguments: Option<serde_json::Value>,
+    arguments: Option<&'a serde_json::Value>,
 }
 
 /// A tool definition exposed to the model (in the request).
-#[derive(Debug, Serialize, Deserialize)]
-struct ToolDefinition {
+#[derive(Debug, Serialize)]
+struct ToolDefinition<'a> {
     /// Always `"function"` for function-type tools.
     #[serde(rename = "type")]
-    tool_type: String,
+    tool_type: &'static str,
 
     /// Function definition.
-    function: FunctionDef,
+    function: FunctionDef<'a>,
 }
 
-impl From<&IrToolDefinition> for ToolDefinition {
-    fn from(tool: &IrToolDefinition) -> Self {
+impl<'a> From<&'a IrToolDefinition> for ToolDefinition<'a> {
+    fn from(tool: &'a IrToolDefinition) -> Self {
         ToolDefinition {
-            tool_type: "function".to_string(),
+            tool_type: "function",
             function: FunctionDef {
-                name: tool.name().to_string(),
-                description: Some(tool.description().to_string()),
-                parameters: tool.input_schema().clone(),
+                name: tool.name(),
+                description: Some(tool.description()),
+                parameters: tool.input_schema(),
             },
         }
     }
 }
 
 /// Function definition within a tool.
-#[derive(Debug, Serialize, Deserialize)]
-struct FunctionDef {
+#[derive(Debug, Serialize)]
+struct FunctionDef<'a> {
     /// Function name exposed to the model.
-    name: String,
+    name: &'a str,
 
     /// Human-readable description of the function.
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    description: Option<&'a str>,
 
     /// JSON Schema for the function parameters.
-    parameters: serde_json::Value,
+    parameters: &'a serde_json::Value,
 }
 
 /// Format control — either the string `"json"` or a JSON schema object.
@@ -501,11 +526,29 @@ struct ResponseMessage {
 
     /// Tool calls requested by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCall>>,
+    tool_calls: Option<Vec<ResponseToolCall>>,
 
     /// Optional base64-encoded images in the response.
     #[serde(skip_serializing_if = "Option::is_none")]
     images: Option<Vec<String>>,
+}
+
+/// A tool call returned by the model (owned counterpart of the request-side
+/// [`ToolCall`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseToolCall {
+    function: ResponseToolCallFunction,
+}
+
+/// Function details within a response tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseToolCallFunction {
+    /// Name of the function to call.
+    name: String,
+
+    /// JSON object of arguments to pass to the function.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arguments: Option<serde_json::Value>,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -547,7 +590,7 @@ struct StreamMessage {
 
     /// Partial tool calls, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCall>>,
+    tool_calls: Option<Vec<ResponseToolCall>>,
 
     /// Partial base64-encoded images, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
