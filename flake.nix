@@ -48,20 +48,32 @@
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
           src = fyahSrc;
         };
+
+        fyahDeps = craneLib.buildDepsOnly commonArgs;
+
+        fyah = craneLib.buildPackage (commonArgs // { cargoArtifacts = fyahDeps; });
       in
       {
-        packages =
-          let
-            fyahDeps = craneLib.buildDepsOnly commonArgs;
-            fyah = craneLib.buildPackage (commonArgs // { cargoArtifacts = fyahDeps; });
-          in
-          {
-            inherit fyah;
-            default = fyah;
+        packages = {
+          inherit fyah;
+          default = fyah;
+        };
+
+        checks = {
+          e2e-smoke = import ./nix/tests.nix {
+            inherit self nixpkgs system;
           };
 
-        checks.e2e-smoke = import ./nix/tests.nix {
-          inherit self nixpkgs system;
+          # Independently cached lint/test runs over the same dependency
+          # artifact.
+          fyah-clippy = craneLib.cargoClippy (commonArgs // {
+            cargoArtifacts = fyahDeps;
+            cargoClippyExtraArgs = "--all-targets";
+          });
+
+          fyah-test = craneLib.cargoTest (commonArgs // {
+            cargoArtifacts = fyahDeps;
+          });
         };
 
         devShells.default = pkgs.mkShell {
