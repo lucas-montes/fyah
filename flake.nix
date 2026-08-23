@@ -2,7 +2,7 @@
   description = "Fyah your harness";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     crane.url = "github:ipetkov/crane";
@@ -49,6 +49,17 @@
           src = fyahSrc;
         };
 
+        # Model served by the dev app and baked into the e2e VM. Flip to
+        # [ "qwen2.5:1.5b" ] for the bigger instruct model (pin its hash in
+        # nix/ollama-models.nix after the first build).
+        ollamaModels = [ "qwen2.5:0.5b" ];
+
+        ollamaModelsDir = import ./nix/ollama-models.nix {
+          inherit pkgs;
+          ollama = pkgs.ollama;
+          models = ollamaModels;
+        };
+
         fyahDeps = craneLib.buildDepsOnly commonArgs;
 
         fyah = craneLib.buildPackage (commonArgs // { cargoArtifacts = fyahDeps; });
@@ -61,7 +72,7 @@
 
         checks = {
           e2e-smoke = import ./nix/tests.nix {
-            inherit self nixpkgs system;
+            inherit self nixpkgs system ollamaModels;
           };
 
           # Independently cached lint/test runs over the same dependency
@@ -88,6 +99,17 @@
         };
 
         apps = {
+          # Launch ollama serving the same baked model the e2e test uses.
+          ollama-dev = {
+            type = "app";
+            program = "${
+              pkgs.writeShellScript "ollama-dev" ''
+                export OLLAMA_MODELS="${ollamaModelsDir}"
+                exec ${pkgs.ollama}/bin/ollama serve
+              ''
+            }";
+          };
+
           generate-openapi = {
             type = "app";
             program = "${pkgs.writeShellScript "generate-openapi" ''

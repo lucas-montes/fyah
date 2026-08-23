@@ -13,6 +13,7 @@
   self,
   nixpkgs,
   system,
+  ollamaModels,
 }: let
   pkgs = import nixpkgs {inherit system;};
 
@@ -21,8 +22,7 @@
   ollama-models = import ./ollama-models.nix {
     inherit pkgs;
     ollama = pkgs.ollama;
-    models = ["qwen2.5:0.5b"];
-    hash = "sha256-1rWxV87i2SyW2Rew4D2GtHyArhLwHW/TLHD7sdb5mwc=";
+    models = ollamaModels;
   };
 
   # Minimal config: one listening plan step that goes straight to `done`.

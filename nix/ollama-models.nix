@@ -13,13 +13,31 @@
   pkgs,
   ollama,
   models ? [ "qwen2.5:0.5b" ],
-  hash ? "",
+  hashOverride ? null,
 }:
 let
   lib = pkgs.lib;
+
+  # Output hash per known model set. Flip model tags freely; a set without an
+  # entry builds unchecked once (empty hash ⇒ network build) and Nix prints
+  # the real hash — paste it here to re-pin.
+  pinnedHashes = {
+    "qwen2.5:0.5b" = "sha256-1rWxV87i2SyW2Rew4D2GtHyArhLwHW/TLHD7sdb5mwc=";
+    # "qwen2.5:1.5b" = "";
+  };
+
+  key = lib.concatStringsSep "," models;
   slug = lib.concatStringsSep "-" (
     map (model: builtins.replaceStrings [ ":" "/" ] [ "-" "-" ] model) models
   );
+
+  hash =
+    if hashOverride != null then
+      hashOverride
+    else if pinnedHashes ? ${key} then
+      pinnedHashes.${key}
+    else
+      ""; # unchecked first build: Nix reports the hash to pin above
 in
 pkgs.runCommand "ollama-models-${slug}"
   {
