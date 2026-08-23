@@ -37,26 +37,30 @@ pub struct Config {
 }
 
 /// <https://platform.claude.com/docs/en/api/messages/create>
-
+///
+/// Shape-only request: every field borrows from the IR [`Prompt`] (and the
+/// format [`Config`]); encoding is what materializes bytes. Owned strings
+/// appear only where the wire format forces new text (error-prefixed tool
+/// results, merged system text).
 #[derive(Debug, Serialize)]
 pub struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<PromptContent>,
-    messages: Vec<MessageInput>,
+    system: Option<PromptContent<'a>>,
+    messages: Vec<MessageInput<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
+    tools: Option<Vec<ToolDefinition<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<ToolChoice>,
+    tool_choice: Option<ToolChoice<'a>>,
     #[serde(flatten)]
     config: &'a Config,
 }
 
 impl<'a> ChatRequest<'a> {
     pub fn new(
-        system: Option<PromptContent>,
-        messages: Vec<MessageInput>,
-        tools: Option<Vec<ToolDefinition>>,
-        tool_choice: Option<ToolChoice>,
+        system: Option<PromptContent<'a>>,
+        messages: Vec<MessageInput<'a>>,
+        tools: Option<Vec<ToolDefinition<'a>>>,
+        tool_choice: Option<ToolChoice<'a>>,
         config: &'a Config,
     ) -> Self {
         Self {
@@ -79,7 +83,7 @@ impl<'a> ChatRequest<'a> {
         let mut system = Vec::new();
         if let Some(sys) = prompt.system() {
             system.push(MessageContentBlock::Text {
-                text: sys.to_string(),
+                text: std::borrow::Cow::Borrowed(sys),
             });
         }
 
@@ -111,68 +115,88 @@ impl<'a> ChatRequest<'a> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MessageInput {
+#[derive(Debug, Serialize)]
+struct MessageInput<'a> {
     role: MessageRole,
-    content: MessageContent,
+    content: MessageContent<'a>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
-enum PromptContent {
-    Text(String),
-    Blocks(Vec<MessageContentBlock>),
+enum PromptContent<'a> {
+    Text(std::borrow::Cow<'a, str>),
+    Blocks(Vec<MessageContentBlock<'a>>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
-enum MessageContent {
-    Text(String),
-    Blocks(Vec<MessageContentBlock>),
+enum MessageContent<'a> {
+    Text(std::borrow::Cow<'a, str>),
+    Blocks(Vec<MessageContentBlock<'a>>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum MessageContentBlock {
+enum MessageContentBlock<'a> {
     Text {
-        text: String,
+        text: std::borrow::Cow<'a, str>,
     },
     Image {
-        source: ImageSource,
+        source: ImageSource<'a>,
     },
     ToolUse {
-        id: String,
-        name: String,
-        input: Value,
+        id: &'a str,
+        name: &'a str,
+        input: &'a Value,
     },
     ToolResult {
-        tool_use_id: String,
-        content: Value,
+        tool_use_id: &'a str,
+        content: ToolResultContent<'a>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
     Thinking {
-        thinking: String,
-        signature: String,
+        thinking: &'a str,
+        signature: &'a str,
     },
     RedactedThinking {
-        data: String,
+        data: &'a str,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ImageSource {
-    #[serde(rename = "type")]
-    kind: String,
-    media_type: String,
-    data: String,
+/// The `content` payload of a `tool_result` block. Replaces the previous raw
+/// `serde_json::Value` so the texts can borrow; serializes to the identical
+/// shapes — `null`, a bare string, or an array of typed blocks.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ToolResultContent<'a> {
+    Null,
+    Text(std::borrow::Cow<'a, str>),
+    Blocks(Vec<ToolResultBlock<'a>>),
 }
 
-fn extend_system(system: &mut Vec<MessageContentBlock>, blocks: &[IrSystemBlock]) {
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ToolResultBlock<'a> {
+    Text { text: std::borrow::Cow<'a, str> },
+    Image { source: ImageSource<'a> },
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct ImageSource<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: &'a str,
+    data: &'a str,
+}
+
+fn extend_system<'a>(system: &mut Vec<MessageContentBlock<'a>>, blocks: &'a [IrSystemBlock]) {
     for block in blocks {
         match block {
             IrSystemBlock::Text { text } => {
-                system.push(MessageContentBlock::Text { text: text.clone() });
+                system.push(MessageContentBlock::Text {
+                    text: std::borrow::Cow::Borrowed(text),
+                });
             }
             IrSystemBlock::Image { source } => match source.into() {
                 Some(source) => system.push(MessageContentBlock::Image { source }),
@@ -185,13 +209,13 @@ fn extend_system(system: &mut Vec<MessageContentBlock>, blocks: &[IrSystemBlock]
 }
 
 /// Anthropic only accepts base64 images — URL images are skipped.
-impl From<&IrImageSource> for Option<ImageSource> {
-    fn from(source: &IrImageSource) -> Self {
+impl<'a> From<&'a IrImageSource> for Option<ImageSource<'a>> {
+    fn from(source: &'a IrImageSource) -> Self {
         match source.kind() {
             ImageSourceKind::Base64 => Some(ImageSource {
-                kind: "base64".to_string(),
-                media_type: source.media_type().to_string(),
-                data: source.data().to_string(),
+                kind: "base64",
+                media_type: source.media_type(),
+                data: source.data(),
             }),
             ImageSourceKind::Url => {
                 tracing::warn!("Anthropic: skipping URL image (base64 only)");
@@ -201,7 +225,7 @@ impl From<&IrImageSource> for Option<ImageSource> {
     }
 }
 
-fn user_message(blocks: &[IrUserBlock]) -> MessageInput {
+fn user_message(blocks: &[IrUserBlock]) -> MessageInput<'_> {
     let content = blocks.iter().filter_map(user_content_block).collect();
     MessageInput {
         role: MessageRole::User,
@@ -209,9 +233,12 @@ fn user_message(blocks: &[IrUserBlock]) -> MessageInput {
     }
 }
 
-fn user_content_block(block: &IrUserBlock) -> Option<MessageContentBlock> {
+fn user_content_block(block: &IrUserBlock) -> Option<MessageContentBlock<'_>> {
+    use std::borrow::Cow;
     match block {
-        IrUserBlock::Text { text } => Some(MessageContentBlock::Text { text: text.clone() }),
+        IrUserBlock::Text { text } => Some(MessageContentBlock::Text {
+            text: Cow::Borrowed(text),
+        }),
         IrUserBlock::Image { source } => {
             let source: Option<ImageSource> = source.into();
             source.map(|source| MessageContentBlock::Image { source })
@@ -227,7 +254,7 @@ fn user_content_block(block: &IrUserBlock) -> Option<MessageContentBlock> {
     }
 }
 
-fn assistant_message(blocks: &[IrAssistantBlock]) -> MessageInput {
+fn assistant_message(blocks: &[IrAssistantBlock]) -> MessageInput<'_> {
     let content = blocks.iter().filter_map(assistant_content_block).collect();
     MessageInput {
         role: MessageRole::Assistant,
@@ -235,17 +262,20 @@ fn assistant_message(blocks: &[IrAssistantBlock]) -> MessageInput {
     }
 }
 
-fn assistant_content_block(block: &IrAssistantBlock) -> Option<MessageContentBlock> {
+fn assistant_content_block(block: &IrAssistantBlock) -> Option<MessageContentBlock<'_>> {
+    use std::borrow::Cow;
     match block {
-        IrAssistantBlock::Text { text } => Some(MessageContentBlock::Text { text: text.clone() }),
+        IrAssistantBlock::Text { text } => Some(MessageContentBlock::Text {
+            text: Cow::Borrowed(text),
+        }),
         IrAssistantBlock::ToolCall {
             id,
             name,
             arguments,
         } => Some(MessageContentBlock::ToolUse {
-            id: id.clone(),
-            name: name.clone(),
-            input: arguments.clone(),
+            id,
+            name,
+            input: arguments,
         }),
         IrAssistantBlock::Thinking { text, signature } => {
             let Some(signature) = signature else {
@@ -253,12 +283,12 @@ fn assistant_content_block(block: &IrAssistantBlock) -> Option<MessageContentBlo
                 return None;
             };
             Some(MessageContentBlock::Thinking {
-                thinking: text.clone(),
-                signature: signature.clone(),
+                thinking: text,
+                signature,
             })
         }
         IrAssistantBlock::RedactedThinking { data } => {
-            Some(MessageContentBlock::RedactedThinking { data: data.clone() })
+            Some(MessageContentBlock::RedactedThinking { data })
         }
         IrAssistantBlock::Refusal { .. } => {
             tracing::warn!("Anthropic: skipping refusal block (not supported)");
@@ -277,42 +307,38 @@ fn assistant_content_block(block: &IrAssistantBlock) -> Option<MessageContentBlo
 
 /// A tool result becomes a `role: "user"` message with a single `tool_result`
 /// block, keyed by the originating tool use id.
-fn tool_result_message(block: &IrToolBlock) -> MessageInput {
+fn tool_result_message(block: &IrToolBlock) -> MessageInput<'_> {
     MessageInput {
         role: MessageRole::User,
         content: MessageContent::Blocks(vec![MessageContentBlock::ToolResult {
-            tool_use_id: block.id().to_string(),
+            tool_use_id: block.id(),
             content: tool_result_content(block.content(), block.is_error()),
             is_error: block.is_error().then_some(true),
         }]),
     }
 }
 
-fn tool_result_content(blocks: &[IrContentBlock], is_error: bool) -> Value {
+/// Build the `content` payload of a `tool_result` block. Texts are borrowed
+/// unless the error prefix forces a new string.
+fn tool_result_content(blocks: &[IrContentBlock], is_error: bool) -> ToolResultContent<'_> {
+    use std::borrow::Cow;
     let mut items = Vec::new();
     for block in blocks {
         match block {
             IrContentBlock::Text { text } => {
                 let text = if is_error {
-                    format!("[ERROR] {text}")
+                    Cow::Owned(format!("[ERROR] {text}"))
                 } else {
-                    text.clone()
+                    Cow::Borrowed(text.as_str())
                 };
-                items.push(Value::String(text));
+                items.push(ToolResultBlock::Text { text });
             }
             IrContentBlock::Image { source } => {
                 let source: Option<ImageSource> = source.into();
                 let Some(source) = source else {
                     continue;
                 };
-                items.push(serde_json::json!({
-                    "type": "image",
-                    "source": {
-                        "type": source.kind,
-                        "media_type": source.media_type,
-                        "data": source.data,
-                    },
-                }));
+                items.push(ToolResultBlock::Image { source });
             }
             IrContentBlock::InputAudio { .. } => {
                 tracing::warn!("Anthropic: skipping audio in tool result");
@@ -322,10 +348,14 @@ fn tool_result_content(blocks: &[IrContentBlock], is_error: bool) -> Value {
             }
         }
     }
-    match items.as_slice() {
-        [] => Value::Null,
-        [Value::String(text)] => Value::String(text.clone()),
-        _ => Value::Array(items),
+    match items.len() {
+        0 => ToolResultContent::Null,
+        // A single text serializes as a bare string, matching the old shape.
+        1 => match items.pop().unwrap() {
+            ToolResultBlock::Text { text } => ToolResultContent::Text(text),
+            block => ToolResultContent::Blocks(vec![block]),
+        },
+        _ => ToolResultContent::Blocks(items),
     }
 }
 
@@ -346,43 +376,43 @@ struct RequestMetadata {
     extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolDefinition {
-    name: String,
+#[derive(Debug, Serialize)]
+struct ToolDefinition<'a> {
+    name: &'a str,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    description: Option<&'a str>,
 
     #[serde(rename = "input_schema")]
-    input_schema: Value,
+    input_schema: &'a Value,
 }
 
-impl From<&IrToolDefinition> for ToolDefinition {
-    fn from(tool: &IrToolDefinition) -> Self {
+impl<'a> From<&'a IrToolDefinition> for ToolDefinition<'a> {
+    fn from(tool: &'a IrToolDefinition) -> Self {
         ToolDefinition {
-            name: tool.name().to_string(),
-            description: Some(tool.description().to_string()),
-            input_schema: tool.input_schema().clone(),
+            name: tool.name(),
+            description: Some(tool.description()),
+            input_schema: tool.input_schema(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ToolChoice {
+enum ToolChoice<'a> {
     Auto,
     Any,
-    Tool { name: String },
+    Tool { name: &'a str },
 }
 
-impl From<&IrToolChoice> for Option<ToolChoice> {
+impl<'a> From<&'a IrToolChoice> for Option<ToolChoice<'a>> {
     /// Anthropic has no `none` tool choice — omitting it disables tool use.
-    fn from(choice: &IrToolChoice) -> Self {
+    fn from(choice: &'a IrToolChoice) -> Self {
         match choice {
             IrToolChoice::None => None,
             IrToolChoice::Auto => Some(ToolChoice::Auto),
             IrToolChoice::Required => Some(ToolChoice::Any),
-            IrToolChoice::Specific(name) => Some(ToolChoice::Tool { name: name.clone() }),
+            IrToolChoice::Specific(name) => Some(ToolChoice::Tool { name }),
         }
     }
 }
@@ -401,7 +431,7 @@ pub struct ChatResponse {
     kind: String,
 
     role: MessageRole,
-    content: Vec<MessageContentBlock>,
+    content: Vec<ResponseContentBlock>,
     model: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,23 +443,46 @@ pub struct ChatResponse {
     usage: Usage,
 }
 
+/// A block in a response. Owned — it is parsed from response bytes and must
+/// outlive them (owned counterpart of the request-side
+/// [`MessageContentBlock`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponseContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
+}
+
 impl From<ChatResponse> for IrMessage {
     /// Convert a wire response into an IR assistant message.
     fn from(response: ChatResponse) -> Self {
         let mut blocks = Vec::new();
         for block in response.content {
             match block {
-                MessageContentBlock::Text { text } => {
+                ResponseContentBlock::Text { text } => {
                     blocks.push(IrAssistantBlock::Text { text });
                 }
-                MessageContentBlock::ToolUse { id, name, input } => {
+                ResponseContentBlock::ToolUse { id, name, input } => {
                     blocks.push(IrAssistantBlock::ToolCall {
                         id,
                         name,
                         arguments: input,
                     });
                 }
-                MessageContentBlock::Thinking {
+                ResponseContentBlock::Thinking {
                     thinking,
                     signature,
                 } => {
@@ -438,14 +491,8 @@ impl From<ChatResponse> for IrMessage {
                         signature: Some(signature),
                     });
                 }
-                MessageContentBlock::RedactedThinking { data } => {
+                ResponseContentBlock::RedactedThinking { data } => {
                     blocks.push(IrAssistantBlock::RedactedThinking { data });
-                }
-                MessageContentBlock::Image { .. } => {
-                    tracing::warn!("Anthropic: skipping image in response");
-                }
-                MessageContentBlock::ToolResult { .. } => {
-                    tracing::warn!("Anthropic: skipping unexpected tool result in response");
                 }
             }
         }
