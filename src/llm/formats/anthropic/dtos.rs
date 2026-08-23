@@ -75,7 +75,7 @@ impl<'a> ChatRequest<'a> {
     /// not allow system-role entries in the messages array. Each IR tool
     /// result becomes its own `role: "user"` message carrying a `tool_result`
     /// block. Unsupported blocks are skipped with a warning.
-    pub fn from_prompt(prompt: &Prompt, config: &'a Config) -> Self {
+    pub fn from_prompt(prompt: &'a Prompt<'a>, config: &'a Config) -> Self {
         let mut system = Vec::new();
         if let Some(sys) = prompt.system() {
             system.push(MessageContentBlock::Text {

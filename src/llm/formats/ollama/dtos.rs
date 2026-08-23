@@ -75,7 +75,7 @@ impl<'a> ChatRequest<'a> {
     /// Ollama has no `tool_choice` field — a non-default choice is ignored
     /// with a warning. Unsupported blocks are skipped with a warning; tool
     /// results with `is_error` are prefixed with `[ERROR] `.
-    pub fn from_prompt(prompt: &Prompt, config: &'a Config) -> Self {
+    pub fn from_prompt(prompt: &'a Prompt<'a>, config: &'a Config) -> Self {
         if let Some(choice) = prompt.tool_choice() {
             if !matches!(choice, IrToolChoice::None | IrToolChoice::Auto) {
                 tracing::warn!("Ollama: tool_choice is not supported and will be ignored");

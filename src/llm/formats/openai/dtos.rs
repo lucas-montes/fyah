@@ -5,6 +5,8 @@
 //!
 //! See <https://platform.openai.com/docs/api-reference/chat/create> for the full spec.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::context::{
@@ -94,25 +96,30 @@ pub struct Config {
 }
 
 /// `POST /v1/chat/completions` request body.
+///
+/// Shape-only: every field borrows from the IR [`Prompt`] (and the format
+/// [`Config`]); encoding the body is the only thing that materializes bytes.
+/// The one unavoidable owned string is `ToolCallFunction::arguments` — the
+/// wire spec requires tool-call arguments as JSON-as-a-string.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatRequest<'a> {
     #[serde(flatten)]
     config: &'a Config,
 
-    messages: Vec<Message>,
+    messages: Vec<Message<'a>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<Tool>>,
+    tools: Option<Vec<Tool<'a>>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<ToolChoice>,
+    tool_choice: Option<ToolChoice<'a>>,
 }
 impl<'a> ChatRequest<'a> {
     pub fn new(
-        messages: Vec<Message>,
-        tools: Option<Vec<Tool>>,
-        tool_choice: Option<ToolChoice>,
+        messages: Vec<Message<'a>>,
+        tools: Option<Vec<Tool<'a>>>,
+        tool_choice: Option<ToolChoice<'a>>,
         config: &'a Config,
     ) -> Self {
         Self {
@@ -127,11 +134,11 @@ impl<'a> ChatRequest<'a> {
     ///
     /// Unsupported blocks are skipped with a warning; tool results with
     /// `is_error` are prefixed with `[ERROR] `.
-    pub fn from_prompt(prompt: &Prompt, config: &'a Config) -> Self {
+    pub fn from_prompt(prompt: &'a Prompt<'a>, config: &'a Config) -> Self {
         let mut messages = Vec::new();
         if let Some(system) = prompt.system() {
             messages.push(Message::System {
-                content: Content::Text(system.to_string()),
+                content: Content::Text(Cow::Owned(system.to_string())),
                 name: None,
             });
         }
@@ -159,41 +166,43 @@ impl<'a> ChatRequest<'a> {
 /// {"role": "assistant", "content": null, "tool_calls": [...]}
 /// {"role": "tool", "content": "result", "tool_call_id": "call_1"}
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(tag = "role", rename_all = "snake_case")]
-enum Message {
+enum Message<'a> {
     Developer {
-        content: Content,
+        content: Content<'a>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
+        name: Option<&'a str>,
     },
     System {
-        content: Content,
+        content: Content<'a>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
+        name: Option<&'a str>,
     },
     User {
-        content: Content,
+        content: Content<'a>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
+        name: Option<&'a str>,
     },
     Assistant {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        content: Option<Content>,
+        content: Option<Content<'a>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        refusal: Option<String>,
+        refusal: Option<&'a str>,
         #[serde(default)]
-        tool_calls: Vec<ToolCall>,
+        tool_calls: Vec<ToolCall<'a>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio: Option<AudioReference>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
+        name: Option<&'a str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        function_call: Option<ToolCallFunction>,
+        function_call: Option<ToolCallFunction<'a>>,
     },
     Tool {
-        content: Content,
-        tool_call_id: String,
+        content: Content<'a>,
+        tool_call_id: &'a str,
     },
     Function {
         content: String,
@@ -201,12 +210,12 @@ enum Message {
     },
 }
 
-impl From<&IrMessage> for Vec<Message> {
+impl<'a> From<&'a IrMessage> for Vec<Message<'a>> {
     /// Convert one IR message into one or more wire messages.
     ///
     /// A single IR tool message may carry several tool results, each of which
     /// becomes its own `role: "tool"` wire message.
-    fn from(message: &IrMessage) -> Self {
+    fn from(message: &'a IrMessage) -> Self {
         match message {
             IrMessage::System { content } => vec![Message::System {
                 content: system_content(content),
@@ -223,18 +232,16 @@ impl From<&IrMessage> for Vec<Message> {
                 for block in content {
                     match block {
                         IrAssistantBlock::Text { text } => {
-                            parts.push(ContentPart::Text { text: text.clone() });
+                            parts.push(ContentPart::Text {
+                                text: Cow::Borrowed(text),
+                            });
                         }
-                        IrAssistantBlock::Refusal { text } => refusal = Some(text.clone()),
+                        IrAssistantBlock::Refusal { text } => refusal = Some(text),
                         IrAssistantBlock::ToolCall {
                             id,
                             name,
                             arguments,
-                        } => tool_calls.push(ToolCall::function(
-                            id.clone(),
-                            name.clone(),
-                            arguments.clone(),
-                        )),
+                        } => tool_calls.push(ToolCall::function(id, name, arguments)),
                         other => tracing::warn!(
                             "OpenAI: skipping unsupported assistant block: {other:?}"
                         ),
@@ -247,7 +254,7 @@ impl From<&IrMessage> for Vec<Message> {
                 };
                 vec![Message::Assistant {
                     content,
-                    refusal,
+                    refusal: refusal.map(|r| r.as_str()),
                     tool_calls,
                     audio: None,
                     name: None,
@@ -260,33 +267,40 @@ impl From<&IrMessage> for Vec<Message> {
 }
 
 /// OpenAI system messages are plain text, so text blocks are joined and
-/// image blocks are skipped.
-fn system_content(blocks: &[IrSystemBlock]) -> Content {
-    let mut text = Vec::new();
+/// image blocks are skipped. Borrowed for the single-block case; joined only
+/// when several blocks must merge into one string.
+fn system_content(blocks: &[IrSystemBlock]) -> Content<'_> {
+    let mut texts: Vec<&str> = Vec::new();
     for block in blocks {
         match block {
-            IrSystemBlock::Text { text: t } => text.push(t.clone()),
+            IrSystemBlock::Text { text: t } => texts.push(t),
             IrSystemBlock::Image { .. } => {
                 tracing::warn!("OpenAI: skipping image in system message");
             }
         }
     }
-    Content::Text(text.join("\n"))
+    match texts.as_slice() {
+        [] => Content::Text(Cow::Borrowed("")),
+        [only] => Content::Text(Cow::Borrowed(only)),
+        many => Content::Text(Cow::Owned(many.join("\n"))),
+    }
 }
 
-fn user_content(blocks: &[IrUserBlock]) -> Content {
+fn user_content(blocks: &[IrUserBlock]) -> Content<'_> {
     Content::Parts(blocks.iter().map(user_content_part).collect())
 }
 
-fn user_content_part(block: &IrUserBlock) -> ContentPart {
+fn user_content_part(block: &IrUserBlock) -> ContentPart<'_> {
     match block {
-        IrUserBlock::Text { text } => ContentPart::Text { text: text.clone() },
+        IrUserBlock::Text { text } => ContentPart::Text {
+            text: Cow::Borrowed(text),
+        },
         IrUserBlock::Image { source } => ContentPart::ImageUrl {
             image_url: source.into(),
         },
         IrUserBlock::Audio { data, format } => ContentPart::InputAudio {
             input_audio: InputAudio {
-                data: data.clone(),
+                data,
                 format: format.into(),
             },
         },
@@ -296,9 +310,9 @@ fn user_content_part(block: &IrUserBlock) -> ContentPart {
             filename,
         } => ContentPart::File {
             file: FileData {
-                file_data: data.clone(),
-                file_id: file_id.clone(),
-                filename: filename.clone(),
+                file_data: data.as_deref(),
+                file_id: file_id.as_deref(),
+                filename: filename.as_deref(),
             },
         },
     }
@@ -313,16 +327,17 @@ impl From<&IrAudioFormat> for AudioFormat {
     }
 }
 
-/// Convert one IR tool result into a `role: "tool"` wire message.
-fn tool_message(block: &IrToolBlock) -> Message {
+/// Convert one IR tool result into a `role: "tool"` wire message. Text is
+/// borrowed unless the error prefix forces a new string.
+fn tool_message(block: &IrToolBlock) -> Message<'_> {
     let mut parts = Vec::new();
     for content in block.content() {
         match content {
             IrContentBlock::Text { text } => {
                 let text = if block.is_error() {
-                    format!("[ERROR] {text}")
+                    Cow::Owned(format!("[ERROR] {text}"))
                 } else {
-                    text.clone()
+                    Cow::Borrowed(text.as_str())
                 };
                 parts.push(ContentPart::Text { text });
             }
@@ -333,7 +348,7 @@ fn tool_message(block: &IrToolBlock) -> Message {
             }
             IrContentBlock::InputAudio { data, format } => parts.push(ContentPart::InputAudio {
                 input_audio: InputAudio {
-                    data: data.clone(),
+                    data,
                     format: format.into(),
                 },
             }),
@@ -343,16 +358,16 @@ fn tool_message(block: &IrToolBlock) -> Message {
                 filename,
             } => parts.push(ContentPart::File {
                 file: FileData {
-                    file_data: data.clone(),
-                    file_id: file_id.clone(),
-                    filename: filename.clone(),
+                    file_data: data.as_deref(),
+                    file_id: file_id.as_deref(),
+                    filename: filename.as_deref(),
                 },
             }),
         }
     }
     Message::Tool {
         content: Content::Parts(parts),
-        tool_call_id: block.id().to_string(),
+        tool_call_id: block.id(),
     }
 }
 
@@ -360,40 +375,43 @@ fn tool_message(block: &IrToolBlock) -> Message {
 ///
 /// `#[serde(untagged)]` means it serializes as a bare string when `Text`,
 /// and as a JSON array when `Parts`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
-enum Content {
-    Text(String),
-    Parts(Vec<ContentPart>),
+enum Content<'a> {
+    Text(Cow<'a, str>),
+    Parts(Vec<ContentPart<'a>>),
 }
 
 /// A single content part within a message — tagged by `type`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ContentPart {
-    Text { text: String },
-    ImageUrl { image_url: ImageUrl },
-    InputAudio { input_audio: InputAudio },
-    File { file: FileData },
-    Refusal { refusal: String },
+enum ContentPart<'a> {
+    Text { text: Cow<'a, str> },
+    ImageUrl { image_url: ImageUrl<'a> },
+    InputAudio { input_audio: InputAudio<'a> },
+    File { file: FileData<'a> },
+    Refusal { refusal: &'a str },
 }
 
-/// Image URL reference (URL or base64).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct ImageUrl {
-    url: String,
+/// Image URL reference (URL or base64). Borrowed for URL sources; the base64
+/// data-URI form is synthesized and owned.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct ImageUrl<'a> {
+    url: Cow<'a, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<ImageDetail>,
 }
 
-impl From<&IrImageSource> for ImageUrl {
+impl<'a> From<&'a IrImageSource> for ImageUrl<'a> {
     /// IR images referencing raw data are inlined as a `data:` URI.
-    fn from(source: &IrImageSource) -> Self {
+    fn from(source: &'a IrImageSource) -> Self {
         let url = match source.kind() {
-            ImageSourceKind::Url => source.data().to_string(),
-            ImageSourceKind::Base64 => {
-                format!("data:{};base64,{}", source.media_type(), source.data())
-            }
+            ImageSourceKind::Url => Cow::Borrowed(source.data()),
+            ImageSourceKind::Base64 => Cow::Owned(format!(
+                "data:{};base64,{}",
+                source.media_type(),
+                source.data()
+            )),
         };
         Self { url, detail: None }
     }
@@ -409,9 +427,9 @@ enum ImageDetail {
 }
 
 /// Base64-encoded audio input.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct InputAudio {
-    data: String,
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct InputAudio<'a> {
+    data: &'a str,
     format: AudioFormat,
 }
 
@@ -424,34 +442,35 @@ enum AudioFormat {
 }
 
 /// File input data.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct FileData {
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct FileData<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    file_data: Option<String>,
+    file_data: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    file_id: Option<String>,
+    file_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    filename: Option<String>,
+    filename: Option<&'a str>,
 }
 
 /// Reference to a previous audio response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct AudioReference {
     id: String,
 }
 
 /// A tool call within an assistant message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-struct ToolCall {
-    id: String,
+struct ToolCall<'a> {
+    id: &'a str,
     #[serde(flatten)]
-    kind: ToolCallKind,
+    kind: ToolCallKind<'a>,
 }
 
-impl ToolCall {
-    /// OpenAI expects `arguments` as a JSON string.
-    fn function(id: String, name: String, arguments: serde_json::Value) -> Self {
+impl<'a> ToolCall<'a> {
+    /// OpenAI expects `arguments` as a JSON string — stringifying the IR
+    /// value is the one inherent allocation here (spec-required escaping).
+    fn function(id: &'a str, name: &'a str, arguments: &serde_json::Value) -> Self {
         Self {
             id,
             kind: ToolCallKind::Function {
@@ -465,20 +484,22 @@ impl ToolCall {
 }
 
 /// What kind of tool call — function or custom.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ToolCallKind {
+enum ToolCallKind<'a> {
     #[serde(rename = "function")]
-    Function { function: ToolCallFunction },
+    Function { function: ToolCallFunction<'a> },
     #[serde(rename = "custom")]
     Custom { custom: ToolCallCustom },
 }
 
 /// Function call details.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolCallFunction {
-    name: String,
-    /// JSON-stringified arguments.
+#[derive(Debug, Serialize)]
+struct ToolCallFunction<'a> {
+    name: &'a str,
+    /// JSON-stringified arguments (inherent allocation — see `ToolCall`).
     arguments: String,
 }
 
@@ -588,22 +609,24 @@ enum BuiltinVoice {
 
 // ── Tools ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Tool {
+enum Tool<'a> {
     #[serde(rename = "function")]
-    Function { function: FunctionDef },
+    Function { function: FunctionDef<'a> },
     #[serde(rename = "custom")]
     Custom { custom: CustomToolDef },
 }
 
-impl From<&IrToolDefinition> for Tool {
-    fn from(tool: &IrToolDefinition) -> Self {
+impl<'a> From<&'a IrToolDefinition> for Tool<'a> {
+    fn from(tool: &'a IrToolDefinition) -> Self {
         Tool::Function {
             function: FunctionDef {
-                name: tool.name().to_string(),
-                description: Some(tool.description().to_string()),
-                parameters: Some(tool.input_schema().clone()),
+                name: tool.name(),
+                description: Some(tool.description()),
+                parameters: Some(tool.input_schema()),
                 strict: None,
             },
         }
@@ -611,19 +634,19 @@ impl From<&IrToolDefinition> for Tool {
 }
 
 /// JSON Schema function definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FunctionDef {
-    name: String,
+#[derive(Debug, Serialize)]
+struct FunctionDef<'a> {
+    name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    description: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    parameters: Option<serde_json::Value>,
+    parameters: Option<&'a serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
 }
 
 /// Custom tool definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct CustomToolDef {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -632,7 +655,9 @@ struct CustomToolDef {
     format: Option<CustomToolFormat>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CustomToolFormat {
     #[serde(rename = "text")]
@@ -641,13 +666,15 @@ enum CustomToolFormat {
     Grammar { grammar: GrammarDef },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct GrammarDef {
     definition: String,
     syntax: GrammarSyntax,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
 enum GrammarSyntax {
     Lark,
@@ -656,23 +683,25 @@ enum GrammarSyntax {
 
 // ── Tool choice ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(untagged)]
-enum ToolChoice {
+enum ToolChoice<'a> {
     Mode(ToolChoiceMode),
-    Named(ToolChoiceNamed),
+    Named(ToolChoiceNamed<'a>),
     Allowed(ToolChoiceAllowed),
 }
 
-impl From<&IrToolChoice> for ToolChoice {
-    fn from(choice: &IrToolChoice) -> Self {
+impl<'a> From<&'a IrToolChoice> for ToolChoice<'a> {
+    fn from(choice: &'a IrToolChoice) -> Self {
         match choice {
             IrToolChoice::None => ToolChoice::Mode(ToolChoiceMode::None),
             IrToolChoice::Auto => ToolChoice::Mode(ToolChoiceMode::Auto),
             IrToolChoice::Required => ToolChoice::Mode(ToolChoiceMode::Required),
             IrToolChoice::Specific(name) => ToolChoice::Named(ToolChoiceNamed {
                 type_: ToolChoiceNamedType::Function,
-                function: ToolChoiceFunction { name: name.clone() },
+                function: ToolChoiceFunction { name },
             }),
         }
     }
@@ -686,39 +715,43 @@ enum ToolChoiceMode {
     Required,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolChoiceNamed {
+#[derive(Debug, Serialize)]
+struct ToolChoiceNamed<'a> {
     #[serde(rename = "type")]
     type_: ToolChoiceNamedType,
-    function: ToolChoiceFunction,
+    function: ToolChoiceFunction<'a>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
 enum ToolChoiceNamedType {
     Function,
     Custom,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolChoiceFunction {
-    name: String,
+#[derive(Debug, Serialize)]
+struct ToolChoiceFunction<'a> {
+    name: &'a str,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct ToolChoiceAllowed {
     #[serde(rename = "type")]
     type_: String, // always "allowed_tools"
     allowed_tools: AllowedToolsConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct AllowedToolsConfig {
     mode: AllowedToolsMode,
     tools: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+// Wire-shape completeness; the IR path does not emit this variant yet.
+#[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
 enum AllowedToolsMode {
     Auto,
@@ -751,8 +784,8 @@ struct PredictionContent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 enum PredictionText {
+    /// Config-owned prediction text (never borrows from a prompt).
     Text(String),
-    Parts(Vec<ContentPart>),
 }
 
 // ── Moderation config ──
@@ -893,7 +926,7 @@ impl From<ChatResponse> for IrMessage {
         }
         for call in message.tool_calls {
             match call.kind {
-                ToolCallKind::Function { function } => {
+                ResponseToolCallKind::Function { function } => {
                     let arguments = serde_json::from_str(&function.arguments)
                         .unwrap_or(serde_json::Value::Null);
                     blocks.push(IrAssistantBlock::ToolCall {
@@ -902,7 +935,7 @@ impl From<ChatResponse> for IrMessage {
                         arguments,
                     });
                 }
-                ToolCallKind::Custom { custom } => {
+                ResponseToolCallKind::Custom { custom } => {
                     tracing::warn!("OpenAI: skipping custom tool call: {}", custom.name);
                 }
             }
@@ -949,7 +982,8 @@ enum FinishReason {
     FunctionCall,
 }
 
-/// The assistant message returned in the response.
+/// The assistant message returned in the response. Owned — it is parsed from
+/// response bytes and must outlive them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResponseMessage {
     role: String,
@@ -962,9 +996,44 @@ struct ResponseMessage {
     #[serde(default)]
     audio: Option<ResponseAudio>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    function_call: Option<ToolCallFunction>,
+    function_call: Option<ResponseFunctionCall>,
     #[serde(default)]
-    tool_calls: Vec<ToolCall>,
+    tool_calls: Vec<ResponseToolCall>,
+}
+
+/// A tool call returned by the model (owned counterpart of the request-side
+/// [`ToolCall`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ResponseToolCall {
+    id: String,
+    #[serde(flatten)]
+    kind: ResponseToolCallKind,
+}
+
+/// What kind of tool call the model returned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponseToolCallKind {
+    #[serde(rename = "function")]
+    Function { function: ResponseToolCallFunction },
+    #[serde(rename = "custom")]
+    Custom { custom: ToolCallCustom },
+}
+
+/// Function call details in a response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseToolCallFunction {
+    name: String,
+    /// JSON-stringified arguments.
+    arguments: String,
+}
+
+/// Legacy function-call details in a response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 /// URL citation annotation (from web search).

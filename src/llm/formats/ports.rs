@@ -19,7 +19,7 @@ pub trait Provider<'a>: Debug {
 
     fn url(&self) -> &str;
 
-    fn build_prompt(&'a self, prompt: &'a Prompt) -> Self::Prompt;
+    fn build_prompt(&'a self, prompt: &'a Prompt<'a>) -> Self::Prompt;
 
     fn create_request(
         &self,

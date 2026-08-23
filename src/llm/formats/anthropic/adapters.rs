@@ -82,7 +82,7 @@ impl<'a> Provider<'a> for AnthropicFormat {
             .json(&prompt)
     }
 
-    fn build_prompt(&'a self, prompt: &'a Prompt) -> Self::Prompt {
+    fn build_prompt(&'a self, prompt: &'a Prompt<'a>) -> Self::Prompt {
         ChatRequest::from_prompt(prompt, &self.config)
     }
 
