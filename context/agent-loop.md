@@ -22,23 +22,34 @@ a final answer (or the agent's `max_iterations` budget) ends it with
 
 ## Parts (`src/llm/parts.rs`)
 
-A [`Part`] is plain enum data dispatched by `match` in `run_part` — no trait
-objects. Variants today:
+A [`Part`] is plain enum data (all variants fieldless, `Copy`) dispatched by
+`match` in `run_part` — no trait objects. Variants today:
 
-- `BuildPromptFromAgent` / `BuildPromptAllTools` — assemble system prompt +
-  conversation + tool definitions, build the wire provider
+- `BuildPromptFromAgent` / `BuildPromptAllTools` — resolve the binding and
+  build the wire provider from config references; also pick the tool selection
+  the send stage will apply
 - `SendRequest`, `ParseResponse`, `RunTools`, `UpdateContext`
 
 Names resolve through a hot-reloadable `LoopRegistry` (`PartStore<LoopRegistry>`
 on the config store). Built-in definitions sit behind reserved names
 (`prompt`, `send_request`, `parse_response`, `run_tools`, `update_context`);
 user entries in `[loop_parts.<name>]` shadow them. Reloads apply at the next
-turn — the pipeline is copied out of the watch synchronously each turn.
+turn — the pipeline is resolved out of the watch synchronously each turn.
 
-Per-stage state lives in an owned `TurnState` (provider, prompt, raw bytes,
-assistant message, tool calls/results), so any part can borrow the session
-freely between stages; missing prerequisites are clean `RunError::Pipeline`
-errors, not silent misordering.
+Per-stage state lives in an owned `TurnState` (provider, tool selection, raw
+bytes, assistant message, tool calls/results), so any part can borrow the
+session freely between stages; missing prerequisites are clean
+`RunError::Pipeline` errors, not silent misordering.
+
+### The prompt is shape-only
+
+The request prompt (`Prompt<'a>` in `src/context/message.rs`) owns nothing:
+messages are a slice of the session conversation, system text a `Cow` of the
+agent config's string, tool definitions references into the registry's
+precomputed set. The **send stage** assembles it from those borrows, encodes
+it into a `RequestBuilder` (which owns the serialized body), and drops every
+borrow before the transport await — assembling a request clones nothing.
+Because hooks never touch the session, nothing else needs the prompt alive.
 
 ### Ordering
 
@@ -77,14 +88,16 @@ returns `Aborted`.
 
 ## Tool execution
 
-Tool definitions come from the agent's strict allow-list intersected with the
-tool registry (or every advertisable tool under `build_prompt_all_tools`).
-Executable backends this pass: `shell` (runs the call's `command` argument via
-`sh -c`) and custom function tools (run their retained `command` with args via
-`FYAH_TOOL_NAME` / `FYAH_TOOL_ARGS`). Unknown or non-executable tools return an
-error tool result rather than failing the turn. Registry reads follow
-**borrow-then-drop**: copy what a stage needs out of the `watch::Ref` inside a
-sync scope, never hold a guard across an `.await`.
+Tool definitions are precomputed once at config compile (registry order) and
+advertised by reference: the agent's strict allow-list picks from that set (or
+every advertisable tool under `build_prompt_all_tools`). Executable backends
+this pass: `shell` (runs the call's `command` argument via `sh -c`) and custom
+function tools (run their retained `command` with args via `FYAH_TOOL_NAME` /
+`FYAH_TOOL_ARGS`). Unknown or non-executable tools return an error tool result
+rather than failing the turn. Registry reads follow **borrow-then-drop**: copy
+what a stage needs out of the `watch::Ref` inside a sync scope, never hold a
+guard across an `.await`. No shared-ownership helpers (`Arc`, clones) — hook
+sets and parts resolve to owned minimal data or references per turn.
 
 See also [overview.md](overview.md), [glossary.md](glossary.md),
 [context-map.md](context-map.md).

@@ -117,6 +117,14 @@ Per-part pre/post command hooks under `[loop_hooks.<part>]` (`src/llm/hooks.rs`)
 skips its part; a failed post hook flips the stage to failure. Command backends
 only this pass; others rejected at startup.
 
+## Prompt (shape-only)
+`Prompt<'a>` in `src/context/message.rs`: the request's shape with zero
+ownership — messages are a slice of the session conversation, system text a
+`Cow` of the agent config string, tool definitions references into the
+registry's precomputed set. Assembled inside the send stage, encoded into a
+`RequestBuilder`, dropped before any await. Assembling a request clones
+nothing.
+
 ## Borrow-then-drop
 The rule for reading config inside async code: copy the needed values out of
 the `watch::Ref` guard inside a synchronous scope, drop the guard, then `.await`
