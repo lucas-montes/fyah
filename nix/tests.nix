@@ -77,8 +77,10 @@ in
     name = "e2e-smoke";
 
     nodes.machine = {
+      # A full run takes ~2-4 minutes (boot + model warm-up + CPU inference
+      # per turn) — slow subtests are expected, not a hang.
       virtualisation.memorySize = 4096;
-      virtualisation.cores = 2;
+      virtualisation.cores = 4;
 
       services.ollama = {
         enable = true;
@@ -110,12 +112,12 @@ in
       with subtest("launch fyah and send one prompt"):
           machine.succeed("${start-fyah}")
 
-      with subtest("the assistant response reached the session context"):
-          # The session traces record every conversation message; the model
-          # answers "DONE" deterministically at temperature 0.
+      with subtest("the assistant reply is logged with its content"):
+          # update_context logs `reply=DONE` at INFO into fyah stdout; the
+          # model answers "DONE" deterministically at temperature 0.
           machine.wait_until_succeeds(
-              'grep -q \'"DONE"\' /tmp/fyah-e2e/.agent-traces/traces.ndjson',
-              timeout=300,
+              "grep -a 'assistant reply' /tmp/fyah-e2e/out | grep -q DONE",
+              timeout=120,
           )
 
       with subtest("the workflow reached done"):

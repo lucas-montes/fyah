@@ -22,7 +22,7 @@ use std::fmt::{Debug, Display};
 use reqwest::Method;
 use tokio::process::Command;
 
-use crate::context::{ContentBlock, Message, Prompt, SessionContext, ToolCall};
+use crate::context::{AssistantBlock, ContentBlock, Message, Prompt, SessionContext, ToolCall};
 use crate::llm::client::LlmClient;
 use crate::llm::config::Binding;
 use crate::llm::formats::ports::DynProvider;
@@ -449,9 +449,23 @@ async fn run_tools(
 }
 
 /// Record the turn in the session conversation: the assistant message first,
-/// then its tool results, so providers see them in request order. Both are
-/// moved in — no re-boxing.
+/// then its tool results, so providers see them in request order. The
+/// assistant's text is surfaced at INFO so operators and e2e checks can see
+/// what the model actually said.
 fn update_context(session: &mut SessionContext, assistant: Message, tool_results: Vec<Message>) {
+    if let Message::Assistant { content } = &assistant {
+        let reply = content
+            .iter()
+            .filter_map(|block| match block {
+                AssistantBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !reply.is_empty() {
+            tracing::info!(reply, "assistant reply");
+        }
+    }
     session.push_message(assistant);
     session.append_messages(tool_results);
 }
