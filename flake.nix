@@ -21,6 +21,7 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
+        lib = nixpkgs.lib;
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
@@ -33,6 +34,24 @@
         };
       in
       {
+        packages =
+          let
+            fyah = pkgs.rustPlatform.buildRustPackage {
+              pname = "fyah";
+              version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+              src = lib.cleanSource self;
+              cargoLock.lockFile = ./Cargo.lock;
+            };
+          in
+          {
+            inherit fyah;
+            default = fyah;
+          };
+
+        checks.e2e-smoke = import ./nix/tests.nix {
+          inherit self nixpkgs system;
+        };
+
         devShells.default = pkgs.mkShell {
           name = "fyah";
           buildInputs = [

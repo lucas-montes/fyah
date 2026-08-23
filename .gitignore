@@ -3,3 +3,4 @@ target/
 /bazel-*
 NOTES.md
 .agent-traces/
+result/
