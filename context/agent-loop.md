@@ -50,6 +50,11 @@ precomputed set. The **send stage** assembles it from those borrows, encodes
 it into a `RequestBuilder` (which owns the serialized body), and drops every
 borrow before the transport await — assembling a request clones nothing.
 Because hooks never touch the session, nothing else needs the prompt alive.
+The per-format wire requests (`ChatRequest<'a>` in each `formats/*/dtos.rs`)
+are equally reference-only: they borrow straight through from the IR prompt,
+with owned strings only where a wire spec forces new text (JSON-as-string
+tool-call arguments, `[ERROR]` prefixes, joined blocks). Responses stay
+owned — they are parsed from bytes.
 
 ### Ordering
 
