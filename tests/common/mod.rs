@@ -114,3 +114,18 @@ impl LlmClient for FakeLlmClient {
         std::future::ready(Ok(body.into_bytes()))
     }
 }
+
+/// Borrowed form: lets a test hand the client to a component that takes it by
+/// value (`Runtime::new`) while keeping ownership for later inspection.
+impl LlmClient for &FakeLlmClient {
+    fn create_request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        (*self).create_request(method, url)
+    }
+
+    fn send_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> impl std::future::Future<Output = Result<impl AsRef<[u8]>, Error>> {
+        (*self).send_request(request)
+    }
+}

@@ -8,13 +8,11 @@
 
 use fyah::config::{Config, ConfigStore};
 use fyah::context::{Message, Session, SessionContext};
-use fyah::llm::{
-    Binding, LlmClient, OpenAIFactory, ProviderRegistry, RunError, run_agent_loop,
-};
+use fyah::llm::{Binding, LlmClient, OpenAIFactory, ProviderRegistry, RunError, run_agent_loop};
 use fyah::runtime::CancellationGuard;
 
 mod common;
-use common::{FakeLlmClient, FINAL_RESPONSE, TOOL_CALL_RESPONSE};
+use common::{FINAL_RESPONSE, FakeLlmClient, TOOL_CALL_RESPONSE};
 
 /// A minimal valid config. `agent_loop` is spliced into the `[agents.primary]`
 /// table (e.g. `loop = [...]`); `extra` appends other top-level sections such

@@ -167,6 +167,12 @@ impl<Client: LlmClient> Runtime<Client> {
         }
     }
 
+    /// Hand the session back once the walk has finished, so the owner (the
+    /// orchestrator, or a resuming run) can inspect or persist it.
+    pub fn into_session(self) -> SessionContext {
+        self.session
+    }
+
     /// Resolve one boundary of the walk: apply any reloaded plan, honor
     /// cancellation and the cycle budget, then resolve the cursor's step name.
     /// `None` ends the walk; the returned step borrows the plan so the caller
