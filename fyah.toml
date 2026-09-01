@@ -1,30 +1,32 @@
 # Fyah development configuration
 # Overrides the XDG default at ~/.config/fyah/config.toml
 
-# ── Providers: API endpoints. The wire-format dialect lives on the model. ──
-# This Ollama build (0.21.1) only serves the OpenAI-compat /v1 dialect, so the
-# runnable provider speaks "openai" while pointing at the local server.
-[providers.openai]
-url = "http://127.0.0.1:11434/v1/chat/completions"
-api_key = "ollama"
-
-# Native /api/chat dialect (example; not served by this Ollama build).
-[providers.ollama]
-url = "http://127.0.0.1:11434/api/chat"
-api_key = "ollama" # Required but ignored apparently
-
-# ── Models: identity + per-provider wire config, tagged by format. ──
-[models.gpt-4o]
+[provider.openrouter]
+url = "https://openrouter.ai/api/v1/chat/completions"
+api_key = "test"
 format = "openai"
-model = "gpt-4o"
-max_completion_tokens = 4096
+
+[provider.openrouter.models.nemotron]
+name = "nvidia/nemotron-3.5-lightning:free"
 temperature = 0.7
 
-# Local phi3, reached through Ollama's OpenAI-compat layer.
-[models.phi3]
+[provider.ollama]
+url = "http://127.0.0.1:11434/v1/chat/completions"
+api_key = "ollama"
 format = "openai"
-model = "phi3:mini"
+
+[provider.ollama.models.qwen25]
+name = "qwen2.5-coder:14b"
 temperature = 0.3
+
+[provider.ollama.models.phi3]
+name = "phi3:mini"
+temperature = 0.3
+
+[agent.coder]
+system_prompt = "You are Fyah, an AI coding assistant."
+max_iterations = 25
+
 
 # ── Agents: system prompt + strict tool allow-list + optional pipeline. ──
 # tools = [...] restricts the [tools] catalog to the listed names; empty means

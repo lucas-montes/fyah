@@ -96,6 +96,7 @@
             pkgs.bazel
             pkgs.buildifier
           ];
+          RUSTFLAGS="--cfg tracing_unstable";
         };
 
         apps = {

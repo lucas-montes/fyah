@@ -1,0 +1,22 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "Sure! Here's a simple Python script that gets the current date:\n\n```python\nimport datetime\n\ncurrent_date = datetime.datetime.now().strftime(\"%Y-%m-%d\")\nprint(current_date)\n```\n\nThis script uses `datetime` from the `datetime` module, which is commonly used for working with dates and times in Python. The `now()` method returns a `datetime` object representing the current date and time.\n\nYou can run this script using any Python environment or by saving it as a `.py` file and running it directly from the command line:\n\n```sh\npython your_script_name.py\n```\n\nReplace `your_script_name.py` with the name of your script.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1787819377,
+  "id": "chatcmpl-20",
+  "model": "qwen2.5:0.5b",
+  "object": "chat.completion",
+  "system_fingerprint": "fp_ollama",
+  "usage": {
+    "completion_tokens": 139,
+    "prompt_tokens": 268,
+    "total_tokens": 407
+  }
+}

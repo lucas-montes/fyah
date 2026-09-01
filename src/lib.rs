@@ -2,9 +2,12 @@
 //! tests in `tests/`.
 
 pub mod config;
-pub mod context;
+
 pub mod fs_watcher;
-pub mod llm;
-pub mod runtime;
-pub mod tools;
-pub mod workflows;
+
+pub mod agent;
+pub mod client;
+pub mod model;
+pub mod provider;
+pub mod session;
+mod traces;
