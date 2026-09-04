@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use reqwest::RequestBuilder;
 use serde::Deserialize;
 
+use valuable::Valuable;
+
 use crate::config::ModelConfig;
 use crate::model::{AssistantTurn, Conversation};
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default, Valuable)]
 #[serde(rename_all = "lowercase")]
 pub enum WireFormat {
     #[default]
@@ -19,7 +21,7 @@ pub enum WireFormat {
 }
 
 /// Raw connection config (deserialized from TOML). Fields are private.
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct ProviderConfig {
     url: String,
     api_key: String,

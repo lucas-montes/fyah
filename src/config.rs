@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use valuable::Valuable;
 
 use crate::provider::{Provider, ProviderConfig};
 
 /// Per-provider model definition (deserialized from TOML). Fields private.
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct ModelConfig {
     name: String,
     temperature: Option<f32>,
@@ -14,7 +15,7 @@ pub struct ModelConfig {
 }
 
 /// Persona config (deserialized from TOML). No model — agents are model-agnostic.
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct AgentConfig {
     system_prompt: Option<String>,
     max_iterations: u32,
@@ -24,7 +25,7 @@ fn default_debounce_ms() -> u64 {
     2000
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct WatcherConfig {
     #[serde(default = "default_debounce_ms")]
     debounce_ms: u64,
@@ -39,7 +40,7 @@ impl Default for WatcherConfig {
 }
 
 /// Raw, fully-parsed configuration. Fields private.
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct Config {
     #[serde(default)]
     providers: HashMap<String, ProviderConfig>,
@@ -51,7 +52,7 @@ pub struct Config {
     watcher: WatcherConfig,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct WorkflowConfig {
     initial: String,
     #[serde(default)]
@@ -60,7 +61,7 @@ pub struct WorkflowConfig {
     steps: HashMap<String, Step>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Step {
     Plan(StepBase),
@@ -71,7 +72,7 @@ pub enum Step {
     Custom(CustomStep),
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct StepBase {
     #[serde(default)]
     agent: Option<String>,
@@ -81,7 +82,7 @@ pub struct StepBase {
     on_failure: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct ValidateStep {
     #[serde(default)]
     on_success: String,
@@ -89,7 +90,7 @@ pub struct ValidateStep {
     on_failure: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct CustomStep {
     pub backend: Backend,
     #[serde(default)]
@@ -98,7 +99,7 @@ pub struct CustomStep {
     pub on_failure: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Deserialize, PartialEq, Clone, Valuable)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Backend {
     Command { command: String },

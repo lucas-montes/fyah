@@ -10,6 +10,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
+use valuable::Valuable;
+
 use fyah::{
     agent::{spawn_stdin_source, Agent, Inbound, InteractiveAgent},
     client::Client,
@@ -78,24 +80,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let providers = config.providers_len();
-    let models = config.models_len();
-    let agents = config.agents_len();
-    let workflows = config.workflows_len();
-    let provider_names = config.provider_names().join(", ");
-    let agent_names = config.agent_names().join(", ");
-    let workflow_details = config.workflow_summaries().join("; ");
-    let debounce_ms = config.watcher_debounce_ms();
     tracing::info!(
+        config = config.as_value(),
         path=%config_path.display(),
-        providers,
-        models,
-        agents,
-        workflows,
-        debounce_ms,
-        provider_names=%provider_names,
-        agent_names=%agent_names,
-        workflows_detail=%workflow_details,
         selected_agent=%cli.agent,
         selected_provider=%cli.provider,
         selected_model=%cli.model,
