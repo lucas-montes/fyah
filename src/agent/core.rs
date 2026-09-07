@@ -54,7 +54,19 @@ pub async fn run_agent_loop(
         };
         let turn = tokio::select! {
             _ = view.has_changed() => continue,
-            r = send_and_parse(client, req, format) => r?,
+            r = send_and_parse(client, req, format) => match r {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(error=%e, "LLM call failed in run_agent_loop, treating as empty turn");
+                    if let Some(c) = messages.last().and_then(|m| match m {
+                        Message::User { content } => Some(content.as_str()),
+                        _ => None,
+                    }) {
+                        println!("Echo (LLM unavailable): {c}");
+                    }
+                    return Ok(());
+                }
+            },
         };
         if let Some(cb) = on_turn.as_mut() {
             if !cb(&turn) {

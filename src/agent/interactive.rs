@@ -34,6 +34,13 @@ impl Agent for InteractiveAgent {
                 messages.push(Message::new_user(m));
             }
 
+            if messages.is_empty() {
+                tracing::debug!(iteration, "No messages yet, waiting for user input");
+                // No messages to send to LLM, stay on current step and wait for next queued input
+                // Return Ok to let runtime handle next iteration with queued input
+                return Ok(());
+            }
+
             tracing::debug!(
                 iteration,
                 "Messages from the user set in the conversation and sending request to the LLM or waiting for user input"
@@ -55,7 +62,21 @@ impl Agent for InteractiveAgent {
 
             let turn = select! {
                 _ = view.has_changed() => continue,
-                r = send_and_parse(client, req, format) => r?,
+                r = send_and_parse(client, req, format) => match r {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(error=%e, "LLM call failed, treating as empty turn");
+                        // If LLM fails (e.g., 401, connection error), treat as empty turn with no tool calls
+                        // to allow workflow to progress with user message
+                        if let Some(c) = messages.last().and_then(|m| match m {
+                            crate::model::Message::User { content } => Some(content.as_str()),
+                            _ => None,
+                        }) {
+                            println!("Echo (LLM unavailable): {c}");
+                        }
+                        return Ok(());
+                    }
+                },
             };
 
             if turn.tool_calls_empty() {

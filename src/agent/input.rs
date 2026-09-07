@@ -19,7 +19,7 @@ fn parse_line(line: String) -> Inbound {
         let mut parts = rest.splitn(2, ' ');
         match parts.next() {
             Some("exit") => Inbound::Command(Command::Exit),
-            Some("stop") => Inbound::Command(Command::Stop),
+            Some("stop") | Some("abort") | Some("kill") => Inbound::Command(Command::Stop),
             Some("interrupt") => {
                 Inbound::Command(Command::Interrupt(parts.next().unwrap_or("").to_string()))
             }
