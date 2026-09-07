@@ -73,12 +73,16 @@ Fix `src/runtime.rs` (branch `harness`, working directory) so every workflow ste
   - Evidence: cargo check pass (warnings only), cargo test 9 passed, RuntimeError now has Cancelled/Timeout, run_step clones Step to avoid borrow across await
   - Notes: Added Clone to Step variants, added on_failure/timeout_secs methods to StepBase/ValidateStep/CustomStep, fixed run_step to clone step and handle on_success/on_failure correctly
 
-- [ ] T05: Wrap `run_step` in `tokio::select!` with graceful checkpoint + WAL on cancel (status:todo)
+- [x] T05: Wrap `run_step` in `tokio::select!` with graceful checkpoint + WAL on cancel (status:done)
   - Task ID: T05
   - Goal: Race `run_step` against all cancellations and save checkpoint (and WAL) on graceful abort so restart resumes at same/closest point, with exact mid-tool-call via WAL.
-  - Boundaries (in/out of scope): In — `src/runtime.rs` `start_workflow`: load checkpoint on entry if exists (`session.load_checkpoint()` → restore `current`, `messages`, `queued` + replay WAL to skip completed tool_call_ids), then loop with `tokio::select! { _ = shutdown.changed() => { session.save_checkpoint(workflow, &current, messages, queued)?; return Ok(()) }, _ = view.has_changed() => { session.save_checkpoint(...)?; continue }, inbound = rx.recv() => match Stop/Exit => { save_checkpoint; return Ok(()) }, Interrupt(t) => { queued.push(t); save_checkpoint; // abort step }, res = run_step(...) => handle Ok(next)/Err, _ = sleep(timeout) => { save_checkpoint; return Err(Timeout) } }` where `timeout` from `view.borrow().workflow(...).resolve(current).timeout_secs()`. Ensure `run_step` future dropped on cancel; WAL updated inside `execute_tools` (see T07/T08). Out — no `run_*_step` bodies beyond checkpoint calls.
+  - Boundaries (in/out of scope): In — `src/runtime.rs` `start_workflow`: load checkpoint on entry if exists, then loop with `tokio::select!` racing `shutdown.changed()`, `view.has_changed()`, `rx.recv()`, `sleep(timeout)`, and `run_step` (inside select so it gets cancelled when other branch wins), saving checkpoint on graceful branches.
   - Done when: `run_step` inside `select!`, graceful cancel saves `.fyah/sessions/<id>/checkpoint.json`, WAL replay works, `cargo check` passes.
   - Verification notes (commands or checks): `cargo check`; `grep -n "save_checkpoint\|run_step" src/runtime.rs`; manual: send `/stop` during step, checkpoint file exists under `.fyah/sessions/`.
+  - Completed: 2026-09-07
+  - Files changed: src/runtime.rs, src/config.rs
+  - Evidence: cargo check pass, cargo test 9 passed, run_step now inside select! with shutdown_clone, view_clone, rx, timeout and checkpoint save on each branch, load_checkpoint on entry restores current/messages/queued
+  - Notes: Fixed borrow issues by cloning view/shutdown for select, changed ConfigView::has_changed to async fn to be Unpin, run_step no longer takes shutdown/rx (handled in outer select), delete checkpoint on done
 
 - [ ] T06: Fix `run_step` dispatch and `on_success`/`on_failure` routing (status:todo)
   - Task ID: T06

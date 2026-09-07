@@ -559,12 +559,9 @@ impl ConfigView {
     pub fn borrow(&self) -> tokio::sync::watch::Ref<'_, Config> {
         self.inner.borrow()
     }
-    pub fn has_changed(
-        &self,
-    ) -> impl std::future::Future<Output = Result<(), tokio::sync::watch::error::RecvError>> {
-        //TODO: use self.inner.has_changed()
+    pub async fn has_changed(&self) -> Result<(), tokio::sync::watch::error::RecvError> {
         let mut rx = self.inner.clone();
-        async move { rx.changed().await }
+        rx.changed().await
     }
 }
 
