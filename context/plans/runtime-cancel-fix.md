@@ -51,12 +51,16 @@ Fix `src/runtime.rs` (branch `harness`, working directory) so every workflow ste
   - Evidence: cargo check pass (warnings only), cargo test 7 passed (including config tests), trait now `run(..., queued: &mut Vec<String>, max_iterations: u32)`, CreativeAgent delegates to run_agent_loop, InteractiveAgent uses passed queued
   - Notes: Extracted run_agent_loop helper for CreativeAgent to reduce duplication; InteractiveAgent keeps rx handling but now uses external queued for testability as requested
 
-- [ ] T03: Extend `Session` for disk checkpoints under `.fyah/sessions/<id>/` + WAL (status:todo)
+- [x] T03: Extend `Session` for disk checkpoints under `.fyah/sessions/<id>/` + WAL (status:done)
   - Task ID: T03
   - Goal: Leverage `Session` to save/load checkpoints on disk under new `.fyah/` directory and add WAL for exact mid-tool-call resume.
-  - Boundaries (in/out of scope): In — `src/session.rs` (and `src/traces.rs`, `.gitignore`): create `.fyah/sessions/<id>/` dir, add `checkpoint_path(&self) -> PathBuf` → `.fyah/sessions/<id>/checkpoint.json`, `wal_path(&self) -> PathBuf` → `.fyah/sessions/<id>/wal.json`, `save_checkpoint(&self, workflow, current, messages, queued)`, `load_checkpoint(&self) -> Option<Checkpoint>`, `append_wal(&self, tool_call_id, status)` and `load_wal`, define `Checkpoint { workflow, current, messages, queued, timestamp }` and `WalEntry { tool_call_id, name, arguments, result: Option<String>, timestamp }` with `Serialize/Deserialize`; migrate `.agent-traces/traces.ndjson` → `.fyah/agent-traces/` or `.fyah/sessions/<id>/traces.ndjson`; update `.gitignore` to ignore `.fyah/`. Out — no runtime loop yet, no signal wiring.
+  - Boundaries (in/out of scope): In — `src/session.rs` (and `src/traces.rs`, `.gitignore`): create `.fyah/sessions/<id>/` dir, add `checkpoint_path`, `wal_path`, `save_checkpoint`, `load_checkpoint`, `append_wal`, `load_wal`, `Checkpoint` and `WalEntry` with `Serialize/Deserialize`; migrate `.agent-traces` → `.fyah/agent-traces`; update `.gitignore` to ignore `.fyah/`. Out — no runtime loop yet, no signal wiring.
   - Done when: `cargo check` passes; `Session::save_checkpoint` writes `.fyah/sessions/<id>/checkpoint.json`, `load_checkpoint` reads it, WAL append works; unit test writes and reads back; `.fyah/` gitignored.
   - Verification notes (commands or checks): `cargo check`; `cargo test session`; `ls .fyah/sessions/` after test; `grep -n "checkpoint\|wal" src/session.rs`; `cat .gitignore | grep fyah`.
+  - Completed: 2026-09-07
+  - Files changed: src/session.rs, src/main.rs, .gitignore
+  - Evidence: cargo check pass, cargo test 9 passed (2 session tests checkpoint_roundtrip + wal_append_and_load), .fyah/sessions/<id>/checkpoint.json roundtrip ok, WAL append ok
+  - Notes: Session now has session_dir(), checkpoint_path(), wal_path(), traces_path() under .fyah/sessions/<id>/, Checkpoint and WalEntry with Serialize/Deserialize, .fyah/agent-traces created in start_loggers
 
 - [ ] T04: Repair `src/runtime.rs` imports, error type, signatures (status:todo)
   - Task ID: T04

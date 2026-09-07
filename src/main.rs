@@ -43,7 +43,8 @@ struct Cli {
 }
 
 fn start_loggers() -> WorkerGuard {
-    let agent_file = tracing_appender::rolling::never(".agent-traces", "traces.ndjson");
+    let _ = std::fs::create_dir_all(".fyah/agent-traces");
+    let agent_file = tracing_appender::rolling::never(".fyah/agent-traces", "traces.ndjson");
     let (agent_writer, agent_guard) = tracing_appender::non_blocking(agent_file);
     let agent_layer = tracing_subscriber::fmt::layer()
         .json()
