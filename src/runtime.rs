@@ -1,7 +1,16 @@
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
-use crate::config::{Backend, ConfigView, Step};
-
+use crate::{
+    agent::{
+        Agent, Command, Inbound, InteractiveAgent, core::{build_request, execute_tools, send_and_parse}
+    },
+    client::LlmClient,
+    config::{
+        AgentError, Backend, ConfigView, CustomStep, Selection, Step, StepBase, ValidateStep,
+    },
+    model::{Conversation, Message, Tool},
+    session::Session,
+};
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -9,6 +18,7 @@ pub enum RuntimeError {
     UnknownStepStatic(&'static str),
     Backend(BackendError),
     Config(crate::config::ConfigError),
+    Agent(AgentError),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -18,7 +28,20 @@ impl std::fmt::Display for RuntimeError {
             Self::UnknownStepStatic(s) => write!(f, "unknown step: {s}"),
             Self::Backend(e) => write!(f, "backend error: {e}"),
             Self::Config(e) => write!(f, "config error: {e}"),
+            Self::Agent(e) => write!(f, "agent error: {e}"),
         }
+    }
+}
+
+impl From<AgentError> for RuntimeError {
+    fn from(e: AgentError) -> Self {
+        Self::Agent(e)
+    }
+}
+
+impl From<crate::config::ConfigError> for RuntimeError {
+    fn from(e: crate::config::ConfigError) -> Self {
+        Self::Config(e)
     }
 }
 
@@ -45,107 +68,153 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepOutcome {
-    Success,
-    Failure,
-}
+pub async fn start_workflow(
+    workflow: String,
+    view: ConfigView,
+    mut shutdown: watch::Receiver<bool>,
+    client: impl LlmClient,
+    session: Session,
+    mut messages: Vec<Message>,
+    tools: &[Tool],
+    mut rx: mpsc::UnboundedReceiver<Inbound>,
+) -> Result<(), RuntimeError> {
+    // Get the initial step from the workflow configuration
+    let mut current = {
+        let cfg = view.borrow();
+        let wf = cfg
+            .workflow(workflow.as_str())
+            .ok_or_else(|| RuntimeError::UnknownStep(workflow.clone()))?;
+        String::from(wf.initial())
+    };
+    let mut queued: Vec<String> = Vec::new();
 
-#[derive(Debug)]
-pub struct BackendResult {
-    pub outcome: StepOutcome,
-}
+    loop {
+        if current == "done" {
+            return Ok(());
+        }
 
-pub struct Runtime {
-    workflow: &'static str,
-}
+        let next_step = run_step(
+            &workflow,
+            current.as_str(),
+            &view,
+            &mut shutdown,
+            &client,
+            &session,
+            &mut messages,
+            tools,
+            &mut rx,
+            &mut queued,
+        )
+        .await?;
 
-impl Runtime {
-    pub fn new(workflow: &'static str) -> Self {
-        Self { workflow }
-    }
+        current = next_step;
 
-    pub async fn run(
-        &mut self,
-        view: &mut ConfigView,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> Result<StepOutcome, RuntimeError> {
-        let mut current = {
-            let cfg = view.borrow();
-            let wf = cfg.workflow(self.workflow).ok_or(RuntimeError::UnknownStepStatic(self.workflow))?;
-            String::from(wf.initial())
-        };
-        loop {
-            if current == "done" {
-                return Ok(StepOutcome::Success);
-            }
-            let outcome = {
-                let backend_ref = {
-                    let cfg = view.borrow();
-                    let wf = cfg.workflow(self.workflow).ok_or(RuntimeError::UnknownStepStatic(self.workflow))?;
-                    match wf.resolve(current.as_str()) {
-                        Some(step) => match step {
-                            Step::Validate(_) => None,
-                            Step::Custom(c) => Some(c.backend.clone()),
-                            _ => None,
-                        },
-                        None => return Err(RuntimeError::UnknownStep(current)),
-                    }
-                };
-                tokio::select! {
-                    _ = view.has_changed() => continue,
-                    _ = shutdown.changed() => return Ok(StepOutcome::Failure),
-                    res = Self::run_step_backend(backend_ref) => res?,
-                }
-            };
-            {
-                let cfg = view.borrow();
-                let wf = cfg.workflow(self.workflow).ok_or(RuntimeError::UnknownStepStatic(self.workflow))?;
-                let Some(step) = wf.resolve(current.as_str()) else{
-                   return Err(RuntimeError::UnknownStep(current))
-                };
-                let next = match outcome {
-                    StepOutcome::Success => step.on_success(),
-                    StepOutcome::Failure => step.on_failure(),
-                };
-                if next == "done" {
-                    return Ok(outcome);
-                }
-                if wf.resolve(next).is_none() {
-                    return Err(RuntimeError::UnknownStep(next.to_string()));
-                }
-                current.clear();
-                current.push_str(next);
-            }
+        tokio::select! {
+            _ = view.has_changed() => continue,
+            _ = shutdown.changed() => return Ok(()),
+            _ = tokio::task::yield_now() => {}
         }
     }
+}
 
-    async fn run_step_backend(backend: Option<Backend>) -> Result<StepOutcome, RuntimeError> {
-        match backend {
-            None => Ok(StepOutcome::Success),
-            Some(b) => Self::run_backend(&b).await.map(|r| r.outcome),
-        }
+async fn run_step(
+    workflow: &str,
+    current: &str,
+    view: &ConfigView,
+    shutdown: &mut watch::Receiver<bool>,
+    client: &impl LlmClient,
+    session: &Session,
+    messages: &mut Vec<Message>,
+    tools: &[Tool],
+    user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+    queued: &mut Vec<String>,
+) -> Result<String, RuntimeError> {
+    let cfg = view.borrow();
+    let wf = cfg
+        .workflow(workflow)
+        .ok_or_else(|| RuntimeError::UnknownStep(workflow.to_string()))?;
+    let step = wf
+        .resolve(current)
+        .ok_or_else(|| RuntimeError::UnknownStep(current.to_string()))?;
+
+    match step {
+        Step::Plan(cfg) => run_plan_step(client, view, cfg, session, shutdown, user_rx).await,
+        Step::Implement(cfg) => run_implement_step(client, cfg, session, shutdown, user_rx).await,
+        Step::Validate(cfg) => run_validate_step(client, cfg, session, shutdown, user_rx).await,
+        Step::Commit(cfg) => run_commit_step(client, cfg, session, shutdown, user_rx).await,
+        Step::Custom(cfg) => run_custom_step(client, cfg, session, shutdown, user_rx).await,
     }
+}
 
-    async fn run_backend(backend: &Backend) -> Result<BackendResult, RuntimeError> {
-        match backend {
-            Backend::Command { command } => {
-                let output = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(command.as_str())
-                    .output()
-                    .await
-                    .map_err(|_| RuntimeError::Backend(BackendError::Ipc("ipc not connected")))?;
-                if output.status.success() {
-                    Ok(BackendResult { outcome: StepOutcome::Success })
-                } else {
-                    Ok(BackendResult { outcome: StepOutcome::Failure })
-                }
-            }
-            Backend::Llm { .. } => Ok(BackendResult { outcome: StepOutcome::Success }),
-            Backend::Ipc { .. } => Err(RuntimeError::Backend(BackendError::Ipc("ipc not connected"))),
-            Backend::Wasm { .. } => Err(RuntimeError::Backend(BackendError::Wasm("wasm unsupported"))),
-            Backend::Dylib { .. } => Err(RuntimeError::Backend(BackendError::Dylib("dylib unsupported"))),
+async fn run_plan_step(
+    client: &impl LlmClient,
+    view: &ConfigView,
+    cfg: &StepBase,
+    session: &Session,
+    shutdown: &mut watch::Receiver<bool>,
+    user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+) -> Result<String, RuntimeError> {
+    InteractiveAgent::new(user_rx).run(client, session, view, &cfg.selection(), ).await?;
+    Ok(String::from(cfg.on_success()))
+}
+
+async fn run_implement_step(
+    client: &impl LlmClient,
+    cfg: &StepBase,
+    session: &Session,
+    shutdown: &mut watch::Receiver<bool>,
+    user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+) -> Result<String, RuntimeError> {
+    //TODO: use the creative agent as we don't need user input
+    todo!("Implement implement step execution logic");
+}
+
+async fn run_validate_step(
+    client: &impl LlmClient,
+    cfg: &ValidateStep,
+    session: &Session,
+    shutdown: &mut watch::Receiver<bool>,
+    user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+) -> Result<String, RuntimeError> {
+    todo!("Implement validate step execution logic");
+}
+
+async fn run_commit_step(
+    client: &impl LlmClient,
+    cfg: &StepBase,
+    session: &Session,
+    shutdown: &mut watch::Receiver<bool>,
+    user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+) -> Result<String, RuntimeError> {
+    todo!("Implement commit step execution logic");
+}
+
+async fn run_custom_step(
+    client: &impl LlmClient,
+    cfg: &CustomStep,
+    session: &Session,
+    shutdown: &mut watch::Receiver<bool>,
+    user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+) -> Result<String, RuntimeError> {
+    match &cfg.backend {
+        Backend::Command { command } => {
+            todo!("Implement command backend execution logic");
+        }
+        Backend::Llm {
+            agent,
+            provider,
+            model,
+        } => {
+            todo!("Implement command backend execution logic");
+        }
+        Backend::Ipc { channel } => {
+            todo!("Implement command backend execution logic");
+        }
+        Backend::Wasm { module } => {
+            todo!("Implement command backend execution logic");
+        }
+        Backend::Dylib { path } => {
+            todo!("Implement command backend execution logic");
         }
     }
 }

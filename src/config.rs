@@ -61,54 +61,6 @@ pub struct WorkflowConfig {
     steps: HashMap<String, Step>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Step {
-    Plan(StepBase),
-    Implement(StepBase),
-    Test(StepBase),
-    Commit(StepBase),
-    Validate(ValidateStep),
-    Custom(CustomStep),
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct StepBase {
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    on_success: String,
-    #[serde(default)]
-    on_failure: String,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct ValidateStep {
-    #[serde(default)]
-    on_success: String,
-    #[serde(default)]
-    on_failure: String,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct CustomStep {
-    pub backend: Backend,
-    #[serde(default)]
-    pub on_success: String,
-    #[serde(default)]
-    pub on_failure: String,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Clone, Valuable)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Backend {
-    Command { command: String },
-    Llm { agent: String, model: String },
-    Ipc { channel: String },
-    Wasm { module: String },
-    Dylib { path: String },
-}
-
 impl WorkflowConfig {
     pub fn initial(&self) -> &str {
         &self.initial
@@ -124,33 +76,87 @@ impl WorkflowConfig {
     }
 }
 
-impl Step {
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Step {
+    Plan(StepBase),
+    Implement(StepBase),
+    Commit(StepBase),
+    Validate(ValidateStep),
+    Custom(CustomStep),
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct StepBase {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    on_success: String,
+    #[serde(default)]
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+impl StepBase {
     pub fn on_success(&self) -> &str {
-        match self {
-            Self::Plan(s) => &s.on_success,
-            Self::Implement(s) => &s.on_success,
-            Self::Test(s) => &s.on_success,
-            Self::Commit(s) => &s.on_success,
-            Self::Validate(s) => &s.on_success,
-            Self::Custom(s) => &s.on_success,
+        &self.on_success
+    }
+
+    pub fn selection(&self) -> Selection<'_> {
+        Selection {
+            agent: self.agent.as_deref().unwrap_or("default"),
+            provider: self.provider.as_deref().unwrap_or("default"),
+            model: self.model.as_deref().unwrap_or("default"),
         }
     }
-    pub fn on_failure(&self) -> &str {
-        match self {
-            Self::Plan(s) => &s.on_failure,
-            Self::Implement(s) => &s.on_failure,
-            Self::Test(s) => &s.on_failure,
-            Self::Commit(s) => &s.on_failure,
-            Self::Validate(s) => &s.on_failure,
-            Self::Custom(s) => &s.on_failure,
-        }
-    }
-    pub fn backend(&self) -> Option<&Backend> {
-        match self {
-            Self::Custom(s) => Some(&s.backend),
-            _ => None,
-        }
-    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct ValidateStep {
+    #[serde(default)]
+    on_success: String,
+    #[serde(default)]
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct CustomStep {
+    pub backend: Backend,
+    #[serde(default)]
+    pub on_success: String,
+    #[serde(default)]
+    pub on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Clone, Valuable)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Backend {
+    Command {
+        command: String,
+    },
+    Llm {
+        agent: String,
+        provider: String,
+        model: String,
+    },
+    Ipc {
+        channel: String,
+    },
+    Wasm {
+        module: String,
+    },
+    Dylib {
+        path: String,
+    },
 }
 
 /// Runtime selection of which agent + which provider/model to use.
@@ -231,67 +237,20 @@ impl Config {
             source,
         })
     }
-    pub fn workflows(&self) -> &HashMap<String, WorkflowConfig> {
-        &self.workflows
-    }
+
     pub fn workflow(&self, name: &str) -> Option<&WorkflowConfig> {
         self.workflows.get(name)
     }
     pub fn debounce(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.watcher.debounce_ms)
     }
-    pub fn watcher_debounce_ms(&self) -> u64 {
-        self.watcher.debounce_ms
-    }
-    pub fn providers_len(&self) -> usize {
-        self.providers.len()
-    }
-    pub fn agents_len(&self) -> usize {
-        self.agents.len()
-    }
-    pub fn workflows_len(&self) -> usize {
-        self.workflows.len()
-    }
-    // pub fn provider_names(&self) -> Vec<&str> {
-    //     let mut names: Vec<&str> = self.providers.keys().map(|k| k.as_str()).collect();
-    //     names.sort_unstable();
-    //     names
-    // }
-    pub fn agent_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.agents.keys().map(|k| k.as_str()).collect();
-        names.sort_unstable();
-        names
-    }
-    pub fn workflow_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.workflows.keys().map(|k| k.as_str()).collect();
-        names.sort_unstable();
-        names
-    }
-    pub fn models_len(&self) -> usize {
-        self.providers.values().map(|p| p.models_len()).sum()
-    }
-    pub fn workflow_summaries(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut names: Vec<&String> = self.workflows.keys().collect();
-        names.sort();
-        for name in names {
-            if let Some(wf) = self.workflows.get(name) {
-                let steps: Vec<&String> = {
-                    let mut s: Vec<&String> = wf.steps.keys().collect();
-                    s.sort();
-                    s
-                };
-                let steps_str = steps.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-                out.push(format!("{name} (initial={}, steps=[{}])", wf.initial, steps_str));
-            }
-        }
-        out
-    }
 
     /// Resolve `Selection` into a single `AgentPlan`, borrowing from `self`.
     pub fn plan<'a>(&'a self, sel: &Selection<'_>) -> Result<AgentPlan<'a>, ConfigError> {
         if sel.provider.is_empty() || sel.model.is_empty() {
-            return Err(ConfigError::InvalidField("provider and model must be non-empty".to_string()));
+            return Err(ConfigError::InvalidField(
+                "provider and model must be non-empty".to_string(),
+            ));
         }
         let provider_name = sel.provider;
         let model_key = sel.model;
@@ -325,8 +284,14 @@ impl Config {
 
 #[derive(Debug)]
 pub enum ConfigError {
-    Io { path: PathBuf, source: std::io::Error },
-    Parse { path: PathBuf, source: toml::de::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
     InvalidField(String),
     UnknownProvider(String),
     UnknownModel(String),
@@ -336,13 +301,25 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io { path, source } => write!(f, "I/O error reading {}: {}", path.display(), source),
+            Self::Io { path, source } => {
+                write!(f, "I/O error reading {}: {}", path.display(), source)
+            }
             Self::Parse { path, source } => {
                 let msg = source.message();
                 if let Some(span) = source.span() {
-                    write!(f, "TOML parse error in {} at bytes {}..{}: {}", path.display(), span.start, span.end, msg)?;
+                    write!(
+                        f,
+                        "TOML parse error in {} at bytes {}..{}: {}",
+                        path.display(),
+                        span.start,
+                        span.end,
+                        msg
+                    )?;
                     if msg.contains("duplicate field") {
-                        write!(f, " (hint: use [providers.*] and [agents.*] only, plural form)")?;
+                        write!(
+                            f,
+                            " (hint: use [providers.*] and [agents.*] only, plural form)"
+                        )?;
                     }
                     Ok(())
                 } else {
@@ -459,9 +436,6 @@ impl ConfigStore {
             inner: self.inner.subscribe(),
         }
     }
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -473,17 +447,12 @@ impl ConfigView {
     pub fn borrow(&self) -> tokio::sync::watch::Ref<'_, Config> {
         self.inner.borrow()
     }
-    pub fn has_changed(&mut self) -> impl std::future::Future<Output = Result<(), tokio::sync::watch::error::RecvError>> + '_ {
-        self.inner.changed()
-    }
-    pub fn subscribe(&self) -> Self {
-        self.clone()
-    }
-    pub fn into_receiver(self) -> tokio::sync::watch::Receiver<Config> {
-        self.inner
-    }
-    pub fn as_receiver(&self) -> &tokio::sync::watch::Receiver<Config> {
-        &self.inner
+    pub fn has_changed(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), tokio::sync::watch::error::RecvError>> {
+        //TODO: use self.inner.has_changed()
+        let mut rx = self.inner.clone();
+        async move { rx.changed().await }
     }
 }
 

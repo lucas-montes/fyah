@@ -23,8 +23,8 @@ impl Agent for CreativeAgent {
 
         for _ in 0..max_iterations {
             let turn = call_llm(client, plan, conversation).await?;
-            if turn.tool_calls.is_empty() {
-                if let Some(c) = turn.content {
+            if turn.tool_calls_empty() {
+                if let Some(c) = turn.content() {
                     println!("{c}");
                 }
                 return Ok(());
