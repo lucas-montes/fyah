@@ -20,22 +20,63 @@ impl VcsKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
-    pub workflow: String,
-    pub current: String,
-    pub messages: Vec<Message>,
-    pub queued: Vec<String>,
-    pub timestamp: String,
+    workflow: String,
+    current: String,
+    messages: Vec<Message>,
+    queued: Vec<String>,
+    timestamp: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Checkpoint {
+    pub fn workflow(&self) -> &str {
+        &self.workflow
+    }
+    pub fn current(&self) -> &str {
+        &self.current
+    }
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+    pub fn queued(&self) -> &[String] {
+        &self.queued
+    }
+    pub fn into_parts(self) -> (String, String, Vec<Message>, Vec<String>) {
+        (self.workflow, self.current, self.messages, self.queued)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WalEntry {
-    pub tool_call_id: String,
-    pub name: String,
-    pub arguments: String,
-    pub result: Option<String>,
-    pub timestamp: String,
+    tool_call_id: String,
+    name: String,
+    arguments: String,
+    result: Option<String>,
+    timestamp: String,
+}
+
+impl WalEntry {
+    pub fn new(
+        tool_call_id: String,
+        name: String,
+        arguments: String,
+        result: Option<String>,
+    ) -> Self {
+        Self {
+            tool_call_id,
+            name,
+            arguments,
+            result,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+    pub fn tool_call_id(&self) -> &str {
+        &self.tool_call_id
+    }
+    pub fn result(&self) -> Option<&str> {
+        self.result.as_deref()
+    }
 }
 
 pub struct Session {
@@ -108,11 +149,19 @@ impl Session {
     ) -> std::io::Result<()> {
         let dir = self.session_dir();
         std::fs::create_dir_all(&dir)?;
-        let cp = Checkpoint {
-            workflow: workflow.to_string(),
-            current: current.to_string(),
-            messages: messages.to_vec(),
-            queued: queued.to_vec(),
+        #[derive(Serialize)]
+        struct CheckpointRef<'a> {
+            workflow: &'a str,
+            current: &'a str,
+            messages: &'a [Message],
+            queued: &'a [String],
+            timestamp: String,
+        }
+        let cp = CheckpointRef {
+            workflow,
+            current,
+            messages,
+            queued,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         let json = serde_json::to_string_pretty(&cp).map_err(std::io::Error::other)?;
@@ -155,8 +204,8 @@ impl Session {
     pub fn wal_contains_result(&self, tool_call_id: &str) -> Option<String> {
         self.load_wal()
             .into_iter()
-            .find(|e| e.tool_call_id == tool_call_id)
-            .and_then(|e| e.result)
+            .find(|e| e.tool_call_id() == tool_call_id)
+            .and_then(|e| e.result().map(|s| s.to_string()))
     }
 }
 
@@ -198,10 +247,10 @@ mod tests {
             .save_checkpoint("default", "plan", &messages, &queued)
             .unwrap();
         let loaded = session.load_checkpoint().expect("should load");
-        assert_eq!(loaded.workflow, "default");
-        assert_eq!(loaded.current, "plan");
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(loaded.queued.len(), 1);
+        assert_eq!(loaded.workflow(), "default");
+        assert_eq!(loaded.current(), "plan");
+        assert_eq!(loaded.messages().len(), 1);
+        assert_eq!(loaded.queued().len(), 1);
         let _ = std::fs::remove_dir_all(session.session_dir());
     }
 
@@ -215,17 +264,16 @@ mod tests {
             None,
         );
         let _ = std::fs::remove_dir_all(session.session_dir());
-        let entry = WalEntry {
-            tool_call_id: "call_123".to_string(),
-            name: "Read".to_string(),
-            arguments: "{}".to_string(),
-            result: Some("content".to_string()),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
+        let entry = WalEntry::new(
+            "call_123".to_string(),
+            "Read".to_string(),
+            "{}".to_string(),
+            Some("content".to_string()),
+        );
         session.append_wal(entry).unwrap();
         let wal = session.load_wal();
         assert_eq!(wal.len(), 1);
-        assert_eq!(wal[0].tool_call_id, "call_123");
+        assert_eq!(wal[0].tool_call_id(), "call_123");
         assert_eq!(
             session.wal_contains_result("call_123"),
             Some("content".to_string())

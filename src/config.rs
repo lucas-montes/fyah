@@ -39,7 +39,7 @@ impl Default for WatcherConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Deserialize, PartialEq, Default)]
 pub struct FileSearchConfig {
     #[serde(default)]
     vector_store_ids: Vec<String>,
@@ -47,7 +47,7 @@ pub struct FileSearchConfig {
     max_num_results: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Deserialize, PartialEq, Default)]
 pub struct CompiledTools {
     #[serde(default)]
     web_search: bool,
@@ -63,7 +63,28 @@ pub struct CompiledTools {
     file_search: Option<FileSearchConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+impl CompiledTools {
+    pub fn web_search(&self) -> bool {
+        self.web_search
+    }
+    pub fn code_interpreter(&self) -> bool {
+        self.code_interpreter
+    }
+    pub fn computer_use(&self) -> bool {
+        self.computer_use
+    }
+    pub fn shell(&self) -> bool {
+        self.shell
+    }
+    pub fn tool_search(&self) -> bool {
+        self.tool_search
+    }
+    pub fn file_search(&self) -> Option<&FileSearchConfig> {
+        self.file_search.as_ref()
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Default)]
 pub struct CustomToolDef {
     name: String,
     description: String,
@@ -71,7 +92,22 @@ pub struct CustomToolDef {
     parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+impl CustomToolDef {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+    pub fn parameters(&self) -> &serde_json::Value {
+        &self.parameters
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Default)]
 pub struct ToolRegistry {
     #[serde(flatten)]
     compiled: CompiledTools,
@@ -79,7 +115,7 @@ pub struct ToolRegistry {
     custom: Vec<CustomToolDef>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Valuable, Default)]
+#[derive(Debug, Deserialize, PartialEq, Valuable, Default)]
 pub enum CtrlCMode {
     #[default]
     #[serde(rename = "immediate")]
@@ -88,7 +124,7 @@ pub enum CtrlCMode {
     Graceful,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Deserialize, PartialEq, Default)]
 pub struct RuntimeConfig {
     #[serde(default)]
     ctrl_c: CtrlCMode,
@@ -137,7 +173,7 @@ impl WorkflowConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Step {
     Plan(StepBase),
@@ -147,7 +183,7 @@ pub enum Step {
     Custom(CustomStep),
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct StepBase {
     #[serde(default)]
     agent: Option<String>,
@@ -183,6 +219,27 @@ impl StepBase {
     }
 }
 
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct ValidateStep {
+    #[serde(default)]
+    on_success: String,
+    #[serde(default)]
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct CustomStep {
+    backend: Backend,
+    #[serde(default)]
+    on_success: String,
+    #[serde(default)]
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<u64>,
+}
+
 impl ValidateStep {
     pub fn on_success(&self) -> &str {
         &self.on_success
@@ -196,6 +253,9 @@ impl ValidateStep {
 }
 
 impl CustomStep {
+    pub fn backend(&self) -> &Backend {
+        &self.backend
+    }
     pub fn on_success(&self) -> &str {
         &self.on_success
     }
@@ -207,28 +267,7 @@ impl CustomStep {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
-pub struct ValidateStep {
-    #[serde(default)]
-    on_success: String,
-    #[serde(default)]
-    on_failure: String,
-    /// Optional execution timeout in seconds.
-    timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
-pub struct CustomStep {
-    pub backend: Backend,
-    #[serde(default)]
-    pub on_success: String,
-    #[serde(default)]
-    pub on_failure: String,
-    /// Optional execution timeout in seconds.
-    timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Clone, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Backend {
     Command {
@@ -535,7 +574,7 @@ impl ConfigStore {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ConfigView {
     inner: tokio::sync::watch::Receiver<Config>,
 }
@@ -562,6 +601,9 @@ impl ConfigView {
     pub async fn has_changed(&self) -> Result<(), tokio::sync::watch::error::RecvError> {
         let mut rx = self.inner.clone();
         rx.changed().await
+    }
+    pub fn has_changed_receiver(&self) -> tokio::sync::watch::Receiver<Config> {
+        self.inner.clone()
     }
 }
 
@@ -636,7 +678,7 @@ parameters = { type = "object" }
 "#;
         let cfg: Config = toml::from_str(toml_str).expect("should parse");
         assert_eq!(*cfg.runtime().ctrl_c(), CtrlCMode::Graceful);
-        assert!(cfg.tools().compiled().web_search);
+        assert!(cfg.tools().compiled().web_search());
         assert_eq!(cfg.tools().custom().len(), 1);
     }
 }

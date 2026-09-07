@@ -12,7 +12,7 @@ impl Agent for CreativeAgent {
         &mut self,
         client: &impl LlmClient,
         session: &Session,
-        view: &mut ConfigView,
+        view: &ConfigView,
         selection: &Selection<'_>,
         messages: &mut Vec<Message>,
         tools: &[Tool],

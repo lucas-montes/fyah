@@ -1,19 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    User {
-        content: String,
-    },
-    Assistant {
-        content: Option<String>,
-        tool_calls: Vec<ToolCall>,
-    },
-    Tool {
-        tool_call_id: String,
-        content: String,
-    },
+    User { content: String },
+    Assistant { content: Option<String>, tool_calls: Vec<ToolCall> },
+    Tool { tool_call_id: String, content: String },
 }
 
 impl Message {
@@ -36,11 +28,10 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Tool {
     name: String,
     description: String,
-    /// JSON schema describing the tool's parameters.
     parameters: Value,
 }
 
@@ -66,11 +57,10 @@ impl Tool {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     id: String,
     name: String,
-    /// JSON-encoded arguments.
     arguments: String,
 }
 
@@ -96,7 +86,7 @@ impl ToolCall {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct AssistantTurn {
     content: Option<String>,
     tool_calls: Vec<ToolCall>,

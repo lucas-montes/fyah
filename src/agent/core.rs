@@ -14,7 +14,7 @@ pub trait Agent {
         &mut self,
         client: &impl LlmClient,
         session: &Session,
-        view: &mut ConfigView,
+        view: &ConfigView,
         selection: &Selection<'_>,
         messages: &mut Vec<Message>,
         tools: &[crate::model::Tool],
@@ -26,7 +26,7 @@ pub trait Agent {
 pub async fn run_agent_loop(
     client: &impl LlmClient,
     session: &Session,
-    view: &mut ConfigView,
+    view: &ConfigView,
     selection: &Selection<'_>,
     messages: &mut Vec<Message>,
     tools: &[crate::model::Tool],
@@ -127,21 +127,19 @@ pub fn execute_tools(
             tool_calls_results.push(Message::new_tool(tool_call.id().to_string(), cached));
             continue;
         }
-        let _ = session.append_wal(crate::session::WalEntry {
-            tool_call_id: tool_call.id().to_string(),
-            name: tool_call.name().to_string(),
-            arguments: tool_call.arguments().to_string(),
-            result: None,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        });
+        let _ = session.append_wal(crate::session::WalEntry::new(
+            tool_call.id().to_string(),
+            tool_call.name().to_string(),
+            tool_call.arguments().to_string(),
+            None,
+        ));
         let result = handle_tool_call(tool_call, session, model_id)?;
-        let _ = session.append_wal(crate::session::WalEntry {
-            tool_call_id: tool_call.id().to_string(),
-            name: tool_call.name().to_string(),
-            arguments: tool_call.arguments().to_string(),
-            result: Some(result.clone()),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        });
+        let _ = session.append_wal(crate::session::WalEntry::new(
+            tool_call.id().to_string(),
+            tool_call.name().to_string(),
+            tool_call.arguments().to_string(),
+            Some(result.clone()),
+        ));
         tool_calls_results.push(Message::new_tool(tool_call.id().to_string(), result));
     }
 

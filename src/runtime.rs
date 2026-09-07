@@ -89,12 +89,13 @@ pub async fn start_workflow(
         String::from(wf.initial())
     };
     let mut queued: Vec<String> = Vec::new();
-    if let Some(cp) = session.load_checkpoint()
-        && cp.workflow == workflow
-    {
-        messages = cp.messages;
-        queued = cp.queued;
-        current = cp.current;
+    if let Some(cp) = session.load_checkpoint() {
+        if cp.workflow() == workflow {
+            let (_, cur, msgs, qu) = cp.into_parts();
+            messages = msgs;
+            queued = qu;
+            current = cur;
+        }
     }
 
     loop {
@@ -117,13 +118,13 @@ pub async fn start_workflow(
         };
 
         let mut shutdown_clone = shutdown.clone();
-        let view_clone = view.clone();
+        let mut has_changed_rx = view.has_changed_receiver();
         let next_step = tokio::select! {
             _ = shutdown_clone.changed() => {
                 let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
                 return Ok(());
             }
-            _ = view_clone.has_changed() => {
+            _ = has_changed_rx.changed() => {
                 let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
                 continue;
             }
@@ -175,14 +176,14 @@ pub async fn start_workflow(
 async fn run_step(
     workflow: &str,
     current: &str,
-    view: &mut ConfigView,
+    view: &ConfigView,
     tools: &[Tool],
     client: &impl LlmClient,
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    let (step_clone, on_success, on_failure) = {
+    let (kind, on_success, on_failure) = {
         let cfg = view.borrow();
         let wf = cfg
             .workflow(workflow)
@@ -190,6 +191,13 @@ async fn run_step(
         let step = wf
             .resolve(current)
             .ok_or_else(|| RuntimeError::UnknownStep(current.to_string()))?;
+        let kind = match step {
+            Step::Plan(_) => 0,
+            Step::Implement(_) => 1,
+            Step::Validate(_) => 2,
+            Step::Commit(_) => 3,
+            Step::Custom(_) => 4,
+        };
         let on_success = match step {
             Step::Plan(c) => c.on_success().to_string(),
             Step::Implement(c) => c.on_success().to_string(),
@@ -204,24 +212,15 @@ async fn run_step(
             Step::Validate(c) => c.on_failure().to_string(),
             Step::Custom(c) => c.on_failure().to_string(),
         };
-        (step.clone(), on_success, on_failure)
+        (kind, on_success, on_failure)
     };
-    let res = match step_clone {
-        Step::Plan(cfg) => {
-            run_plan_step(client, view, &cfg, session, messages, tools, queued).await
-        }
-        Step::Implement(cfg) => {
-            run_implement_step(client, view, &cfg, session, messages, tools, queued).await
-        }
-        Step::Validate(cfg) => {
-            run_validate_step(client, view, &cfg, session, messages, tools, queued).await
-        }
-        Step::Commit(cfg) => {
-            run_commit_step(client, view, &cfg, session, messages, tools, queued).await
-        }
-        Step::Custom(cfg) => {
-            run_custom_step(client, view, &cfg, session, messages, tools, queued).await
-        }
+    let res = match kind {
+        0 => run_plan_step(client, view, workflow, current, session, messages, tools, queued).await,
+        1 => run_implement_step(client, view, workflow, current, session, messages, tools, queued).await,
+        2 => run_validate_step(client, view, workflow, current, session, messages, tools, queued).await,
+        3 => run_commit_step(client, view, workflow, current, session, messages, tools, queued).await,
+        4 => run_custom_step(client, view, workflow, current, session, messages, tools, queued).await,
+        _ => unreachable!(),
     };
     match res {
         Ok(s) => Ok(s),
@@ -232,21 +231,29 @@ async fn run_step(
 
 async fn run_plan_step(
     client: &impl LlmClient,
-    view: &mut ConfigView,
-    cfg: &StepBase,
+    view: &ConfigView,
+    workflow: &str,
+    current: &str,
     session: &Session,
     messages: &mut Vec<Message>,
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    use crate::agent::{Agent, CreativeAgent, InteractiveAgent};
-    let selection = cfg.selection();
-    let max_iterations = {
-        let c = view.borrow();
-        c.plan(&selection)?.max_iterations()
+    use crate::agent::{Agent, InteractiveAgent};
+    let cfg_ref = view.borrow();
+    let (selection, on_success, max_iterations) = {
+        let wf = cfg_ref.workflow(workflow).unwrap();
+        let step = wf.resolve(current).unwrap();
+        if let Step::Plan(c) = step {
+            let sel = c.selection();
+            let max = cfg_ref.plan(&sel).ok().map(|p| p.max_iterations()).unwrap_or(25);
+            (sel, c.on_success().to_string(), max)
+        } else {
+            unreachable!()
+        }
     };
     let mut agent = InteractiveAgent::new();
-    agent
+    let res = agent
         .run(
             client,
             session,
@@ -257,27 +264,37 @@ async fn run_plan_step(
             queued,
             max_iterations,
         )
-        .await?;
-    Ok(String::from(cfg.on_success()))
+        .await;
+    drop(cfg_ref);
+    res?;
+    Ok(on_success)
 }
 
 async fn run_implement_step(
     client: &impl LlmClient,
-    view: &mut ConfigView,
-    cfg: &StepBase,
+    view: &ConfigView,
+    workflow: &str,
+    current: &str,
     session: &Session,
     messages: &mut Vec<Message>,
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
     use crate::agent::{Agent, CreativeAgent};
-    let selection = cfg.selection();
-    let max_iterations = {
-        let c = view.borrow();
-        c.plan(&selection)?.max_iterations()
+    let cfg_ref = view.borrow();
+    let (selection, on_success, max_iterations) = {
+        let wf = cfg_ref.workflow(workflow).unwrap();
+        let step = wf.resolve(current).unwrap();
+        if let Step::Implement(c) = step {
+            let sel = c.selection();
+            let max = cfg_ref.plan(&sel).ok().map(|p| p.max_iterations()).unwrap_or(25);
+            (sel, c.on_success().to_string(), max)
+        } else {
+            unreachable!()
+        }
     };
     let mut agent = CreativeAgent;
-    agent
+    let res = agent
         .run(
             client,
             session,
@@ -288,40 +305,61 @@ async fn run_implement_step(
             queued,
             max_iterations,
         )
-        .await?;
-    Ok(String::from(cfg.on_success()))
+        .await;
+    drop(cfg_ref);
+    res?;
+    Ok(on_success)
 }
 
 async fn run_validate_step(
     client: &impl LlmClient,
-    view: &mut ConfigView,
-    cfg: &ValidateStep,
+    view: &ConfigView,
+    workflow: &str,
+    current: &str,
     session: &Session,
     messages: &mut Vec<Message>,
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    let _ = (client, view, cfg, session, messages, tools, queued);
-    Ok(String::from(cfg.on_success()))
+    let on_success = {
+        let cfg = view.borrow();
+        let wf = cfg.workflow(workflow).unwrap();
+        let step = wf.resolve(current).unwrap();
+        if let Step::Validate(c) = step {
+            c.on_success().to_string()
+        } else {
+            unreachable!()
+        }
+    };
+    let _ = (client, view, session, messages, tools, queued);
+    Ok(on_success)
 }
 
 async fn run_commit_step(
     client: &impl LlmClient,
-    view: &mut ConfigView,
-    cfg: &StepBase,
+    view: &ConfigView,
+    workflow: &str,
+    current: &str,
     session: &Session,
     messages: &mut Vec<Message>,
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
     use crate::agent::{Agent, CreativeAgent};
-    let selection = cfg.selection();
-    let max_iterations = {
-        let c = view.borrow();
-        c.plan(&selection)?.max_iterations()
+    let cfg_ref = view.borrow();
+    let (selection, on_success, max_iterations) = {
+        let wf = cfg_ref.workflow(workflow).unwrap();
+        let step = wf.resolve(current).unwrap();
+        if let Step::Commit(c) = step {
+            let sel = c.selection();
+            let max = cfg_ref.plan(&sel).ok().map(|p| p.max_iterations()).unwrap_or(25);
+            (sel, c.on_success().to_string(), max)
+        } else {
+            unreachable!()
+        }
     };
     let mut agent = CreativeAgent;
-    agent
+    let res = agent
         .run(
             client,
             session,
@@ -332,27 +370,46 @@ async fn run_commit_step(
             queued,
             max_iterations,
         )
-        .await?;
-    Ok(String::from(cfg.on_success()))
+        .await;
+    drop(cfg_ref);
+    res?;
+    Ok(on_success)
 }
 
 async fn run_custom_step(
     client: &impl LlmClient,
-    view: &mut ConfigView,
-    cfg: &CustomStep,
+    view: &ConfigView,
+    workflow: &str,
+    current: &str,
     session: &Session,
     messages: &mut Vec<Message>,
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    match &cfg.backend {
+    let (on_success, on_failure, timeout, backend) = {
+        let cfg = view.borrow();
+        let wf = cfg.workflow(workflow).unwrap();
+        let step = wf.resolve(current).unwrap();
+        if let Step::Custom(c) = step {
+            let backend = match c.backend() {
+                Backend::Command { command } => Backend::Command { command: command.clone() },
+                Backend::Llm { agent, provider, model } => Backend::Llm { agent: agent.clone(), provider: provider.clone(), model: model.clone() },
+                Backend::Ipc { channel } => Backend::Ipc { channel: channel.clone() },
+                Backend::Wasm { module } => Backend::Wasm { module: module.clone() },
+                Backend::Dylib { path } => Backend::Dylib { path: path.clone() },
+            };
+            (c.on_success().to_string(), c.on_failure().to_string(), c.timeout_secs(), backend)
+        } else {
+            unreachable!()
+        }
+    };
+    match backend {
         Backend::Command { command } => {
             let mut child = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(command)
                 .spawn()
                 .map_err(|_| RuntimeError::Backend(BackendError::Ipc("failed to spawn command")))?;
-            let timeout = cfg.timeout_secs();
             let wait_fut = child.wait();
             let status = if let Some(secs) = timeout {
                 match tokio::time::timeout(Duration::from_secs(secs), wait_fut).await {
@@ -370,9 +427,9 @@ async fn run_custom_step(
                     .map_err(|_| RuntimeError::Backend(BackendError::Ipc("wait failed")))?
             };
             if status.success() {
-                Ok(cfg.on_success().to_string())
+                Ok(on_success)
             } else {
-                Ok(cfg.on_failure().to_string())
+                Ok(on_failure)
             }
         }
         Backend::Llm {
@@ -404,7 +461,7 @@ async fn run_custom_step(
                     max_iterations,
                 )
                 .await?;
-            Ok(cfg.on_success().to_string())
+            Ok(on_success)
         }
         Backend::Ipc { channel: _ } => Err(RuntimeError::Backend(BackendError::Ipc(
             "ipc not connected",

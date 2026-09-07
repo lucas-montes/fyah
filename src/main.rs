@@ -106,7 +106,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
     {
-        let ctrl_c_mode = view.borrow().runtime().ctrl_c().clone();
+        let is_immediate = matches!(
+            view.borrow().runtime().ctrl_c(),
+            config::CtrlCMode::Immediate
+        );
         let shutdown_tx_clone = shutdown_tx.clone();
         let tx_clone = tx.clone();
         tokio::spawn(async move {
@@ -119,12 +122,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     tokio::select! {
                         _ = sigint.recv() => {
-                            match ctrl_c_mode {
-                                config::CtrlCMode::Immediate => std::process::exit(130),
-                                config::CtrlCMode::Graceful => {
-                                    let _ = shutdown_tx_clone.send(true);
-                                    let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
-                                }
+                            if is_immediate {
+                                std::process::exit(130)
+                            } else {
+                                let _ = shutdown_tx_clone.send(true);
+                                let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
                             }
                         },
                         _ = sigterm.recv() => {
@@ -140,12 +142,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(not(unix))]
             {
                 let _ = tokio::signal::ctrl_c().await;
-                match ctrl_c_mode {
-                    config::CtrlCMode::Immediate => std::process::exit(130),
-                    config::CtrlCMode::Graceful => {
-                        let _ = shutdown_tx_clone.send(true);
-                        let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
-                    }
+                if is_immediate {
+                    std::process::exit(130)
+                } else {
+                    let _ = shutdown_tx_clone.send(true);
+                    let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
                 }
             }
         });
