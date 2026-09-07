@@ -87,11 +87,7 @@ impl<'a> Provider<'a> {
         }
     }
 
-    pub fn attach_body(
-        &self,
-        req: RequestBuilder,
-        conv: &Conversation<'_>,
-    ) -> RequestBuilder {
+    pub fn attach_body(&self, req: RequestBuilder, conv: &Conversation<'_>) -> RequestBuilder {
         match self.format {
             WireFormat::OpenAi => openai::chat::attach_body(req, conv),
             WireFormat::Anthropic => anthropic::attach_body(req, conv),

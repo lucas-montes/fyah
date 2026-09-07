@@ -12,14 +12,13 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use valuable::Valuable;
 
-
-pub mod config;
-pub mod fs_watcher;
-pub mod runtime;
 pub mod agent;
 pub mod client;
+pub mod config;
+pub mod fs_watcher;
 pub mod model;
 pub mod provider;
+pub mod runtime;
 pub mod session;
 mod traces;
 
@@ -105,14 +104,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _fs_watcher = FsWatcher::spawn(store, config_path, debounce);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
+    {
+        let ctrl_c_mode = view.borrow().runtime().ctrl_c().clone();
+        let shutdown_tx_clone = shutdown_tx.clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
+                let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
+                let mut sighup = signal(SignalKind::hangup()).expect("sighup");
+                loop {
+                    tokio::select! {
+                        _ = sigint.recv() => {
+                            match ctrl_c_mode {
+                                config::CtrlCMode::Immediate => std::process::exit(130),
+                                config::CtrlCMode::Graceful => {
+                                    let _ = shutdown_tx_clone.send(true);
+                                    let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+                                }
+                            }
+                        },
+                        _ = sigterm.recv() => {
+                            let _ = shutdown_tx_clone.send(true);
+                            let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+                        },
+                        _ = sighup.recv() => {
+                            let _ = shutdown_tx_clone.send(true);
+                        },
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+                match ctrl_c_mode {
+                    config::CtrlCMode::Immediate => std::process::exit(130),
+                    config::CtrlCMode::Graceful => {
+                        let _ = shutdown_tx_clone.send(true);
+                        let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+                    }
+                }
+            }
+        });
+    }
     let _shutdown_tx = shutdown_tx;
 
     //TODO: tools should be dynamic as the config. It can change, we can have new tools or remove old ones, it should be in the configStore/View
     let tools = default_tools();
 
-    // TODO: we need to find a better way to handle stdin
-    // we need to have different sessions and have a way to redirect the each message to the correct session
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
     spawn_stdin_source(tx);
     tracing::debug!("Spawning stdin source");
     start_session(cli.workflow, view, shutdown_rx, tools, rx).await

@@ -4,7 +4,7 @@ use reqwest::RequestBuilder;
 use crate::client::LlmClient;
 use crate::config::{AgentError, ConfigView, Selection};
 use crate::model::{AssistantTurn, Conversation, Message, ToolCall};
-use crate::provider::{parse_response, WireFormat};
+use crate::provider::{WireFormat, parse_response};
 use crate::record_write;
 use crate::session::Session;
 
@@ -103,7 +103,10 @@ pub async fn send_and_parse(
     req: RequestBuilder,
     format: WireFormat,
 ) -> Result<AssistantTurn, AgentError> {
-    let bytes = client.send_request(req).await.map_err(|e| AgentError::Transport(e.to_string()))?;
+    let bytes = client
+        .send_request(req)
+        .await
+        .map_err(|e| AgentError::Transport(e.to_string()))?;
     parse_response(format, bytes.as_ref()).map_err(|e| AgentError::Parse(e.to_string()))
 }
 
@@ -114,15 +117,31 @@ pub fn execute_tools(
     turn: AssistantTurn,
     tool_calls_results: &mut Vec<Message>,
 ) -> Result<(), AgentError> {
-    let (
-        content,
-        tool_calls,
-     )= turn.into_parts();
+    let (content, tool_calls) = turn.into_parts();
     tracing::debug!(num_tools=?tool_calls.len(), "Executing tool calls from LLM turn");
 
     for tool_call in &tool_calls {
         tracing::debug!(tool=%tool_call.name(), id=%tool_call.id(), arguments=%tool_call.arguments(), "Executing tool call");
+        if let Some(cached) = session.wal_contains_result(tool_call.id()) {
+            tracing::debug!(tool=%tool_call.name(), id=%tool_call.id(), "Skipping already completed tool call via WAL");
+            tool_calls_results.push(Message::new_tool(tool_call.id().to_string(), cached));
+            continue;
+        }
+        let _ = session.append_wal(crate::session::WalEntry {
+            tool_call_id: tool_call.id().to_string(),
+            name: tool_call.name().to_string(),
+            arguments: tool_call.arguments().to_string(),
+            result: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
         let result = handle_tool_call(tool_call, session, model_id)?;
+        let _ = session.append_wal(crate::session::WalEntry {
+            tool_call_id: tool_call.id().to_string(),
+            name: tool_call.name().to_string(),
+            arguments: tool_call.arguments().to_string(),
+            result: Some(result.clone()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
         tool_calls_results.push(Message::new_tool(tool_call.id().to_string(), result));
     }
 
@@ -146,7 +165,9 @@ fn handle_tool_call(
 
     match tool_call.name() {
         "Read" => match args["file_path"].as_str() {
-            Some(file_path) => Ok(std::fs::read_to_string(file_path).map_err(|e| AgentError::Io(e.to_string()))?),
+            Some(file_path) => Ok(
+                std::fs::read_to_string(file_path).map_err(|e| AgentError::Io(e.to_string()))?
+            ),
             None => {
                 tracing::error!(tool="Read", arguments=%args, "file_path is not a string");
                 Err(AgentError::Tool("file_path is not a string".to_string()))
@@ -160,7 +181,9 @@ fn handle_tool_call(
             }
             _ => {
                 tracing::error!(tool="Write", arguments=%args, "file_path or content is not a string");
-                Err(AgentError::Tool("file_path or content is not a string".to_string()))
+                Err(AgentError::Tool(
+                    "file_path or content is not a string".to_string(),
+                ))
             }
         },
         "Bash" => match args["command"].as_str() {
@@ -168,7 +191,8 @@ fn handle_tool_call(
                 let output = std::process::Command::new("bash")
                     .arg("-c")
                     .arg(command)
-                    .output().map_err(|e| AgentError::Io(e.to_string()))?;
+                    .output()
+                    .map_err(|e| AgentError::Io(e.to_string()))?;
                 Ok(String::from_utf8_lossy(&output.stdout).into_owned())
             }
             None => {
@@ -178,7 +202,10 @@ fn handle_tool_call(
         },
         _ => {
             tracing::error!(tool=%tool_call.name(), "unknown tool");
-            Err(AgentError::Tool(format!("unknown tool: {}", tool_call.name())))
+            Err(AgentError::Tool(format!(
+                "unknown tool: {}",
+                tool_call.name()
+            )))
         }
     }
 }

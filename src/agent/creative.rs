@@ -3,7 +3,7 @@ use crate::config::{AgentError, ConfigView, Selection};
 use crate::model::{Message, Tool};
 use crate::session::Session;
 
-use super::core::{run_agent_loop, Agent};
+use super::core::{Agent, run_agent_loop};
 
 pub struct CreativeAgent;
 
@@ -19,6 +19,17 @@ impl Agent for CreativeAgent {
         queued: &mut Vec<String>,
         max_iterations: u32,
     ) -> Result<(), AgentError> {
-        run_agent_loop(client, session, view, selection, messages, tools, queued, max_iterations, None).await
+        run_agent_loop(
+            client,
+            session,
+            view,
+            selection,
+            messages,
+            tools,
+            queued,
+            max_iterations,
+            None,
+        )
+        .await
     }
 }

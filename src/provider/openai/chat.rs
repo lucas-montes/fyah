@@ -3,8 +3,8 @@ use serde_json::Value;
 use tracing::error;
 
 use crate::model::{AssistantTurn, Conversation, Message, ToolCall};
-use crate::provider::openai::OpenAiTool;
 use crate::provider::StreamReconstructor;
+use crate::provider::openai::OpenAiTool;
 
 #[derive(Serialize)]
 pub struct OpenAiRequest<'a> {
@@ -22,14 +22,18 @@ pub struct OpenAiRequest<'a> {
 #[derive(Serialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum OpenAiMessage<'a> {
-    User { content: &'a str },
+    User {
+        content: &'a str,
+    },
     Assistant {
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<&'a str>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<OpenAiToolCall<'a>>,
     },
-    System { content: &'a str },
+    System {
+        content: &'a str,
+    },
     Tool {
         tool_call_id: &'a str,
         content: &'a str,
@@ -56,7 +60,10 @@ impl<'a> From<&'a Message> for OpenAiMessage<'a> {
             Message::User { content } => OpenAiMessage::User {
                 content: content.as_str(),
             },
-            Message::Assistant { content, tool_calls } => OpenAiMessage::Assistant {
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => OpenAiMessage::Assistant {
                 content: content.as_deref(),
                 tool_calls: tool_calls.iter().map(OpenAiToolCall::from).collect(),
             },
@@ -102,7 +109,10 @@ impl<'c, 'a> From<&'c Conversation<'a>> for OpenAiRequest<'c> {
     }
 }
 
-pub fn attach_body<'c>(req: reqwest::RequestBuilder, conv: &Conversation<'c>) -> reqwest::RequestBuilder {
+pub fn attach_body<'c>(
+    req: reqwest::RequestBuilder,
+    conv: &Conversation<'c>,
+) -> reqwest::RequestBuilder {
     let body = OpenAiRequest::from(conv);
     req.json(&body)
 }
@@ -136,7 +146,9 @@ pub struct OpenAiChoice {
 #[allow(dead_code)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum OpenAiMessageOut {
-    User { content: String },
+    User {
+        content: String,
+    },
     Assistant {
         #[serde(default)]
         content: Option<String>,
@@ -183,7 +195,10 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
     };
 
     match message {
-        OpenAiMessageOut::Assistant { content, tool_calls } => {
+        OpenAiMessageOut::Assistant {
+            content,
+            tool_calls,
+        } => {
             let tool_calls = tool_calls
                 .unwrap_or_default()
                 .into_iter()

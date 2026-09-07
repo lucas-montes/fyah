@@ -50,7 +50,13 @@ struct Range {
     end_line: u32,
 }
 
-pub fn emit_write_trace(session: &Session, path: &str, content: &str, model_id: &str, timestamp: String) {
+pub fn emit_write_trace(
+    session: &Session,
+    path: &str,
+    content: &str,
+    model_id: &str,
+    timestamp: String,
+) {
     let line_count = content.lines().count();
     if line_count == 0 {
         return;

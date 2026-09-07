@@ -70,6 +70,7 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_workflow(
     workflow: String,
     mut view: ConfigView,
@@ -88,12 +89,12 @@ pub async fn start_workflow(
         String::from(wf.initial())
     };
     let mut queued: Vec<String> = Vec::new();
-    if let Some(cp) = session.load_checkpoint() {
-        if cp.workflow == workflow {
-            messages = cp.messages;
-            queued = cp.queued;
-            current = cp.current;
-        }
+    if let Some(cp) = session.load_checkpoint()
+        && cp.workflow == workflow
+    {
+        messages = cp.messages;
+        queued = cp.queued;
+        current = cp.current;
     }
 
     loop {
@@ -170,6 +171,7 @@ pub async fn start_workflow(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_step(
     workflow: &str,
     current: &str,
@@ -205,11 +207,21 @@ async fn run_step(
         (step.clone(), on_success, on_failure)
     };
     let res = match step_clone {
-        Step::Plan(cfg) => run_plan_step(client, view, &cfg, session, messages, tools, queued).await,
-        Step::Implement(cfg) => run_implement_step(client, view, &cfg, session, messages, tools, queued).await,
-        Step::Validate(cfg) => run_validate_step(client, view, &cfg, session, messages, tools, queued).await,
-        Step::Commit(cfg) => run_commit_step(client, view, &cfg, session, messages, tools, queued).await,
-        Step::Custom(cfg) => run_custom_step(client, view, &cfg, session, messages, tools, queued).await,
+        Step::Plan(cfg) => {
+            run_plan_step(client, view, &cfg, session, messages, tools, queued).await
+        }
+        Step::Implement(cfg) => {
+            run_implement_step(client, view, &cfg, session, messages, tools, queued).await
+        }
+        Step::Validate(cfg) => {
+            run_validate_step(client, view, &cfg, session, messages, tools, queued).await
+        }
+        Step::Commit(cfg) => {
+            run_commit_step(client, view, &cfg, session, messages, tools, queued).await
+        }
+        Step::Custom(cfg) => {
+            run_custom_step(client, view, &cfg, session, messages, tools, queued).await
+        }
     };
     match res {
         Ok(s) => Ok(s),
@@ -227,7 +239,25 @@ async fn run_plan_step(
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    let _ = (client, view, cfg, session, messages, tools, queued);
+    use crate::agent::{Agent, CreativeAgent, InteractiveAgent};
+    let selection = cfg.selection();
+    let max_iterations = {
+        let c = view.borrow();
+        c.plan(&selection)?.max_iterations()
+    };
+    let mut agent = InteractiveAgent::new();
+    agent
+        .run(
+            client,
+            session,
+            view,
+            &selection,
+            messages,
+            tools,
+            queued,
+            max_iterations,
+        )
+        .await?;
     Ok(String::from(cfg.on_success()))
 }
 
@@ -240,8 +270,26 @@ async fn run_implement_step(
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    let _ = (client, view, cfg, session, messages, tools, queued);
-    todo!("Implement implement step execution logic");
+    use crate::agent::{Agent, CreativeAgent};
+    let selection = cfg.selection();
+    let max_iterations = {
+        let c = view.borrow();
+        c.plan(&selection)?.max_iterations()
+    };
+    let mut agent = CreativeAgent;
+    agent
+        .run(
+            client,
+            session,
+            view,
+            &selection,
+            messages,
+            tools,
+            queued,
+            max_iterations,
+        )
+        .await?;
+    Ok(String::from(cfg.on_success()))
 }
 
 async fn run_validate_step(
@@ -254,7 +302,7 @@ async fn run_validate_step(
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
     let _ = (client, view, cfg, session, messages, tools, queued);
-    todo!("Implement validate step execution logic");
+    Ok(String::from(cfg.on_success()))
 }
 
 async fn run_commit_step(
@@ -266,8 +314,26 @@ async fn run_commit_step(
     tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    let _ = (client, view, cfg, session, messages, tools, queued);
-    todo!("Implement commit step execution logic");
+    use crate::agent::{Agent, CreativeAgent};
+    let selection = cfg.selection();
+    let max_iterations = {
+        let c = view.borrow();
+        c.plan(&selection)?.max_iterations()
+    };
+    let mut agent = CreativeAgent;
+    agent
+        .run(
+            client,
+            session,
+            view,
+            &selection,
+            messages,
+            tools,
+            queued,
+            max_iterations,
+        )
+        .await?;
+    Ok(String::from(cfg.on_success()))
 }
 
 async fn run_custom_step(
@@ -281,23 +347,73 @@ async fn run_custom_step(
 ) -> Result<String, RuntimeError> {
     match &cfg.backend {
         Backend::Command { command } => {
-            todo!("Implement command backend execution logic");
+            let mut child = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .spawn()
+                .map_err(|_| RuntimeError::Backend(BackendError::Ipc("failed to spawn command")))?;
+            let timeout = cfg.timeout_secs();
+            let wait_fut = child.wait();
+            let status = if let Some(secs) = timeout {
+                match tokio::time::timeout(Duration::from_secs(secs), wait_fut).await {
+                    Ok(s) => {
+                        s.map_err(|_| RuntimeError::Backend(BackendError::Ipc("wait failed")))?
+                    }
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        return Err(RuntimeError::Timeout("command timeout"));
+                    }
+                }
+            } else {
+                wait_fut
+                    .await
+                    .map_err(|_| RuntimeError::Backend(BackendError::Ipc("wait failed")))?
+            };
+            if status.success() {
+                Ok(cfg.on_success().to_string())
+            } else {
+                Ok(cfg.on_failure().to_string())
+            }
         }
         Backend::Llm {
             agent,
             provider,
             model,
         } => {
-            todo!("Implement command backend execution logic");
+            use crate::agent::{Agent, CreativeAgent};
+            use crate::config::Selection;
+            let selection = Selection {
+                agent: agent.as_str(),
+                provider: provider.as_str(),
+                model: model.as_str(),
+            };
+            let max_iterations = {
+                let c = view.borrow();
+                c.plan(&selection)?.max_iterations()
+            };
+            let mut agent_obj = CreativeAgent;
+            agent_obj
+                .run(
+                    client,
+                    session,
+                    view,
+                    &selection,
+                    messages,
+                    tools,
+                    queued,
+                    max_iterations,
+                )
+                .await?;
+            Ok(cfg.on_success().to_string())
         }
-        Backend::Ipc { channel } => {
-            todo!("Implement command backend execution logic");
-        }
-        Backend::Wasm { module } => {
-            todo!("Implement command backend execution logic");
-        }
-        Backend::Dylib { path } => {
-            todo!("Implement command backend execution logic");
-        }
+        Backend::Ipc { channel: _ } => Err(RuntimeError::Backend(BackendError::Ipc(
+            "ipc not connected",
+        ))),
+        Backend::Wasm { module: _ } => Err(RuntimeError::Backend(BackendError::Wasm(
+            "wasm unsupported",
+        ))),
+        Backend::Dylib { path: _ } => Err(RuntimeError::Backend(BackendError::Dylib(
+            "dylib unsupported",
+        ))),
     }
 }

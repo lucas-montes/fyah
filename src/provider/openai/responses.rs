@@ -5,8 +5,8 @@ use serde_json::Value;
 use tracing::error;
 
 use crate::model::{AssistantTurn, Conversation, Message, ToolCall};
-use crate::provider::openai::OpenAiTool;
 use crate::provider::StreamReconstructor;
+use crate::provider::openai::OpenAiTool;
 
 #[derive(Serialize)]
 pub struct ResponsesRequest<'a> {
@@ -46,8 +46,14 @@ pub struct ResponsesResponse {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponsesOutputItem {
-    Message { content: Vec<ResponsesOutputContent> },
-    FunctionCall { call_id: String, name: String, arguments: String },
+    Message {
+        content: Vec<ResponsesOutputContent>,
+    },
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -65,7 +71,10 @@ fn build_input<'r>(conv: &'r Conversation<'_>, cursor: usize) -> Vec<ResponsesIn
                 role: "user",
                 content: content.as_str(),
             }),
-            Message::Tool { tool_call_id, content } => Some(ResponsesInputItem::FunctionCallOutput {
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => Some(ResponsesInputItem::FunctionCallOutput {
                 call_id: tool_call_id.as_str(),
                 output: content.as_str(),
             }),
@@ -97,7 +106,10 @@ pub fn build_responses_request_stateful<'r>(
     }
 }
 
-pub fn attach_body<'c>(req: reqwest::RequestBuilder, conv: &Conversation<'c>) -> reqwest::RequestBuilder {
+pub fn attach_body<'c>(
+    req: reqwest::RequestBuilder,
+    conv: &Conversation<'c>,
+) -> reqwest::RequestBuilder {
     let body = build_responses_request_stateful(conv, 0, None, false);
     req.json(&body)
 }
@@ -141,7 +153,11 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
                 name,
                 arguments,
             } => {
-                tool_calls.push(ToolCall::new(call_id.clone(), name.clone(), arguments.clone()));
+                tool_calls.push(ToolCall::new(
+                    call_id.clone(),
+                    name.clone(),
+                    arguments.clone(),
+                ));
             }
         }
     }
@@ -184,11 +200,21 @@ impl StreamReconstructor for ResponsesReconstructor {
             "response.output_item.added" => {
                 if let Some(item) = event.get("item") {
                     if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
-                        let key = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let call_id =
-                            item.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let name =
-                            item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let key = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let arguments = item
                             .get("arguments")
                             .and_then(|v| v.as_str())
@@ -208,8 +234,11 @@ impl StreamReconstructor for ResponsesReconstructor {
             "response.output_item.done" => {
                 if let Some(item) = event.get("item") {
                     if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
-                        let key =
-                            item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let key = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         if let Some(c) = self.calls.get_mut(&key) {
                             if let Some(a) = item.get("arguments").and_then(|v| v.as_str()) {
                                 c.arguments = a.to_string();
@@ -224,7 +253,11 @@ impl StreamReconstructor for ResponsesReconstructor {
                 }
             }
             "response.function_call_arguments.delta" => {
-                let key = event.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let key = event
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if let Some(d) = event.get("delta").and_then(|v| v.as_str()) {
                     if let Some(c) = self.calls.get_mut(&key) {
                         c.arguments.push_str(d);

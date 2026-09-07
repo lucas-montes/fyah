@@ -31,8 +31,14 @@ pub struct AnthropicMessage<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicBlock<'a> {
-    Text { text: &'a str },
-    ToolUse { id: &'a str, name: &'a str, input: Value },
+    Text {
+        text: &'a str,
+    },
+    ToolUse {
+        id: &'a str,
+        name: &'a str,
+        input: Value,
+    },
     ToolResult {
         tool_use_id: &'a str,
         content: &'a str,
@@ -83,7 +89,10 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
                         }],
                     });
                 }
-                Message::Assistant { content, tool_calls } => {
+                Message::Assistant {
+                    content,
+                    tool_calls,
+                } => {
                     flush(&mut pending, &mut messages);
                     let mut blocks = Vec::new();
                     if let Some(content) = content {
@@ -164,9 +173,18 @@ pub struct AnthropicResponse {
 #[allow(dead_code)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicBlockOut {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: Value },
-    ToolResult { tool_use_id: String, content: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> {
@@ -227,7 +245,8 @@ impl StreamReconstructor for AnthropicReconstructor {
             "content_block_start" => {
                 let idx = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 if self.blocks.len() <= idx {
-                    self.blocks.resize_with(idx + 1, AnthropicBlockBuilder::default);
+                    self.blocks
+                        .resize_with(idx + 1, AnthropicBlockBuilder::default);
                 }
                 if let Some(cb) = event.get("content_block") {
                     if cb.get("type").and_then(|v| v.as_str()) == Some("tool_use") {

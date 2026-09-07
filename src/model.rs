@@ -3,7 +3,9 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
-    User { content: String },
+    User {
+        content: String,
+    },
     Assistant {
         content: Option<String>,
         tool_calls: Vec<ToolCall>,
@@ -14,14 +16,16 @@ pub enum Message {
     },
 }
 
-
 impl Message {
     pub fn new_user(content: String) -> Self {
         Message::User { content }
     }
 
     pub fn new_assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Message::Assistant { content, tool_calls }
+        Message::Assistant {
+            content,
+            tool_calls,
+        }
     }
 
     pub fn new_tool(tool_call_id: String, content: String) -> Self {
@@ -31,7 +35,6 @@ impl Message {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
@@ -73,7 +76,11 @@ pub struct ToolCall {
 
 impl ToolCall {
     pub fn new(id: String, name: String, arguments: String) -> Self {
-        Self { id, name, arguments }
+        Self {
+            id,
+            name,
+            arguments,
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -97,7 +104,10 @@ pub struct AssistantTurn {
 
 impl AssistantTurn {
     pub fn new(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { content, tool_calls }
+        Self {
+            content,
+            tool_calls,
+        }
     }
 
     pub fn content(&self) -> Option<&str> {

@@ -1,4 +1,3 @@
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -116,7 +115,7 @@ impl Session {
             queued: queued.to_vec(),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
-        let json = serde_json::to_string_pretty(&cp).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&cp).map_err(std::io::Error::other)?;
         std::fs::write(self.checkpoint_path(), json)
     }
 
@@ -142,7 +141,7 @@ impl Session {
         std::fs::create_dir_all(&dir)?;
         let mut entries = self.load_wal();
         entries.push(entry);
-        let json = serde_json::to_string_pretty(&entries).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&entries).map_err(std::io::Error::other)?;
         std::fs::write(self.wal_path(), json)
     }
 
@@ -186,10 +185,18 @@ mod tests {
 
     #[test]
     fn checkpoint_roundtrip() {
-        let session = Session::new("test-session-123".to_string(), "fyah", "0.1.0", VcsKind::Git, None);
+        let session = Session::new(
+            "test-session-123".to_string(),
+            "fyah",
+            "0.1.0",
+            VcsKind::Git,
+            None,
+        );
         let messages = vec![Message::new_user("hello".to_string())];
         let queued = vec!["queued msg".to_string()];
-        session.save_checkpoint("default", "plan", &messages, &queued).unwrap();
+        session
+            .save_checkpoint("default", "plan", &messages, &queued)
+            .unwrap();
         let loaded = session.load_checkpoint().expect("should load");
         assert_eq!(loaded.workflow, "default");
         assert_eq!(loaded.current, "plan");
@@ -200,7 +207,13 @@ mod tests {
 
     #[test]
     fn wal_append_and_load() {
-        let session = Session::new("test-session-wal".to_string(), "fyah", "0.1.0", VcsKind::Git, None);
+        let session = Session::new(
+            "test-session-wal".to_string(),
+            "fyah",
+            "0.1.0",
+            VcsKind::Git,
+            None,
+        );
         let _ = std::fs::remove_dir_all(session.session_dir());
         let entry = WalEntry {
             tool_call_id: "call_123".to_string(),
@@ -213,7 +226,10 @@ mod tests {
         let wal = session.load_wal();
         assert_eq!(wal.len(), 1);
         assert_eq!(wal[0].tool_call_id, "call_123");
-        assert_eq!(session.wal_contains_result("call_123"), Some("content".to_string()));
+        assert_eq!(
+            session.wal_contains_result("call_123"),
+            Some("content".to_string())
+        );
         let _ = std::fs::remove_dir_all(session.session_dir());
     }
 }
