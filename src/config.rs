@@ -39,6 +39,61 @@ impl Default for WatcherConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct FileSearchConfig {
+    #[serde(default)]
+    vector_store_ids: Vec<String>,
+    #[serde(default)]
+    max_num_results: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct CompiledTools {
+    #[serde(default)]
+    web_search: bool,
+    #[serde(default)]
+    code_interpreter: bool,
+    #[serde(default)]
+    computer_use: bool,
+    #[serde(default)]
+    shell: bool,
+    #[serde(default)]
+    tool_search: bool,
+    #[serde(default)]
+    file_search: Option<FileSearchConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct CustomToolDef {
+    name: String,
+    description: String,
+    command: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct ToolRegistry {
+    #[serde(flatten)]
+    compiled: CompiledTools,
+    #[serde(default)]
+    custom: Vec<CustomToolDef>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Valuable, Default)]
+pub enum CtrlCMode {
+    #[default]
+    #[serde(rename = "immediate")]
+    Immediate,
+    #[serde(rename = "graceful")]
+    Graceful,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    ctrl_c: CtrlCMode,
+}
+
 /// Raw, fully-parsed configuration. Fields private.
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct Config {
@@ -50,6 +105,12 @@ pub struct Config {
     workflows: HashMap<String, WorkflowConfig>,
     #[serde(default)]
     watcher: WatcherConfig,
+    #[valuable(skip)]
+    #[serde(default)]
+    tools: ToolRegistry,
+    #[valuable(skip)]
+    #[serde(default)]
+    runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
@@ -243,6 +304,12 @@ impl Config {
     }
     pub fn debounce(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.watcher.debounce_ms)
+    }
+    pub fn tools(&self) -> &ToolRegistry {
+        &self.tools
+    }
+    pub fn runtime(&self) -> &RuntimeConfig {
+        &self.runtime
     }
 
     /// Resolve `Selection` into a single `AgentPlan`, borrowing from `self`.
@@ -443,6 +510,21 @@ pub struct ConfigView {
     inner: tokio::sync::watch::Receiver<Config>,
 }
 
+impl ToolRegistry {
+    pub fn compiled(&self) -> &CompiledTools {
+        &self.compiled
+    }
+    pub fn custom(&self) -> &[CustomToolDef] {
+        &self.custom
+    }
+}
+
+impl RuntimeConfig {
+    pub fn ctrl_c(&self) -> &CtrlCMode {
+        &self.ctrl_c
+    }
+}
+
 impl ConfigView {
     pub fn borrow(&self) -> tokio::sync::watch::Ref<'_, Config> {
         self.inner.borrow()
@@ -494,5 +576,40 @@ impl From<std::io::Error> for AgentError {
 impl From<serde_json::Error> for AgentError {
     fn from(e: serde_json::Error) -> Self {
         Self::Parse(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn load_fyah_toml() {
+        let cfg = Config::load(Path::new("fyah.toml")).expect("should load fyah.toml");
+        assert!(cfg.tools().custom().len() >= 1);
+        assert_eq!(*cfg.runtime().ctrl_c(), CtrlCMode::Immediate);
+    }
+
+    #[test]
+    fn load_with_runtime_graceful() {
+        let toml_str = r#"
+[watcher]
+debounce_ms = 2000
+[runtime]
+ctrl_c = "graceful"
+[tools]
+web_search = true
+shell = true
+[[tools.custom]]
+name = "my_tool"
+description = "desc"
+command = "echo hi"
+parameters = { type = "object" }
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(*cfg.runtime().ctrl_c(), CtrlCMode::Graceful);
+        assert!(cfg.tools().compiled().web_search);
+        assert_eq!(cfg.tools().custom().len(), 1);
     }
 }

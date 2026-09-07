@@ -97,11 +97,12 @@ pub async fn start_workflow(
             &workflow,
             current.as_str(),
             &view,
+            tools,
             &mut shutdown,
             &client,
             &session,
             &mut messages,
-            tools,
+
             &mut rx,
             &mut queued,
         )
@@ -120,12 +121,18 @@ pub async fn start_workflow(
 async fn run_step(
     workflow: &str,
     current: &str,
+
+    // dynamic configs
     view: &ConfigView,
+    tools: &[Tool],
+
     shutdown: &mut watch::Receiver<bool>,
     client: &impl LlmClient,
     session: &Session,
     messages: &mut Vec<Message>,
-    tools: &[Tool],
+
+
+    // user messaegs
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
@@ -154,7 +161,7 @@ async fn run_plan_step(
     shutdown: &mut watch::Receiver<bool>,
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
 ) -> Result<String, RuntimeError> {
-    InteractiveAgent::new(user_rx).run(client, session, view, &cfg.selection(), ).await?;
+    let _ = (client, view, cfg, session, shutdown, user_rx);
     Ok(String::from(cfg.on_success()))
 }
 
