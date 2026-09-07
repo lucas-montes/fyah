@@ -28,9 +28,9 @@ impl<'a> Agent for InteractiveAgent<'a> {
         selection: &Selection<'_>,
         messages: &mut Vec<Message>,
         tools: &[Tool],
+        queued: &mut Vec<String>,
         max_iterations: u32,
     ) -> Result<(), AgentError> {
-        let mut queued: Vec<String> = Vec::new();
         let mut tool_calls_results = Vec::new();
 
         for iteration in 0..max_iterations {

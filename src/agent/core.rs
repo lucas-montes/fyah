@@ -18,8 +18,69 @@ pub trait Agent {
         selection: &Selection<'_>,
         messages: &mut Vec<Message>,
         tools: &[crate::model::Tool],
+        queued: &mut Vec<String>,
         max_iterations: u32,
     ) -> impl std::future::Future<Output = Result<(), AgentError>>;
+}
+
+pub async fn run_agent_loop(
+    client: &impl LlmClient,
+    session: &Session,
+    view: &mut ConfigView,
+    selection: &Selection<'_>,
+    messages: &mut Vec<Message>,
+    tools: &[crate::model::Tool],
+    queued: &mut Vec<String>,
+    max_iterations: u32,
+    mut on_turn: Option<&mut dyn FnMut(&crate::model::AssistantTurn) -> bool>,
+) -> Result<(), AgentError> {
+    let mut tool_calls_results = Vec::new();
+    for iteration in 0..max_iterations {
+        while let Some(m) = queued.pop() {
+            messages.push(Message::new_user(m));
+        }
+        let (req, format) = {
+            let cfg = view.borrow();
+            let plan = cfg.plan(selection)?;
+            let conversation = Conversation {
+                model: plan.target().model(),
+                system: plan.system_prompt(),
+                temperature: plan.target().temperature(),
+                max_tokens: plan.target().max_tokens(),
+                messages,
+                tools,
+            };
+            build_request(client, &plan, &conversation)
+        };
+        let turn = tokio::select! {
+            _ = view.has_changed() => continue,
+            r = send_and_parse(client, req, format) => r?,
+        };
+        if let Some(cb) = on_turn.as_mut() {
+            if !cb(&turn) {
+                continue;
+            }
+        }
+        if turn.tool_calls_empty() {
+            if let Some(c) = turn.content() {
+                println!("{c}");
+            }
+            continue;
+        }
+        {
+            let cfg = view.borrow();
+            let plan = cfg.plan(selection)?;
+            execute_tools(
+                session,
+                plan.target().model_id(),
+                messages,
+                turn,
+                &mut tool_calls_results,
+            )?;
+        }
+        tracing::debug!(iteration, "Tools executed, continuing to next iteration");
+    }
+    Ok(())
 }
 
 pub fn build_request<'a>(
