@@ -1,14 +1,10 @@
 use tokio::sync::{mpsc, watch};
 
 use crate::{
-    agent::{
-        Agent, Command, Inbound, InteractiveAgent, core::{build_request, execute_tools, send_and_parse}
-    },
+    agent::{Inbound, InteractiveAgent},
     client::LlmClient,
-    config::{
-        AgentError, Backend, ConfigView, CustomStep, Selection, Step, StepBase, ValidateStep,
-    },
-    model::{Conversation, Message, Tool},
+    config::{AgentError, Backend, ConfigView, CustomStep, Step, StepBase, ValidateStep},
+    model::{Message, Tool},
     session::Session,
 };
 
@@ -19,6 +15,8 @@ pub enum RuntimeError {
     Backend(BackendError),
     Config(crate::config::ConfigError),
     Agent(AgentError),
+    Cancelled(&'static str),
+    Timeout(&'static str),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -29,6 +27,8 @@ impl std::fmt::Display for RuntimeError {
             Self::Backend(e) => write!(f, "backend error: {e}"),
             Self::Config(e) => write!(f, "config error: {e}"),
             Self::Agent(e) => write!(f, "agent error: {e}"),
+            Self::Cancelled(s) => write!(f, "cancelled: {s}"),
+            Self::Timeout(s) => write!(f, "timeout: {s}"),
         }
     }
 }
@@ -70,7 +70,7 @@ impl std::error::Error for BackendError {}
 
 pub async fn start_workflow(
     workflow: String,
-    view: ConfigView,
+    mut view: ConfigView,
     mut shutdown: watch::Receiver<bool>,
     client: impl LlmClient,
     session: Session,
@@ -78,7 +78,6 @@ pub async fn start_workflow(
     tools: &[Tool],
     mut rx: mpsc::UnboundedReceiver<Inbound>,
 ) -> Result<(), RuntimeError> {
-    // Get the initial step from the workflow configuration
     let mut current = {
         let cfg = view.borrow();
         let wf = cfg
@@ -96,13 +95,12 @@ pub async fn start_workflow(
         let next_step = run_step(
             &workflow,
             current.as_str(),
-            &view,
+            &mut view,
             tools,
             &mut shutdown,
             &client,
             &session,
             &mut messages,
-
             &mut rx,
             &mut queued,
         )
@@ -121,87 +119,123 @@ pub async fn start_workflow(
 async fn run_step(
     workflow: &str,
     current: &str,
-
-    // dynamic configs
-    view: &ConfigView,
+    view: &mut ConfigView,
     tools: &[Tool],
-
     shutdown: &mut watch::Receiver<bool>,
     client: &impl LlmClient,
     session: &Session,
     messages: &mut Vec<Message>,
-
-
-    // user messaegs
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
     queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    let cfg = view.borrow();
-    let wf = cfg
-        .workflow(workflow)
-        .ok_or_else(|| RuntimeError::UnknownStep(workflow.to_string()))?;
-    let step = wf
-        .resolve(current)
-        .ok_or_else(|| RuntimeError::UnknownStep(current.to_string()))?;
-
-    match step {
-        Step::Plan(cfg) => run_plan_step(client, view, cfg, session, shutdown, user_rx).await,
-        Step::Implement(cfg) => run_implement_step(client, cfg, session, shutdown, user_rx).await,
-        Step::Validate(cfg) => run_validate_step(client, cfg, session, shutdown, user_rx).await,
-        Step::Commit(cfg) => run_commit_step(client, cfg, session, shutdown, user_rx).await,
-        Step::Custom(cfg) => run_custom_step(client, cfg, session, shutdown, user_rx).await,
+    let (step_clone, on_success, on_failure) = {
+        let cfg = view.borrow();
+        let wf = cfg
+            .workflow(workflow)
+            .ok_or_else(|| RuntimeError::UnknownStep(workflow.to_string()))?;
+        let step = wf
+            .resolve(current)
+            .ok_or_else(|| RuntimeError::UnknownStep(current.to_string()))?;
+        let on_success = match step {
+            Step::Plan(c) => c.on_success().to_string(),
+            Step::Implement(c) => c.on_success().to_string(),
+            Step::Commit(c) => c.on_success().to_string(),
+            Step::Validate(c) => c.on_success().to_string(),
+            Step::Custom(c) => c.on_success().to_string(),
+        };
+        let on_failure = match step {
+            Step::Plan(c) => c.on_failure().to_string(),
+            Step::Implement(c) => c.on_failure().to_string(),
+            Step::Commit(c) => c.on_failure().to_string(),
+            Step::Validate(c) => c.on_failure().to_string(),
+            Step::Custom(c) => c.on_failure().to_string(),
+        };
+        (step.clone(), on_success, on_failure)
+    };
+    let res = match step_clone {
+        Step::Plan(cfg) => run_plan_step(client, view, &cfg, session, shutdown, user_rx, messages, tools, queued).await,
+        Step::Implement(cfg) => run_implement_step(client, view, &cfg, session, shutdown, user_rx, messages, tools, queued).await,
+        Step::Validate(cfg) => run_validate_step(client, view, &cfg, session, shutdown, user_rx, messages, tools, queued).await,
+        Step::Commit(cfg) => run_commit_step(client, view, &cfg, session, shutdown, user_rx, messages, tools, queued).await,
+        Step::Custom(cfg) => run_custom_step(client, view, &cfg, session, shutdown, user_rx, messages, tools, queued).await,
+    };
+    match res {
+        Ok(s) => Ok(s),
+        Err(RuntimeError::Cancelled(_)) | Err(RuntimeError::Timeout(_)) => Err(res.unwrap_err()),
+        Err(_) => Ok(on_failure),
     }
 }
 
 async fn run_plan_step(
     client: &impl LlmClient,
-    view: &ConfigView,
+    view: &mut ConfigView,
     cfg: &StepBase,
     session: &Session,
     shutdown: &mut watch::Receiver<bool>,
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+    messages: &mut Vec<Message>,
+    tools: &[Tool],
+    queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    let _ = (client, view, cfg, session, shutdown, user_rx);
+    let _ = (client, view, cfg, session, shutdown, user_rx, messages, tools, queued);
     Ok(String::from(cfg.on_success()))
 }
 
 async fn run_implement_step(
     client: &impl LlmClient,
+    view: &mut ConfigView,
     cfg: &StepBase,
     session: &Session,
     shutdown: &mut watch::Receiver<bool>,
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+    messages: &mut Vec<Message>,
+    tools: &[Tool],
+    queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
-    //TODO: use the creative agent as we don't need user input
+    let _ = (client, view, cfg, session, shutdown, user_rx, messages, tools, queued);
     todo!("Implement implement step execution logic");
 }
 
 async fn run_validate_step(
     client: &impl LlmClient,
+    view: &mut ConfigView,
     cfg: &ValidateStep,
     session: &Session,
     shutdown: &mut watch::Receiver<bool>,
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+    messages: &mut Vec<Message>,
+    tools: &[Tool],
+    queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
+    let _ = (client, view, cfg, session, shutdown, user_rx, messages, tools, queued);
     todo!("Implement validate step execution logic");
 }
 
 async fn run_commit_step(
     client: &impl LlmClient,
+    view: &mut ConfigView,
     cfg: &StepBase,
     session: &Session,
     shutdown: &mut watch::Receiver<bool>,
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+    messages: &mut Vec<Message>,
+    tools: &[Tool],
+    queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
+    let _ = (client, view, cfg, session, shutdown, user_rx, messages, tools, queued);
     todo!("Implement commit step execution logic");
 }
 
 async fn run_custom_step(
     client: &impl LlmClient,
+    view: &mut ConfigView,
     cfg: &CustomStep,
     session: &Session,
     shutdown: &mut watch::Receiver<bool>,
     user_rx: &mut mpsc::UnboundedReceiver<Inbound>,
+    messages: &mut Vec<Message>,
+    tools: &[Tool],
+    queued: &mut Vec<String>,
 ) -> Result<String, RuntimeError> {
     match &cfg.backend {
         Backend::Command { command } => {

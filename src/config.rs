@@ -137,7 +137,7 @@ impl WorkflowConfig {
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Step {
     Plan(StepBase),
@@ -147,7 +147,7 @@ pub enum Step {
     Custom(CustomStep),
 }
 
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
 pub struct StepBase {
     #[serde(default)]
     agent: Option<String>,
@@ -167,6 +167,12 @@ impl StepBase {
     pub fn on_success(&self) -> &str {
         &self.on_success
     }
+    pub fn on_failure(&self) -> &str {
+        &self.on_failure
+    }
+    pub fn timeout_secs(&self) -> Option<u64> {
+        self.timeout_secs
+    }
 
     pub fn selection(&self) -> Selection<'_> {
         Selection {
@@ -177,7 +183,31 @@ impl StepBase {
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
+impl ValidateStep {
+    pub fn on_success(&self) -> &str {
+        &self.on_success
+    }
+    pub fn on_failure(&self) -> &str {
+        &self.on_failure
+    }
+    pub fn timeout_secs(&self) -> Option<u64> {
+        self.timeout_secs
+    }
+}
+
+impl CustomStep {
+    pub fn on_success(&self) -> &str {
+        &self.on_success
+    }
+    pub fn on_failure(&self) -> &str {
+        &self.on_failure
+    }
+    pub fn timeout_secs(&self) -> Option<u64> {
+        self.timeout_secs
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
 pub struct ValidateStep {
     #[serde(default)]
     on_success: String,
@@ -187,7 +217,7 @@ pub struct ValidateStep {
     timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
 pub struct CustomStep {
     pub backend: Backend,
     #[serde(default)]
