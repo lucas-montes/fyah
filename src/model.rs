@@ -3,9 +3,17 @@ use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    User { content: String },
-    Assistant { content: Option<String>, tool_calls: Vec<ToolCall> },
-    Tool { tool_call_id: String, content: String },
+    User {
+        content: String,
+    },
+    Assistant {
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+    },
+    Tool {
+        tool_call_id: String,
+        content: String,
+    },
 }
 
 impl Message {

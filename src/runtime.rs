@@ -215,11 +215,36 @@ async fn run_step(
         (kind, on_success, on_failure)
     };
     let res = match kind {
-        0 => run_plan_step(client, view, workflow, current, session, messages, tools, queued).await,
-        1 => run_implement_step(client, view, workflow, current, session, messages, tools, queued).await,
-        2 => run_validate_step(client, view, workflow, current, session, messages, tools, queued).await,
-        3 => run_commit_step(client, view, workflow, current, session, messages, tools, queued).await,
-        4 => run_custom_step(client, view, workflow, current, session, messages, tools, queued).await,
+        0 => {
+            run_plan_step(
+                client, view, workflow, current, session, messages, tools, queued,
+            )
+            .await
+        }
+        1 => {
+            run_implement_step(
+                client, view, workflow, current, session, messages, tools, queued,
+            )
+            .await
+        }
+        2 => {
+            run_validate_step(
+                client, view, workflow, current, session, messages, tools, queued,
+            )
+            .await
+        }
+        3 => {
+            run_commit_step(
+                client, view, workflow, current, session, messages, tools, queued,
+            )
+            .await
+        }
+        4 => {
+            run_custom_step(
+                client, view, workflow, current, session, messages, tools, queued,
+            )
+            .await
+        }
         _ => unreachable!(),
     };
     match res {
@@ -246,7 +271,11 @@ async fn run_plan_step(
         let step = wf.resolve(current).unwrap();
         if let Step::Plan(c) = step {
             let sel = c.selection();
-            let max = cfg_ref.plan(&sel).ok().map(|p| p.max_iterations()).unwrap_or(25);
+            let max = cfg_ref
+                .plan(&sel)
+                .ok()
+                .map(|p| p.max_iterations())
+                .unwrap_or(25);
             (sel, c.on_success().to_string(), max)
         } else {
             unreachable!()
@@ -287,7 +316,11 @@ async fn run_implement_step(
         let step = wf.resolve(current).unwrap();
         if let Step::Implement(c) = step {
             let sel = c.selection();
-            let max = cfg_ref.plan(&sel).ok().map(|p| p.max_iterations()).unwrap_or(25);
+            let max = cfg_ref
+                .plan(&sel)
+                .ok()
+                .map(|p| p.max_iterations())
+                .unwrap_or(25);
             (sel, c.on_success().to_string(), max)
         } else {
             unreachable!()
@@ -352,7 +385,11 @@ async fn run_commit_step(
         let step = wf.resolve(current).unwrap();
         if let Step::Commit(c) = step {
             let sel = c.selection();
-            let max = cfg_ref.plan(&sel).ok().map(|p| p.max_iterations()).unwrap_or(25);
+            let max = cfg_ref
+                .plan(&sel)
+                .ok()
+                .map(|p| p.max_iterations())
+                .unwrap_or(25);
             (sel, c.on_success().to_string(), max)
         } else {
             unreachable!()
@@ -392,13 +429,32 @@ async fn run_custom_step(
         let step = wf.resolve(current).unwrap();
         if let Step::Custom(c) = step {
             let backend = match c.backend() {
-                Backend::Command { command } => Backend::Command { command: command.clone() },
-                Backend::Llm { agent, provider, model } => Backend::Llm { agent: agent.clone(), provider: provider.clone(), model: model.clone() },
-                Backend::Ipc { channel } => Backend::Ipc { channel: channel.clone() },
-                Backend::Wasm { module } => Backend::Wasm { module: module.clone() },
+                Backend::Command { command } => Backend::Command {
+                    command: command.clone(),
+                },
+                Backend::Llm {
+                    agent,
+                    provider,
+                    model,
+                } => Backend::Llm {
+                    agent: agent.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                },
+                Backend::Ipc { channel } => Backend::Ipc {
+                    channel: channel.clone(),
+                },
+                Backend::Wasm { module } => Backend::Wasm {
+                    module: module.clone(),
+                },
                 Backend::Dylib { path } => Backend::Dylib { path: path.clone() },
             };
-            (c.on_success().to_string(), c.on_failure().to_string(), c.timeout_secs(), backend)
+            (
+                c.on_success().to_string(),
+                c.on_failure().to_string(),
+                c.timeout_secs(),
+                backend,
+            )
         } else {
             unreachable!()
         }
