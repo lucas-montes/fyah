@@ -70,7 +70,7 @@ impl ToolRegistry {
         }
         if out.is_empty() {
             out.push(Tool::new(
-                "Bash".to_string(),
+                "bash".to_string(),
                 "Execute a shell command".to_string(),
                 serde_json::json!({
                     "type": "object",
@@ -81,7 +81,7 @@ impl ToolRegistry {
                 }),
             ));
             out.push(Tool::new(
-                "Read".to_string(),
+                "read_file".to_string(),
                 "Read and return the contents of a file".to_string(),
                 serde_json::json!({
                     "type": "object",
@@ -92,7 +92,7 @@ impl ToolRegistry {
                 }),
             ));
             out.push(Tool::new(
-                "Write".to_string(),
+                "write".to_string(),
                 "Write content to a file".to_string(),
                 serde_json::json!({
                     "type": "object",

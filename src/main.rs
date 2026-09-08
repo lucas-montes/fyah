@@ -57,7 +57,8 @@ fn start_loggers() -> WorkerGuard {
 
     let app_layer = tracing_subscriber::fmt::layer()
         .with_ansi(true)
-        .with_target(false)
+        .with_target(true)
+        .with_line_number(true)
         .with_level(true)
         .compact()
         .with_filter(filter_fn(|meta| meta.target() != "agent_trace"))

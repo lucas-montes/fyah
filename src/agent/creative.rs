@@ -28,7 +28,6 @@ impl Agent for CreativeAgent {
             tools,
             queued,
             max_iterations,
-            None,
         )
         .await
     }

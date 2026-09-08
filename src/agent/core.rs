@@ -32,7 +32,6 @@ pub async fn run_agent_loop(
     tools: &[crate::model::Tool],
     queued: &mut Vec<String>,
     max_iterations: u32,
-    mut on_turn: Option<&mut dyn FnMut(&crate::model::AssistantTurn) -> bool>,
 ) -> Result<(), AgentError> {
     let mut tool_calls_results = Vec::new();
     for iteration in 0..max_iterations {
@@ -54,25 +53,8 @@ pub async fn run_agent_loop(
         };
         let turn = tokio::select! {
             _ = view.has_changed() => continue,
-            r = send_and_parse(client, req, format) => match r {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!(error=%e, "LLM call failed in run_agent_loop, treating as empty turn");
-                    if let Some(c) = messages.last().and_then(|m| match m {
-                        Message::User { content } => Some(content.as_str()),
-                        _ => None,
-                    }) {
-                        println!("Echo (LLM unavailable): {c}");
-                    }
-                    return Ok(());
-                }
-            },
+            r = send_and_parse(client, req, format) => r?,
         };
-        if let Some(cb) = on_turn.as_mut() {
-            if !cb(&turn) {
-                continue;
-            }
-        }
         if turn.tool_calls_empty() {
             if let Some(c) = turn.content() {
                 println!("{c}");
@@ -102,10 +84,8 @@ pub fn build_request<'a>(
 ) -> (RequestBuilder, WireFormat) {
     let provider = plan.target().provider();
     let format = provider.format();
-    let mut req = client.create_request(Method::POST, provider.endpoint());
-    for (key, value) in provider.auth_headers() {
-        req = req.header(key, value);
-    }
+    let req = client.create_request(Method::POST, provider.endpoint());
+    let req = provider.apply_auth(req);
     let req = provider.attach_body(req, conversation);
     (req, format)
 }
@@ -174,7 +154,7 @@ fn handle_tool_call(
     };
 
     match tool_call.name() {
-        "Read" => match args["file_path"].as_str() {
+        "read_file" => match args["file_path"].as_str() {
             Some(file_path) => Ok(
                 std::fs::read_to_string(file_path).map_err(|e| AgentError::Io(e.to_string()))?
             ),
@@ -183,7 +163,7 @@ fn handle_tool_call(
                 Err(AgentError::Tool("file_path is not a string".to_string()))
             }
         },
-        "Write" => match (args["file_path"].as_str(), args["content"].as_str()) {
+        "write" => match (args["file_path"].as_str(), args["content"].as_str()) {
             (Some(file_path), Some(content)) => {
                 std::fs::write(file_path, content).map_err(|e| AgentError::Io(e.to_string()))?;
                 record_write!(session, file_path, content, model_id);
@@ -196,7 +176,7 @@ fn handle_tool_call(
                 ))
             }
         },
-        "Bash" => match args["command"].as_str() {
+        "bash" => match args["command"].as_str() {
             Some(command) => {
                 let output = std::process::Command::new("bash")
                     .arg("-c")

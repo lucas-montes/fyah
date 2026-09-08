@@ -28,10 +28,8 @@ async fn stream_once(
     provider: &Provider<'_>,
     conversation: &mut Conversation<'_>,
 ) -> Result<AssistantTurn, Box<dyn std::error::Error>> {
-    let mut req = client.create_request(Method::POST, provider.endpoint());
-    for (k, v) in provider.auth_headers() {
-        req = req.header(k, v);
-    }
+    let req = client.create_request(Method::POST, provider.endpoint());
+    let req = provider.apply_auth(req);
     let req = provider.attach_body_stream(req, conversation);
     let resp = client.stream_request(req).await?;
 

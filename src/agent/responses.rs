@@ -39,10 +39,8 @@ async fn responses_once(
     );
     *sent_cursor = conversation.messages.len();
 
-    let mut req = client.create_request(Method::POST, provider.endpoint());
-    for (k, v) in provider.auth_headers() {
-        req = req.header(k, v);
-    }
+    let req = client.create_request(Method::POST, provider.endpoint());
+    let req = provider.apply_auth(req);
     let req = req.json(&body);
     let resp = client.stream_request(req).await?;
 

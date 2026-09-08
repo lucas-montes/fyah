@@ -3,7 +3,7 @@ use tokio::sync::{mpsc, watch};
 use std::time::Duration;
 
 use crate::{
-    agent::{Command, Inbound},
+    agent::{Agent, CreativeAgent, Inbound, InteractiveAgent},
     client::LlmClient,
     config::{
         AgentError, Backend, ConfigView, CustomStep, Selection, Step, StepBase, ValidateStep,
@@ -118,24 +118,6 @@ pub async fn start_workflow(
                 })
         };
 
-        // Drain rx for messages without cancelling run_step - only Stop/Exit/Interrupt should cancel
-        while let Ok(inbound) = rx.try_recv() {
-            match inbound {
-                Inbound::Command(Command::Stop | Command::Exit) => {
-                    let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
-                    return Ok(());
-                }
-                Inbound::Command(Command::Interrupt(text)) => {
-                    queued.push(text);
-                    let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
-                }
-                Inbound::Command(Command::Status) => {}
-                Inbound::Message(m) => {
-                    queued.push(m);
-                }
-            }
-        }
-
         let mut shutdown_clone = shutdown.clone();
         let mut has_changed_rx = view.has_changed_receiver();
         let next_step = tokio::select! {
@@ -165,6 +147,7 @@ pub async fn start_workflow(
                 &session,
                 &mut messages,
                 &mut queued,
+                &mut rx,
             ) => res?,
         };
 
@@ -181,6 +164,7 @@ async fn run_step<'a>(
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
+    rx: &mut mpsc::UnboundedReceiver<Inbound>,
 ) -> Result<&'a str, RuntimeError> {
     let cfg_ref = view.borrow();
     let wf = cfg_ref
@@ -200,23 +184,38 @@ async fn run_step<'a>(
     };
     let res = match step {
         Step::Plan(c) => {
+            tracing::info!(step = "plan", current, workflow, "running plan step");
             let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
-            run_plan_step(client, view, c, session, messages, queued).await
+            run_plan_step(client, view, c, session, messages, queued, rx).await
         }
         Step::Implement(c) => {
+            tracing::info!(
+                step = "implement",
+                current,
+                workflow,
+                "running implement step"
+            );
             let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
             run_implement_step(client, view, c, session, messages, queued).await
         }
         Step::Validate(c) => {
+            tracing::info!(
+                step = "validate",
+                current,
+                workflow,
+                "running validate step"
+            );
             let c: &'a ValidateStep =
                 unsafe { std::mem::transmute::<&ValidateStep, &'a ValidateStep>(c) };
             run_validate_step(client, view, c, session, messages, queued).await
         }
         Step::Commit(c) => {
+            tracing::info!(step = "commit", current, workflow, "running commit step");
             let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
             run_commit_step(client, view, c, session, messages, queued).await
         }
         Step::Custom(c) => {
+            tracing::info!(step = "custom", current, workflow, "running custom step");
             let c: &'a CustomStep =
                 unsafe { std::mem::transmute::<&CustomStep, &'a CustomStep>(c) };
             run_custom_step(client, view, c, session, messages, queued).await
@@ -239,11 +238,8 @@ async fn run_plan_step<'a>(
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
+    rx: &mut mpsc::UnboundedReceiver<Inbound>,
 ) -> Result<&'a str, RuntimeError> {
-    use crate::agent::{Agent, InteractiveAgent};
-    if messages.is_empty() && queued.is_empty() {
-        return Ok(unsafe { std::mem::transmute::<&str, &'a str>(step.on_failure()) });
-    }
     let cfg_ref = view.borrow();
     let sel = step.selection();
     let sel_owned = Selection {
@@ -259,7 +255,7 @@ async fn run_plan_step<'a>(
     let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
     let tools: &'a [Tool] =
         unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
-    let mut agent = InteractiveAgent::new();
+    let mut agent = InteractiveAgent::new(rx);
     let res = agent
         .run(
             client, session, view, &sel_owned, messages, tools, queued, max,
@@ -278,7 +274,6 @@ async fn run_implement_step<'a>(
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
 ) -> Result<&'a str, RuntimeError> {
-    use crate::agent::{Agent, CreativeAgent};
     let cfg_ref = view.borrow();
     let sel = step.selection();
     let sel_owned = Selection {

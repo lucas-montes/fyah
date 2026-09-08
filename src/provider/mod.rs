@@ -67,22 +67,18 @@ impl<'a> Provider<'a> {
         self.format
     }
 
-    pub fn auth_headers(&self) -> Vec<(&'static str, &'a str)> {
+    pub fn apply_auth(&self, req: RequestBuilder) -> RequestBuilder {
         match self.format {
-            WireFormat::OpenAi | WireFormat::OpenAiResponses => {
-                let mut headers = Vec::new();
-                if let Some(key) = self.api_key {
-                    headers.push(("Authorization", key));
-                }
-                headers
-            }
+            WireFormat::OpenAi | WireFormat::OpenAiResponses => match self.api_key {
+                Some(key) => req.bearer_auth(key),
+                None => req,
+            },
             WireFormat::Anthropic => {
-                let mut headers = Vec::new();
-                if let Some(key) = self.api_key {
-                    headers.push(("x-api-key", key));
+                let req = req.header("anthropic-version", "2023-06-01");
+                match self.api_key {
+                    Some(key) => req.header("x-api-key", key),
+                    None => req,
                 }
-                headers.push(("anthropic-version", "2023-06-01"));
-                headers
             }
         }
     }
@@ -112,10 +108,6 @@ impl<'a> Provider<'a> {
         bytes: &[u8],
     ) -> Result<AssistantTurn, Box<dyn std::error::Error>> {
         parse_response(self.format, bytes)
-    }
-
-    pub fn new_reconstructor(&self) -> Box<dyn StreamReconstructor> {
-        new_reconstructor(self.format)
     }
 }
 

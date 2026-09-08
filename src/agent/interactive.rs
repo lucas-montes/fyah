@@ -1,4 +1,5 @@
 use tokio::select;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::client::LlmClient;
 use crate::config::{AgentError, ConfigView, Selection};
@@ -6,16 +7,19 @@ use crate::model::{Conversation, Message, Tool};
 use crate::session::Session;
 
 use super::core::{Agent, build_request, execute_tools, send_and_parse};
+use super::input::{Command, Inbound};
 
-pub struct InteractiveAgent;
+pub struct InteractiveAgent<'a> {
+    rx: &'a mut UnboundedReceiver<Inbound>,
+}
 
-impl InteractiveAgent {
-    pub fn new() -> Self {
-        Self
+impl<'a> InteractiveAgent<'a> {
+    pub fn new(rx: &'a mut UnboundedReceiver<Inbound>) -> Self {
+        Self { rx }
     }
 }
 
-impl Agent for InteractiveAgent {
+impl<'a> Agent for InteractiveAgent<'a> {
     async fn run(
         &mut self,
         client: &impl LlmClient,
@@ -36,9 +40,18 @@ impl Agent for InteractiveAgent {
 
             if messages.is_empty() {
                 tracing::debug!(iteration, "No messages yet, waiting for user input");
-                // No messages to send to LLM, stay on current step and wait for next queued input
-                // Return Ok to let runtime handle next iteration with queued input
-                return Ok(());
+                match self.rx.recv().await {
+                    Some(Inbound::Message(m)) => {
+                        queued.push(m);
+                        continue;
+                    }
+                    Some(Inbound::Command(Command::Stop | Command::Exit)) | None => return Ok(()),
+                    Some(Inbound::Command(Command::Interrupt(text))) => {
+                        queued.push(text);
+                        continue;
+                    }
+                    Some(Inbound::Command(Command::Status)) => continue,
+                }
             }
 
             tracing::debug!(
@@ -62,20 +75,18 @@ impl Agent for InteractiveAgent {
 
             let turn = select! {
                 _ = view.has_changed() => continue,
-                r = send_and_parse(client, req, format) => match r {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::error!(error=%e, "LLM call failed, treating as empty turn");
-                        // If LLM fails (e.g., 401, connection error), treat as empty turn with no tool calls
-                        // to allow workflow to progress with user message
-                        if let Some(c) = messages.last().and_then(|m| match m {
-                            crate::model::Message::User { content } => Some(content.as_str()),
-                            _ => None,
-                        }) {
-                            println!("Echo (LLM unavailable): {c}");
-                        }
-                        return Ok(());
+                r = send_and_parse(client, req, format) => r?,
+                inbound = self.rx.recv() => match inbound {
+                    Some(Inbound::Command(Command::Stop | Command::Exit)) | None => return Ok(()),
+                    Some(Inbound::Message(m)) => {
+                        queued.push(m);
+                        continue;
                     }
+                    Some(Inbound::Command(Command::Interrupt(text))) => {
+                        queued.push(text);
+                        continue;
+                    }
+                    Some(Inbound::Command(Command::Status)) => continue,
                 },
             };
 
@@ -83,8 +94,11 @@ impl Agent for InteractiveAgent {
                 if let Some(c) = turn.content() {
                     println!("{c}");
                 }
-                if queued.is_empty() {
-                    return Ok(());
+                match self.rx.recv().await {
+                    Some(Inbound::Message(m)) => queued.push(m),
+                    Some(Inbound::Command(Command::Stop | Command::Exit)) | None => return Ok(()),
+                    Some(Inbound::Command(Command::Interrupt(text))) => queued.push(text),
+                    Some(Inbound::Command(Command::Status)) => {}
                 }
                 continue;
             }
