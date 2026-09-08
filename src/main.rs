@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use serde_json::json;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -27,7 +26,7 @@ use {
     client::Client,
     config::{Config, ConfigStore, ConfigView},
     fs_watcher::FsWatcher,
-    model::{Message, Tool},
+    model::Message,
     runtime::start_workflow,
     session::{Session, VcsKind, current_git_revision},
 };
@@ -153,25 +152,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _shutdown_tx = shutdown_tx;
 
-    //TODO: tools should be dynamic as the config. It can change, we can have new tools or remove old ones, it should be in the configStore/View
-    let tools = default_tools();
-
     spawn_stdin_source(tx);
     tracing::debug!("Spawning stdin source");
-    start_session(cli.workflow, view, shutdown_rx, tools, rx).await
+    start_session(cli.workflow, view, shutdown_rx, rx).await
 }
 
 async fn start_session(
     workflow: String,
     view: ConfigView,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    tools: Vec<Tool>,
     rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::default();
-    //TODO: split this into different components, metadata about the harness (tool name, version, etc..)
-    // info about the session itself (Session id)
-    // and info about the environment (git revision, etc..)
     let session = Session::new(
         uuid::Uuid::now_v7().to_string(),
         env!("CARGO_PKG_NAME"),
@@ -181,57 +173,9 @@ async fn start_session(
     );
 
     let messages: Vec<Message> = Vec::new();
-    start_workflow(
-        workflow,
-        view,
-        shutdown_rx,
-        client,
-        session,
-        messages,
-        &tools,
-        rx,
-    )
-    .await
-    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    start_workflow(workflow, view, shutdown_rx, client, session, messages, rx)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     Ok(())
-}
-
-fn default_tools() -> Vec<Tool> {
-    vec![
-        Tool::new(
-            "Bash".to_string(),
-            "Execute a shell command".to_string(),
-            json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The command to execute" }
-                },
-                "required": ["command"]
-            }),
-        ),
-        Tool::new(
-            "Read".to_string(),
-            "Read and return the contents of a file".to_string(),
-            json!({
-                "type": "object",
-                "properties": {
-                    "file_path": { "type": "string", "description": "The path to the file to read" }
-                },
-                "required": ["file_path"]
-            }),
-        ),
-        Tool::new(
-            "Write".to_string(),
-            "Write content to a file".to_string(),
-            json!({
-                "type": "object",
-                "properties": {
-                    "file_path": { "type": "string", "description": "The path to the file to write" },
-                    "content": { "type": "string", "description": "The content to write to the file" }
-                },
-                "required": ["file_path", "content"]
-            }),
-        ),
-    ]
 }

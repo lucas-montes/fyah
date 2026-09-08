@@ -72,15 +72,79 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+fn tools_from_view(cfg: &crate::config::Config) -> Vec<Tool> {
+    let mut out = Vec::new();
+    for c in cfg.tools().custom() {
+        out.push(Tool::new(
+            c.name().to_string(),
+            c.description().to_string(),
+            c.parameters().clone(),
+        ));
+    }
+    let compiled = cfg.tools().compiled();
+    if compiled.shell() {
+        out.push(Tool::new(
+            "Bash".to_string(),
+            "Execute a shell command".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The command to execute" }
+                },
+                "required": ["command"]
+            }),
+        ));
+    }
+    if compiled.web_search() || compiled.code_interpreter() || compiled.tool_search() {
+        // Add generic tools as needed - for now Bash covers shell
+    }
+    if out.is_empty() {
+        out.push(Tool::new(
+            "Bash".to_string(),
+            "Execute a shell command".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The command to execute" }
+                },
+                "required": ["command"]
+            }),
+        ));
+        out.push(Tool::new(
+            "Read".to_string(),
+            "Read and return the contents of a file".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "The path to the file to read" }
+                },
+                "required": ["file_path"]
+            }),
+        ));
+        out.push(Tool::new(
+            "Write".to_string(),
+            "Write content to a file".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "The path to the file to write" },
+                    "content": { "type": "string", "description": "The content to write to the file" }
+                },
+                "required": ["file_path", "content"]
+            }),
+        ));
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn start_workflow(
     workflow: String,
-    mut view: ConfigView,
-    mut shutdown: watch::Receiver<bool>,
+    view: ConfigView,
+    shutdown: watch::Receiver<bool>,
     client: impl LlmClient,
     session: Session,
     mut messages: Vec<Message>,
-    tools: &[Tool],
     mut rx: mpsc::UnboundedReceiver<Inbound>,
 ) -> Result<(), RuntimeError> {
     let mut current = {
@@ -162,7 +226,6 @@ pub async fn start_workflow(
                 &workflow,
                 current.as_str(),
                 &view,
-                tools,
                 &client,
                 &session,
                 &mut messages,
@@ -175,12 +238,10 @@ pub async fn start_workflow(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_step<'a>(
     workflow: &'a str,
     current: &'a str,
     view: &'a ConfigView,
-    tools: &[Tool],
     client: &impl LlmClient,
     session: &Session,
     messages: &mut Vec<Message>,
@@ -193,13 +254,6 @@ async fn run_step<'a>(
     let step = wf
         .resolve(current)
         .ok_or_else(|| RuntimeError::UnknownStep(current.to_string()))?;
-    let kind = match step {
-        Step::Plan(_) => 0,
-        Step::Implement(_) => 1,
-        Step::Validate(_) => 2,
-        Step::Commit(_) => 3,
-        Step::Custom(_) => 4,
-    };
     let on_failure: &'a str = unsafe {
         std::mem::transmute::<&str, &'a str>(match step {
             Step::Plan(c) => c.on_failure(),
@@ -209,38 +263,29 @@ async fn run_step<'a>(
             Step::Custom(c) => c.on_failure(),
         })
     };
-    let res = match kind {
-        0 => {
-            run_plan_step(
-                client, view, workflow, current, session, messages, tools, queued,
-            )
-            .await
+    let res = match step {
+        Step::Plan(c) => {
+            let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
+            run_plan_step(client, view, c, session, messages, queued).await
         }
-        1 => {
-            run_implement_step(
-                client, view, workflow, current, session, messages, tools, queued,
-            )
-            .await
+        Step::Implement(c) => {
+            let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
+            run_implement_step(client, view, c, session, messages, queued).await
         }
-        2 => {
-            run_validate_step(
-                client, view, workflow, current, session, messages, tools, queued,
-            )
-            .await
+        Step::Validate(c) => {
+            let c: &'a ValidateStep =
+                unsafe { std::mem::transmute::<&ValidateStep, &'a ValidateStep>(c) };
+            run_validate_step(client, view, c, session, messages, queued).await
         }
-        3 => {
-            run_commit_step(
-                client, view, workflow, current, session, messages, tools, queued,
-            )
-            .await
+        Step::Commit(c) => {
+            let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
+            run_commit_step(client, view, c, session, messages, queued).await
         }
-        4 => {
-            run_custom_step(
-                client, view, workflow, current, session, messages, tools, queued,
-            )
-            .await
+        Step::Custom(c) => {
+            let c: &'a CustomStep =
+                unsafe { std::mem::transmute::<&CustomStep, &'a CustomStep>(c) };
+            run_custom_step(client, view, c, session, messages, queued).await
         }
-        _ => unreachable!(),
     };
     match res {
         Ok(s) => Ok(s),
@@ -255,62 +300,33 @@ async fn run_step<'a>(
 async fn run_plan_step<'a>(
     client: &impl LlmClient,
     view: &'a ConfigView,
-    workflow: &'a str,
-    current: &'a str,
+    step: &'a StepBase,
     session: &Session,
     messages: &mut Vec<Message>,
-    tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<&'a str, RuntimeError> {
     use crate::agent::{Agent, InteractiveAgent};
-    // If no messages and no queued, stay on current step and wait for user input
-    // Don't call LLM with empty messages
     if messages.is_empty() && queued.is_empty() {
-        tracing::debug!("No messages, waiting for user input on plan step");
-        // Return on_failure to stay on same step (plan -> plan)
-        let cfg_ref = view.borrow();
-        let wf = cfg_ref.workflow(workflow).unwrap();
-        let step = wf.resolve(current).unwrap();
-        if let Step::Plan(c) = step {
-            return Ok(unsafe { std::mem::transmute::<&str, &'a str>(c.on_failure()) });
-        } else {
-            unreachable!()
-        }
+        return Ok(unsafe { std::mem::transmute::<&str, &'a str>(step.on_failure()) });
     }
     let cfg_ref = view.borrow();
-    let wf = cfg_ref.workflow(workflow).unwrap();
-    let step = wf.resolve(current).unwrap();
-    let (selection, on_success, max_iterations) = if let Step::Plan(c) = step {
-        let sel = c.selection();
-        let sel_owned = Selection {
-            agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
-            provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
-            model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
-        };
-        let max = cfg_ref
-            .plan(&sel)
-            .ok()
-            .map(|p| p.max_iterations())
-            .unwrap_or(25);
-        (
-            sel_owned,
-            unsafe { std::mem::transmute::<&str, &'a str>(c.on_success()) },
-            max,
-        )
-    } else {
-        unreachable!()
+    let sel = step.selection();
+    let sel_owned = Selection {
+        agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
+        provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
+        model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
     };
+    let max = cfg_ref
+        .plan(&sel)
+        .ok()
+        .map(|p| p.max_iterations())
+        .unwrap_or(25);
+    let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
+    let tools = tools_from_view(&cfg_ref);
     let mut agent = InteractiveAgent::new();
     let res = agent
         .run(
-            client,
-            session,
-            view,
-            &selection,
-            messages,
-            tools,
-            queued,
-            max_iterations,
+            client, session, view, &sel_owned, messages, &tools, queued, max,
         )
         .await;
     drop(cfg_ref);
@@ -321,48 +337,30 @@ async fn run_plan_step<'a>(
 async fn run_implement_step<'a>(
     client: &impl LlmClient,
     view: &'a ConfigView,
-    workflow: &'a str,
-    current: &'a str,
+    step: &'a StepBase,
     session: &Session,
     messages: &mut Vec<Message>,
-    tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<&'a str, RuntimeError> {
     use crate::agent::{Agent, CreativeAgent};
     let cfg_ref = view.borrow();
-    let wf = cfg_ref.workflow(workflow).unwrap();
-    let step = wf.resolve(current).unwrap();
-    let (selection, on_success, max_iterations) = if let Step::Implement(c) = step {
-        let sel = c.selection();
-        let sel_owned = Selection {
-            agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
-            provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
-            model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
-        };
-        let max = cfg_ref
-            .plan(&sel)
-            .ok()
-            .map(|p| p.max_iterations())
-            .unwrap_or(25);
-        (
-            sel_owned,
-            unsafe { std::mem::transmute::<&str, &'a str>(c.on_success()) },
-            max,
-        )
-    } else {
-        unreachable!()
+    let sel = step.selection();
+    let sel_owned = Selection {
+        agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
+        provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
+        model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
     };
+    let max = cfg_ref
+        .plan(&sel)
+        .ok()
+        .map(|p| p.max_iterations())
+        .unwrap_or(25);
+    let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
+    let tools = tools_from_view(&cfg_ref);
     let mut agent = CreativeAgent;
     let res = agent
         .run(
-            client,
-            session,
-            view,
-            &selection,
-            messages,
-            tools,
-            queued,
-            max_iterations,
+            client, session, view, &sel_owned, messages, &tools, queued, max,
         )
         .await;
     drop(cfg_ref);
@@ -373,73 +371,42 @@ async fn run_implement_step<'a>(
 async fn run_validate_step<'a>(
     client: &impl LlmClient,
     view: &'a ConfigView,
-    workflow: &'a str,
-    current: &'a str,
+    step: &'a ValidateStep,
     session: &Session,
     messages: &mut Vec<Message>,
-    tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<&'a str, RuntimeError> {
-    let cfg_ref = view.borrow();
-    let on_success = {
-        let wf = cfg_ref.workflow(workflow).unwrap();
-        let step = wf.resolve(current).unwrap();
-        if let Step::Validate(c) = step {
-            unsafe { std::mem::transmute::<&str, &'a str>(c.on_success()) }
-        } else {
-            unreachable!()
-        }
-    };
-    let _ = (client, session, messages, tools, queued);
-    drop(cfg_ref);
-    Ok(on_success)
+    let _ = (client, view, session, messages, queued);
+    Ok(unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) })
 }
 
 async fn run_commit_step<'a>(
     client: &impl LlmClient,
     view: &'a ConfigView,
-    workflow: &'a str,
-    current: &'a str,
+    step: &'a StepBase,
     session: &Session,
     messages: &mut Vec<Message>,
-    tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<&'a str, RuntimeError> {
     use crate::agent::{Agent, CreativeAgent};
     let cfg_ref = view.borrow();
-    let wf = cfg_ref.workflow(workflow).unwrap();
-    let step = wf.resolve(current).unwrap();
-    let (selection, on_success, max_iterations) = if let Step::Commit(c) = step {
-        let sel = c.selection();
-        let sel_owned = Selection {
-            agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
-            provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
-            model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
-        };
-        let max = cfg_ref
-            .plan(&sel)
-            .ok()
-            .map(|p| p.max_iterations())
-            .unwrap_or(25);
-        (
-            sel_owned,
-            unsafe { std::mem::transmute::<&str, &'a str>(c.on_success()) },
-            max,
-        )
-    } else {
-        unreachable!()
+    let sel = step.selection();
+    let sel_owned = Selection {
+        agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
+        provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
+        model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
     };
+    let max = cfg_ref
+        .plan(&sel)
+        .ok()
+        .map(|p| p.max_iterations())
+        .unwrap_or(25);
+    let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
+    let tools = tools_from_view(&cfg_ref);
     let mut agent = CreativeAgent;
     let res = agent
         .run(
-            client,
-            session,
-            view,
-            &selection,
-            messages,
-            tools,
-            queued,
-            max_iterations,
+            client, session, view, &sel_owned, messages, &tools, queued, max,
         )
         .await;
     drop(cfg_ref);
@@ -450,25 +417,15 @@ async fn run_commit_step<'a>(
 async fn run_custom_step<'a>(
     client: &impl LlmClient,
     view: &'a ConfigView,
-    workflow: &'a str,
-    current: &'a str,
+    step: &'a CustomStep,
     session: &Session,
     messages: &mut Vec<Message>,
-    tools: &[Tool],
     queued: &mut Vec<String>,
 ) -> Result<&'a str, RuntimeError> {
-    let cfg_ref = view.borrow();
-    let wf = cfg_ref.workflow(workflow).unwrap();
-    let step = wf.resolve(current).unwrap();
-    let c = if let Step::Custom(c) = step {
-        c
-    } else {
-        unreachable!()
-    };
-    let on_success: &'a str = unsafe { std::mem::transmute::<&str, &'a str>(c.on_success()) };
-    let on_failure: &'a str = unsafe { std::mem::transmute::<&str, &'a str>(c.on_failure()) };
-    let timeout = c.timeout_secs();
-    match c.backend() {
+    let on_success: &'a str = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
+    let on_failure: &'a str = unsafe { std::mem::transmute::<&str, &'a str>(step.on_failure()) };
+    let timeout = step.timeout_secs();
+    match step.backend() {
         Backend::Command { command } => {
             let mut child = tokio::process::Command::new("sh")
                 .arg("-c")
@@ -509,10 +466,10 @@ async fn run_custom_step<'a>(
                 provider: provider.as_str(),
                 model: model.as_str(),
             };
-            let max_iterations = {
-                let c = view.borrow();
-                c.plan(&selection)?.max_iterations()
-            };
+            let cfg_ref = view.borrow();
+            let max_iterations = cfg_ref.plan(&selection)?.max_iterations();
+            let tools = tools_from_view(&cfg_ref);
+            drop(cfg_ref);
             let mut agent_obj = CreativeAgent;
             agent_obj
                 .run(
@@ -521,7 +478,7 @@ async fn run_custom_step<'a>(
                     view,
                     &selection,
                     messages,
-                    tools,
+                    &tools,
                     queued,
                     max_iterations,
                 )
