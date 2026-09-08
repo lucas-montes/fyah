@@ -72,71 +72,6 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-fn tools_from_view(cfg: &crate::config::Config) -> Vec<Tool> {
-    let mut out = Vec::new();
-    for c in cfg.tools().custom() {
-        out.push(Tool::new(
-            c.name().to_string(),
-            c.description().to_string(),
-            c.parameters().clone(),
-        ));
-    }
-    let compiled = cfg.tools().compiled();
-    if compiled.shell() {
-        out.push(Tool::new(
-            "Bash".to_string(),
-            "Execute a shell command".to_string(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The command to execute" }
-                },
-                "required": ["command"]
-            }),
-        ));
-    }
-    if compiled.web_search() || compiled.code_interpreter() || compiled.tool_search() {
-        // Add generic tools as needed - for now Bash covers shell
-    }
-    if out.is_empty() {
-        out.push(Tool::new(
-            "Bash".to_string(),
-            "Execute a shell command".to_string(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The command to execute" }
-                },
-                "required": ["command"]
-            }),
-        ));
-        out.push(Tool::new(
-            "Read".to_string(),
-            "Read and return the contents of a file".to_string(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": { "type": "string", "description": "The path to the file to read" }
-                },
-                "required": ["file_path"]
-            }),
-        ));
-        out.push(Tool::new(
-            "Write".to_string(),
-            "Write content to a file".to_string(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": { "type": "string", "description": "The path to the file to write" },
-                    "content": { "type": "string", "description": "The content to write to the file" }
-                },
-                "required": ["file_path", "content"]
-            }),
-        ));
-    }
-    out
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn start_workflow(
     workflow: String,
@@ -322,11 +257,12 @@ async fn run_plan_step<'a>(
         .map(|p| p.max_iterations())
         .unwrap_or(25);
     let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
-    let tools = tools_from_view(&cfg_ref);
+    let tools: &'a [Tool] =
+        unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
     let mut agent = InteractiveAgent::new();
     let res = agent
         .run(
-            client, session, view, &sel_owned, messages, &tools, queued, max,
+            client, session, view, &sel_owned, messages, tools, queued, max,
         )
         .await;
     drop(cfg_ref);
@@ -356,11 +292,12 @@ async fn run_implement_step<'a>(
         .map(|p| p.max_iterations())
         .unwrap_or(25);
     let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
-    let tools = tools_from_view(&cfg_ref);
+    let tools: &'a [Tool] =
+        unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
     let mut agent = CreativeAgent;
     let res = agent
         .run(
-            client, session, view, &sel_owned, messages, &tools, queued, max,
+            client, session, view, &sel_owned, messages, tools, queued, max,
         )
         .await;
     drop(cfg_ref);
@@ -402,7 +339,8 @@ async fn run_commit_step<'a>(
         .map(|p| p.max_iterations())
         .unwrap_or(25);
     let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
-    let tools = tools_from_view(&cfg_ref);
+    let tools: &'a [Tool] =
+        unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
     let mut agent = CreativeAgent;
     let res = agent
         .run(
@@ -467,8 +405,13 @@ async fn run_custom_step<'a>(
                 model: model.as_str(),
             };
             let cfg_ref = view.borrow();
-            let max_iterations = cfg_ref.plan(&selection)?.max_iterations();
-            let tools = tools_from_view(&cfg_ref);
+            let max_iterations = cfg_ref
+                .plan(&selection)
+                .ok()
+                .map(|p| p.max_iterations())
+                .unwrap_or(25);
+            let tools: &'a [Tool] =
+                unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
             drop(cfg_ref);
             let mut agent_obj = CreativeAgent;
             agent_obj
@@ -478,7 +421,7 @@ async fn run_custom_step<'a>(
                     view,
                     &selection,
                     messages,
-                    &tools,
+                    tools,
                     queued,
                     max_iterations,
                 )

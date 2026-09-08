@@ -5,6 +5,7 @@ use serde::Deserialize;
 use valuable::Valuable;
 
 use crate::provider::{Provider, ProviderConfig};
+use crate::tools::ToolRegistry;
 
 /// Per-provider model definition (deserialized from TOML). Fields private.
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
@@ -37,82 +38,6 @@ impl Default for WatcherConfig {
             debounce_ms: default_debounce_ms(),
         }
     }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Default)]
-pub struct FileSearchConfig {
-    #[serde(default)]
-    vector_store_ids: Vec<String>,
-    #[serde(default)]
-    max_num_results: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Default)]
-pub struct CompiledTools {
-    #[serde(default)]
-    web_search: bool,
-    #[serde(default)]
-    code_interpreter: bool,
-    #[serde(default)]
-    computer_use: bool,
-    #[serde(default)]
-    shell: bool,
-    #[serde(default)]
-    tool_search: bool,
-    #[serde(default)]
-    file_search: Option<FileSearchConfig>,
-}
-
-impl CompiledTools {
-    pub fn web_search(&self) -> bool {
-        self.web_search
-    }
-    pub fn code_interpreter(&self) -> bool {
-        self.code_interpreter
-    }
-    pub fn computer_use(&self) -> bool {
-        self.computer_use
-    }
-    pub fn shell(&self) -> bool {
-        self.shell
-    }
-    pub fn tool_search(&self) -> bool {
-        self.tool_search
-    }
-    pub fn file_search(&self) -> Option<&FileSearchConfig> {
-        self.file_search.as_ref()
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Default)]
-pub struct CustomToolDef {
-    name: String,
-    description: String,
-    command: String,
-    parameters: serde_json::Value,
-}
-
-impl CustomToolDef {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-    pub fn command(&self) -> &str {
-        &self.command
-    }
-    pub fn parameters(&self) -> &serde_json::Value {
-        &self.parameters
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Default)]
-pub struct ToolRegistry {
-    #[serde(flatten)]
-    compiled: CompiledTools,
-    #[serde(default)]
-    custom: Vec<CustomToolDef>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Valuable, Default)]
@@ -579,15 +504,6 @@ pub struct ConfigView {
     inner: tokio::sync::watch::Receiver<Config>,
 }
 
-impl ToolRegistry {
-    pub fn compiled(&self) -> &CompiledTools {
-        &self.compiled
-    }
-    pub fn custom(&self) -> &[CustomToolDef] {
-        &self.custom
-    }
-}
-
 impl RuntimeConfig {
     pub fn ctrl_c(&self) -> &CtrlCMode {
         &self.ctrl_c
@@ -645,40 +561,5 @@ impl From<std::io::Error> for AgentError {
 impl From<serde_json::Error> for AgentError {
     fn from(e: serde_json::Error) -> Self {
         Self::Parse(e.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn load_fyah_toml() {
-        let cfg = Config::load(Path::new("fyah.toml")).expect("should load fyah.toml");
-        assert!(cfg.tools().custom().len() >= 1);
-        assert_eq!(*cfg.runtime().ctrl_c(), CtrlCMode::Immediate);
-    }
-
-    #[test]
-    fn load_with_runtime_graceful() {
-        let toml_str = r#"
-[watcher]
-debounce_ms = 2000
-[runtime]
-ctrl_c = "graceful"
-[tools]
-web_search = true
-shell = true
-[[tools.custom]]
-name = "my_tool"
-description = "desc"
-command = "echo hi"
-parameters = { type = "object" }
-"#;
-        let cfg: Config = toml::from_str(toml_str).expect("should parse");
-        assert_eq!(*cfg.runtime().ctrl_c(), CtrlCMode::Graceful);
-        assert!(cfg.tools().compiled().web_search());
-        assert_eq!(cfg.tools().custom().len(), 1);
     }
 }
