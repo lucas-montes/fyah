@@ -113,50 +113,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let shutdown_tx_clone = shutdown_tx.clone();
         let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{SignalKind, signal};
-                let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-                let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-                let mut sighup = signal(SignalKind::hangup()).expect("sighup");
-                loop {
-                    tokio::select! {
-                        _ = sigint.recv() => {
-                            if is_immediate {
-                                std::process::exit(130)
-                            } else {
-                                let _ = shutdown_tx_clone.send(true);
-                                let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
-                            }
-                        },
-                        _ = sigterm.recv() => {
-                            let _ = shutdown_tx_clone.send(true);
-                            let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
-                        },
-                        _ = sighup.recv() => {
-                            let _ = shutdown_tx_clone.send(true);
-                        },
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = tokio::signal::ctrl_c().await;
-                if is_immediate {
-                    std::process::exit(130)
-                } else {
-                    let _ = shutdown_tx_clone.send(true);
-                    let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
-                }
-            }
-        });
+        tokio::spawn(listen_to_signals(is_immediate, shutdown_tx_clone, tx_clone));
     }
     let _shutdown_tx = shutdown_tx;
 
     spawn_stdin_source(tx);
     tracing::debug!("Spawning stdin source");
     start_session(cli.workflow, view, shutdown_rx, rx).await
+}
+
+async fn listen_to_signals(
+    is_immediate: bool,
+    shutdown_tx_clone: tokio::sync::watch::Sender<bool>,
+    tx_clone: tokio::sync::mpsc::UnboundedSender<Inbound>,
+) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
+        let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
+        let mut sighup = signal(SignalKind::hangup()).expect("sighup");
+        loop {
+            tokio::select! {
+                _ = sigint.recv() => {
+                    if is_immediate {
+                        std::process::exit(130)
+                    } else {
+                        let _ = shutdown_tx_clone.send(true);
+                        let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+                    }
+                },
+                _ = sigterm.recv() => {
+                    let _ = shutdown_tx_clone.send(true);
+                    let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+                },
+                _ = sighup.recv() => {
+                    let _ = shutdown_tx_clone.send(true);
+                },
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        if is_immediate {
+            std::process::exit(130)
+        } else {
+            let _ = shutdown_tx_clone.send(true);
+            let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+        }
+    }
 }
 
 async fn start_session(

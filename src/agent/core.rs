@@ -7,6 +7,7 @@ use crate::model::{AssistantTurn, Conversation, Message, ToolCall};
 use crate::provider::{WireFormat, parse_response};
 use crate::record_write;
 use crate::session::Session;
+use crate::tools::{BuiltinToolCall, ToolRegistry};
 
 pub trait Agent {
     #[allow(clippy::too_many_arguments)]
@@ -70,6 +71,7 @@ pub async fn run_agent_loop(
                 messages,
                 turn,
                 &mut tool_calls_results,
+                cfg.tools(),
             )?;
         }
         tracing::debug!(iteration, "Tools executed, continuing to next iteration");
@@ -108,6 +110,7 @@ pub fn execute_tools(
     messages: &mut Vec<Message>,
     turn: AssistantTurn,
     tool_calls_results: &mut Vec<Message>,
+    registry: &ToolRegistry,
 ) -> Result<(), AgentError> {
     let (content, tool_calls) = turn.into_parts();
     tracing::debug!(num_tools=?tool_calls.len(), "Executing tool calls from LLM turn");
@@ -125,7 +128,11 @@ pub fn execute_tools(
             tool_call.arguments().to_string(),
             None,
         ));
-        let result = handle_tool_call(tool_call, session, model_id)?;
+        let result = match handle_tool_call(tool_call, session, model_id, registry) {
+            Ok(v) => v,
+            Err(AgentError::Tool(msg)) => format!("tool error: {msg}"),
+            Err(e) => return Err(e),
+        };
         let _ = session.append_wal(crate::session::WalEntry::new(
             tool_call.id().to_string(),
             tool_call.name().to_string(),
@@ -144,58 +151,46 @@ fn handle_tool_call(
     tool_call: &ToolCall,
     session: &Session,
     model_id: &str,
+    registry: &ToolRegistry,
 ) -> Result<String, AgentError> {
-    let args: serde_json::Value = match serde_json::from_str(tool_call.arguments()) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(tool=%tool_call.name(), error=%e, arguments=%tool_call.arguments(), "failed to parse tool arguments");
-            return Err(AgentError::Parse(e.to_string()));
-        }
-    };
-
-    match tool_call.name() {
-        "read_file" => match args["file_path"].as_str() {
-            Some(file_path) => Ok(
-                std::fs::read_to_string(file_path).map_err(|e| AgentError::Io(e.to_string()))?
-            ),
-            None => {
-                tracing::error!(tool="Read", arguments=%args, "file_path is not a string");
-                Err(AgentError::Tool("file_path is not a string".to_string()))
+    match BuiltinToolCall::try_from(tool_call) {
+        Ok(call) => match call {
+            BuiltinToolCall::Read { args, .. } => Ok(std::fs::read_to_string(&args.file_path)
+                .map_err(|e| AgentError::Io(e.to_string()))?),
+            BuiltinToolCall::Write { args, .. } => {
+                std::fs::write(&args.file_path, &args.content)
+                    .map_err(|e| AgentError::Io(e.to_string()))?;
+                record_write!(session, &args.file_path, &args.content, model_id);
+                Ok(String::new())
             }
-        },
-        "write" => match (args["file_path"].as_str(), args["content"].as_str()) {
-            (Some(file_path), Some(content)) => {
-                std::fs::write(file_path, content).map_err(|e| AgentError::Io(e.to_string()))?;
-                record_write!(session, file_path, content, model_id);
-                Ok("".to_string())
-            }
-            _ => {
-                tracing::error!(tool="Write", arguments=%args, "file_path or content is not a string");
-                Err(AgentError::Tool(
-                    "file_path or content is not a string".to_string(),
-                ))
-            }
-        },
-        "bash" => match args["command"].as_str() {
-            Some(command) => {
+            BuiltinToolCall::Bash { args, .. } => {
                 let output = std::process::Command::new("bash")
                     .arg("-c")
-                    .arg(command)
+                    .arg(&args.command)
                     .output()
                     .map_err(|e| AgentError::Io(e.to_string()))?;
                 Ok(String::from_utf8_lossy(&output.stdout).into_owned())
             }
-            None => {
-                tracing::error!(tool="Bash", arguments=%args, "command is not a string");
-                Err(AgentError::Tool("command is not a string".to_string()))
-            }
         },
-        _ => {
-            tracing::error!(tool=%tool_call.name(), "unknown tool");
-            Err(AgentError::Tool(format!(
-                "unknown tool: {}",
-                tool_call.name()
-            )))
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.starts_with("unknown builtin tool:") {
+                if let Some(custom) = registry.find_custom(tool_call.name()) {
+                    tracing::info!(tool=%tool_call.name(), command=%custom.command(), "executing custom tool");
+                    return Ok(format!(
+                        "custom tool '{}' executed: command='{}' args={}",
+                        custom.name(),
+                        custom.command(),
+                        tool_call.arguments()
+                    ));
+                }
+                tracing::error!(tool=%tool_call.name(), "unknown tool");
+                return Err(AgentError::Tool(format!(
+                    "unknown tool: {}",
+                    tool_call.name()
+                )));
+            }
+            Err(e)
         }
     }
 }

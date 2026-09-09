@@ -112,6 +112,7 @@ impl<'a> Agent for InteractiveAgent<'a> {
                     messages,
                     turn,
                     &mut tool_calls_results,
+                    cfg.tools(),
                 )?;
             }
             tracing::debug!(iteration, "Tools executed, continuing to next iteration");

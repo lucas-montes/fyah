@@ -1,14 +1,35 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::model::Tool;
 
+use super::builtin::BuiltinTool;
 use super::config::{BuiltinTools, CustomToolDef};
 
-#[derive(Debug, Default)]
+fn default_concurrency() -> usize {
+    10
+}
+
+#[derive(Debug, Clone)]
 pub struct ToolRegistry {
     builtins: BuiltinTools,
     custom: Vec<CustomToolDef>,
+    custom_map: HashMap<String, usize>,
     all: Vec<Tool>,
+    concurrency: usize,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self {
+            builtins: BuiltinTools::default(),
+            custom: Vec::new(),
+            custom_map: HashMap::new(),
+            all: Vec::new(),
+            concurrency: default_concurrency(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for ToolRegistry {
@@ -22,14 +43,21 @@ impl<'de> Deserialize<'de> for ToolRegistry {
             builtins: BuiltinTools,
             #[serde(default)]
             custom: Vec<CustomToolDef>,
+            #[serde(default = "default_concurrency")]
+            concurrency: usize,
         }
 
         let raw = RawRegistry::deserialize(deserializer)?;
         let mut registry = Self {
             builtins: raw.builtins,
             custom: raw.custom,
+            custom_map: HashMap::new(),
             all: Vec::new(),
+            concurrency: raw.concurrency,
         };
+        if registry.concurrency == 0 {
+            registry.concurrency = default_concurrency();
+        }
         registry.rebuild_all();
         Ok(registry)
     }
@@ -46,64 +74,40 @@ impl ToolRegistry {
         &self.all
     }
 
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    pub fn find_custom(&self, name: &str) -> Option<&CustomToolDef> {
+        self.custom_map.get(name).map(|&idx| &self.custom[idx])
+    }
+
     pub fn rebuild_all(&mut self) {
         let mut out = Vec::new();
-        for c in &self.custom {
+        let mut map = HashMap::new();
+        for (idx, c) in self.custom.iter().enumerate() {
             out.push(Tool::new(
                 c.name().to_string(),
                 c.description().to_string(),
                 c.parameters().clone(),
             ));
+            map.insert(c.name().to_string(), idx);
+        }
+        if self.builtins.read() {
+            out.push(BuiltinTool::Read.as_tool());
+        }
+        if self.builtins.write() {
+            out.push(BuiltinTool::Write.as_tool());
         }
         if self.builtins.shell() {
-            out.push(Tool::new(
-                "Bash".to_string(),
-                "Execute a shell command".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "The command to execute" }
-                    },
-                    "required": ["command"]
-                }),
-            ));
+            out.push(BuiltinTool::Bash.as_tool());
         }
         if out.is_empty() {
-            out.push(Tool::new(
-                "bash".to_string(),
-                "Execute a shell command".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "The command to execute" }
-                    },
-                    "required": ["command"]
-                }),
-            ));
-            out.push(Tool::new(
-                "read_file".to_string(),
-                "Read and return the contents of a file".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string", "description": "The path to the file to read" }
-                    },
-                    "required": ["file_path"]
-                }),
-            ));
-            out.push(Tool::new(
-                "write".to_string(),
-                "Write content to a file".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string", "description": "The path to the file to write" },
-                        "content": { "type": "string", "description": "The content to write to the file" }
-                    },
-                    "required": ["file_path", "content"]
-                }),
-            ));
+            for t in BuiltinTool::all_variants() {
+                out.push(t.as_tool());
+            }
         }
+        self.custom_map = map;
         self.all = out;
     }
 }

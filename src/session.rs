@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::Message;
 
+#[derive(Debug, Clone)]
 pub enum VcsKind {
     Git,
     Svn,
@@ -79,6 +80,7 @@ impl WalEntry {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Session {
     id: String,
     tool_name: &'static str,
