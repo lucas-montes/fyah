@@ -9,26 +9,32 @@ use serde::Deserialize;
 use crate::config::ModelConfig;
 use crate::model::{AssistantTurn, Conversation};
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WireFormat {
+    #[default]
     OpenAi,
     OpenAiResponses,
     Anthropic,
 }
 
 /// Raw connection config (deserialized from TOML). Fields are private.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct ProviderConfig {
     url: String,
     api_key: String,
+    #[serde(default)]
     format: WireFormat,
+    #[serde(default)]
     models: HashMap<String, ModelConfig>,
 }
 
 impl ProviderConfig {
     pub fn get_model(&self, key: &str) -> Option<&ModelConfig> {
         self.models.get(key)
+    }
+    pub fn models_len(&self) -> usize {
+        self.models.len()
     }
 }
 
@@ -59,22 +65,23 @@ impl<'a> Provider<'a> {
         self.format
     }
 
-    pub fn auth_headers(&self) -> Vec<(&'static str, String)> {
+    pub fn auth_headers(&self) -> Vec<(&'static str, &'a str)> {
         match self.format {
             WireFormat::OpenAi | WireFormat::OpenAiResponses => {
                 let mut headers = Vec::new();
                 if let Some(key) = self.api_key {
-                    headers.push(("Authorization", format!("Bearer {key}")));
+                    headers.push(("Authorization", key));
                 }
                 headers
             }
-            WireFormat::Anthropic => vec![
-                (
-                    "x-api-key",
-                    self.api_key.map(|k| k.to_string()).unwrap_or_default(),
-                ),
-                ("anthropic-version", "2023-06-01".to_string()),
-            ],
+            WireFormat::Anthropic => {
+                let mut headers = Vec::new();
+                if let Some(key) = self.api_key {
+                    headers.push(("x-api-key", key));
+                }
+                headers.push(("anthropic-version", "2023-06-01"));
+                headers
+            }
         }
     }
 

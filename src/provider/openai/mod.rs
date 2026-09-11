@@ -27,9 +27,9 @@ impl<'a> From<&'a Tool> for OpenAiTool<'a> {
         OpenAiTool {
             tool_type: "function",
             function: OpenAiFunction {
-                name: t.name.as_str(),
-                description: t.description.as_str(),
-                parameters: &t.parameters,
+                name: t.name(),
+                description: t.description(),
+                parameters: t.parameters(),
             },
         }
     }

@@ -1,2 +1,0 @@
-# Empty config: nothing is declared, so nothing is compiled.
-# Must parse to defaults and build a ConfigStore with no plans.

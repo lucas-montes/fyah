@@ -141,16 +141,12 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
                 name,
                 arguments,
             } => {
-                tool_calls.push(ToolCall {
-                    id: call_id.clone(),
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                });
+                tool_calls.push(ToolCall::new(call_id.clone(), name.clone(), arguments.clone()));
             }
         }
     }
 
-    Ok(AssistantTurn { content, tool_calls })
+    Ok(AssistantTurn::new(content, tool_calls))
 }
 
 // ── Streaming reconstructor ──
@@ -242,20 +238,16 @@ impl StreamReconstructor for ResponsesReconstructor {
     fn finish(&mut self) -> AssistantTurn {
         let tool_calls = std::mem::take(&mut self.calls)
             .into_values()
-            .map(|c| ToolCall {
-                id: c.call_id,
-                name: c.name,
-                arguments: c.arguments,
-            })
+            .map(|c| ToolCall::new(c.call_id, c.name, c.arguments))
             .collect();
-        AssistantTurn {
-            content: if self.content.is_empty() {
+        AssistantTurn::new(
+            if self.content.is_empty() {
                 None
             } else {
                 Some(std::mem::take(&mut self.content))
             },
             tool_calls,
-        }
+        )
     }
 
     fn response_id(&self) -> Option<String> {
@@ -278,11 +270,11 @@ mod tests {
             ]
         });
         let turn = parse_response(body.to_string().as_bytes()).unwrap();
-        assert_eq!(turn.content, Some("Hi".to_string()));
-        assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.tool_calls[0].id, "c1");
-        assert_eq!(turn.tool_calls[0].name, "Write");
-        assert_eq!(turn.tool_calls[0].arguments, "{}");
+        assert_eq!(turn.content(), Some("Hi"));
+        assert_eq!(turn.tool_calls().len(), 1);
+        assert_eq!(turn.tool_calls()[0].id(), "c1");
+        assert_eq!(turn.tool_calls()[0].name(), "Write");
+        assert_eq!(turn.tool_calls()[0].arguments(), "{}");
     }
 
     #[test]
@@ -300,11 +292,11 @@ mod tests {
             rec.ingest(e);
         }
         let turn = rec.finish();
-        assert_eq!(turn.content, Some("Hello".to_string()));
-        assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.tool_calls[0].id, "call_1");
-        assert_eq!(turn.tool_calls[0].name, "Write");
-        assert_eq!(turn.tool_calls[0].arguments, "partial");
+        assert_eq!(turn.content(), Some("Hello"));
+        assert_eq!(turn.tool_calls().len(), 1);
+        assert_eq!(turn.tool_calls()[0].id(), "call_1");
+        assert_eq!(turn.tool_calls()[0].name(), "Write");
+        assert_eq!(turn.tool_calls()[0].arguments(), "partial");
         assert_eq!(rec.response_id(), Some("resp_1".to_string()));
     }
 }

@@ -5,6 +5,8 @@ pub mod config;
 
 pub mod fs_watcher;
 
+pub mod runtime;
+
 pub mod agent;
 pub mod client;
 pub mod model;

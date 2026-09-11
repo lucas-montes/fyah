@@ -74,11 +74,11 @@ impl<'a> From<&'a Message> for OpenAiMessage<'a> {
 impl<'a> From<&'a ToolCall> for OpenAiToolCall<'a> {
     fn from(tc: &'a ToolCall) -> Self {
         OpenAiToolCall {
-            id: tc.id.as_str(),
+            id: tc.id(),
             tool_type: "function",
             function: OpenAiToolCallFn {
-                name: tc.name.as_str(),
-                arguments: tc.arguments.as_str(),
+                name: tc.name(),
+                arguments: tc.arguments(),
             },
         }
     }
@@ -187,26 +187,13 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
             let tool_calls = tool_calls
                 .unwrap_or_default()
                 .into_iter()
-                .map(|tc| ToolCall {
-                    id: tc.id,
-                    name: tc.function.name,
-                    arguments: tc.function.arguments,
-                })
+                .map(|tc| ToolCall::new(tc.id, tc.function.name, tc.function.arguments))
                 .collect();
-            Ok(AssistantTurn { content, tool_calls })
+            Ok(AssistantTurn::new(content, tool_calls))
         }
-        OpenAiMessageOut::User { content } => Ok(AssistantTurn {
-            content: Some(content),
-            tool_calls: vec![],
-        }),
-        OpenAiMessageOut::Tool { content, .. } => Ok(AssistantTurn {
-            content: Some(content),
-            tool_calls: vec![],
-        }),
-        OpenAiMessageOut::System { content } => Ok(AssistantTurn {
-            content: Some(content),
-            tool_calls: vec![],
-        }),
+        OpenAiMessageOut::User { content } => Ok(AssistantTurn::new(Some(content), vec![])),
+        OpenAiMessageOut::Tool { content, .. } => Ok(AssistantTurn::new(Some(content), vec![])),
+        OpenAiMessageOut::System { content } => Ok(AssistantTurn::new(Some(content), vec![])),
     }
 }
 
@@ -266,20 +253,16 @@ impl StreamReconstructor for ChatReconstructor {
     fn finish(&mut self) -> AssistantTurn {
         let tool_calls = std::mem::take(&mut self.calls)
             .into_iter()
-            .map(|b| ToolCall {
-                id: b.id,
-                name: b.name,
-                arguments: b.arguments,
-            })
+            .map(|b| ToolCall::new(b.id, b.name, b.arguments))
             .collect();
-        AssistantTurn {
-            content: if self.content.is_empty() {
+        AssistantTurn::new(
+            if self.content.is_empty() {
                 None
             } else {
                 Some(std::mem::take(&mut self.content))
             },
             tool_calls,
-        }
+        )
     }
 }
 
@@ -301,10 +284,10 @@ mod tests {
             rec.ingest(e);
         }
         let turn = rec.finish();
-        assert_eq!(turn.content, Some("Hello".to_string()));
-        assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.tool_calls[0].id, "call_1");
-        assert_eq!(turn.tool_calls[0].name, "Write");
-        assert_eq!(turn.tool_calls[0].arguments, "alpha");
+        assert_eq!(turn.content(), Some("Hello"));
+        assert_eq!(turn.tool_calls().len(), 1);
+        assert_eq!(turn.tool_calls()[0].id(), "call_1");
+        assert_eq!(turn.tool_calls()[0].name(), "Write");
+        assert_eq!(turn.tool_calls()[0].arguments(), "alpha");
     }
 }

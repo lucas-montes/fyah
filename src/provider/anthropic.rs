@@ -51,9 +51,9 @@ pub struct AnthropicTool<'a> {
 impl<'a> From<&'a Tool> for AnthropicTool<'a> {
     fn from(t: &'a Tool) -> Self {
         AnthropicTool {
-            name: t.name.as_str(),
-            description: t.description.as_str(),
-            input_schema: &t.parameters,
+            name: t.name(),
+            description: t.description(),
+            input_schema: t.parameters(),
         }
     }
 }
@@ -95,10 +95,10 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
                     }
                     for tc in tool_calls {
                         let input: Value =
-                            serde_json::from_str(tc.arguments.as_str()).unwrap_or(Value::Null);
+                            serde_json::from_str(tc.arguments()).unwrap_or(Value::Null);
                         blocks.push(AnthropicBlock::ToolUse {
-                            id: tc.id.as_str(),
-                            name: tc.name.as_str(),
+                            id: tc.id(),
+                            name: tc.name(),
                             input,
                         });
                     }
@@ -183,6 +183,7 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
     let mut content: Option<String> = None;
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
+    //TODO: avoid cloning
     for block in &resp.content {
         match block {
             AnthropicBlockOut::Text { text } => match &mut content {
@@ -191,17 +192,13 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
             },
             AnthropicBlockOut::ToolUse { id, name, input } => {
                 let arguments = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-                tool_calls.push(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments,
-                });
+                tool_calls.push(ToolCall::new(id.clone(), name.clone(), arguments));
             }
             AnthropicBlockOut::ToolResult { .. } => {}
         }
     }
 
-    Ok(AssistantTurn { content, tool_calls })
+    Ok(AssistantTurn::new(content, tool_calls))
 }
 
 #[derive(Default)]
@@ -266,20 +263,16 @@ impl StreamReconstructor for AnthropicReconstructor {
         let tool_calls = std::mem::take(&mut self.blocks)
             .into_iter()
             .filter(|b| !b.id.is_empty())
-            .map(|b| ToolCall {
-                id: b.id,
-                name: b.name,
-                arguments: b.input_json,
-            })
+            .map(|b| ToolCall::new(b.id, b.name, b.input_json))
             .collect();
-        AssistantTurn {
-            content: if self.content.is_empty() {
+        AssistantTurn::new(
+            if self.content.is_empty() {
                 None
             } else {
                 Some(std::mem::take(&mut self.content))
             },
             tool_calls,
-        }
+        )
     }
 }
 
@@ -304,10 +297,10 @@ mod tests {
             rec.ingest(e);
         }
         let turn = rec.finish();
-        assert_eq!(turn.content, Some("Hi".to_string()));
-        assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.tool_calls[0].id, "tool_1");
-        assert_eq!(turn.tool_calls[0].name, "Write");
-        assert_eq!(turn.tool_calls[0].arguments, "partial");
+        assert_eq!(turn.content(), Some("Hi"));
+        assert_eq!(turn.tool_calls().len(), 1);
+        assert_eq!(turn.tool_calls()[0].id(), "tool_1");
+        assert_eq!(turn.tool_calls()[0].name(), "Write");
+        assert_eq!(turn.tool_calls()[0].arguments(), "partial");
     }
 }

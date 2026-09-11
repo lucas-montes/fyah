@@ -1,9 +1,8 @@
 use tokio::select;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::watch;
 
 use crate::client::LlmClient;
-use crate::config::{Config, Selection};
+use crate::config::{AgentError, ConfigView, Selection};
 use crate::model::{Conversation, Message};
 use crate::session::Session;
 
@@ -25,12 +24,12 @@ impl Agent for InteractiveAgent {
         &mut self,
         client: &impl LlmClient,
         session: &Session,
-        config_rx: &watch::Receiver<Config>,
+        view: &mut ConfigView,
         selection: &Selection<'_>,
         messages: &mut Vec<Message>,
         tools: &[crate::model::Tool],
         max_iterations: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), AgentError> {
         let rx = &mut self.rx;
         let mut queued: Vec<String> = Vec::new();
         let mut tool_calls_results = Vec::new();
@@ -45,9 +44,9 @@ impl Agent for InteractiveAgent {
                 "Messages from the user set in the conversation and sending request to the LLM or waiting for user input"
             );
 
-            let (req, format, model_id) = {
-                let config_ref = config_rx.borrow();
-                let plan = config_ref.plan(selection)?;
+            let (req, format) = {
+                let cfg = view.borrow();
+                let plan = cfg.plan(selection)?;
                 let conversation = Conversation {
                     model: plan.target().model(),
                     system: plan.system_prompt(),
@@ -56,12 +55,11 @@ impl Agent for InteractiveAgent {
                     messages,
                     tools,
                 };
-                let (req, format) = build_request(client, &plan, &conversation);
-                let model_id = plan.target().model_id().to_string();
-                (req, format, model_id)
+                build_request(client, &plan, &conversation)
             };
 
             let turn = select! {
+                _ = view.has_changed() => continue,
                 r = send_and_parse(client, req, format) => r?,
                 inbound = rx.recv() => match inbound {
                     Some(Inbound::Command(Command::Stop | Command::Exit)) | None => return Ok(()),
@@ -77,8 +75,8 @@ impl Agent for InteractiveAgent {
                 },
             };
 
-            if turn.tool_calls.is_empty() {
-                if let Some(c) = turn.content {
+            if turn.tool_calls_empty() {
+                if let Some(c) = turn.content() {
                     println!("{c}");
                 }
                 match rx.recv().await {
@@ -90,13 +88,17 @@ impl Agent for InteractiveAgent {
                 continue;
             }
 
-            execute_tools(
-                session,
-                &model_id,
-                messages,
-                turn,
-                &mut tool_calls_results,
-            )?;
+            {
+                let cfg = view.borrow();
+                let plan = cfg.plan(selection)?;
+                execute_tools(
+                    session,
+                    plan.target().model_id(),
+                    messages,
+                    turn,
+                    &mut tool_calls_results,
+                )?;
+            }
             tracing::debug!(iteration, "Tools executed, continuing to next iteration");
         }
 
