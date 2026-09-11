@@ -1,0 +1,97 @@
+# Fyah development configuration
+# Overrides the XDG default at ~/.config/fyah/config.toml
+
+[watcher]
+debounce_ms = 2000
+
+[providers.openrouter]
+url = "https://openrouter.ai/api/v1/chat/completions"
+api_key = "test"
+format = "openai"
+
+[providers.openrouter.models.nemotron]
+name = "nvidia/nemotron-3.5-lightning:free"
+temperature = 0.7
+
+[providers.ollama]
+url = "http://127.0.0.1:11434/v1/chat/completions"
+api_key = "ollama"
+format = "openai"
+
+[providers.ollama.models.qwen25]
+name = "qwen2.5-coder:14b"
+temperature = 0.3
+
+[providers.ollama.models.phi3]
+name = "phi3:mini"
+temperature = 0.3
+
+[agents.coder]
+system_prompt = "You are Fyah, an AI coding assistant."
+max_iterations = 25
+
+
+# ── Agents: system prompt + strict tool allow-list + optional pipeline. ──
+# tools = [...] restricts the [tools] catalog to the listed names; empty means
+# no tools. The system prompt is a default the runtime may override.
+[agents.primary]
+system_prompt = "You are Fyah, an AI coding assistant."
+max_iterations = 25
+tools = ["shell", "code_interpreter", "file_search", "read_file", "filesystem"]
+
+[runtime]
+ctrl_c = "immediate"
+
+# ── Tools catalog: what fyah can expose. Agents pick from it by name. ──
+[tools]
+web_search = false
+code_interpreter = true
+computer_use = false
+shell = true
+tool_search = false
+file_search = { vector_store_ids = ["vs_abc123"], max_num_results = 5 }
+
+[[tools.custom]]
+name = "read_file"
+description = "Read a file from disk"
+command = "execute_read_file"
+parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = ["path"] }
+
+# ── Workflows: named step graphs; run with `--workflow <name>`. ──
+# Workflows are entirely config-defined — no built-ins. The default CLI
+# workflow name is "default", so the config defines one here. Additional
+# names add extra workflows. Agent-involving steps may pin a default binding
+# here; the runtime can still override it.
+
+[workflows.default]
+initial = "plan"
+max_iterations = 50
+
+[workflows.default.steps.plan]
+type = "plan"
+agent = "primary"
+provider = "openrouter"
+model = "nemotron"
+on_success = "implement"
+on_failure = "implement"
+
+[workflows.default.steps.implement]
+type = "implement"
+agent = "primary"
+provider = "openrouter"
+model = "nemotron"
+on_success = "validate"
+on_failure = "plan"
+
+[workflows.default.steps.validate]
+type = "validate"
+on_success = "commit"
+on_failure = "implement"
+
+[workflows.default.steps.commit]
+type = "commit"
+agent = "primary"
+provider = "ollama"
+model = "qwen25"
+on_success = "done"
+on_failure = "implement"

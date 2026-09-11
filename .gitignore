@@ -5,3 +5,4 @@ NOTES.md
 .agent-traces/
 .fyah/
 result/
+.env
