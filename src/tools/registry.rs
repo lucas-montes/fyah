@@ -1,17 +1,15 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
-
 use crate::model::Tool;
 
 use super::builtin::BuiltinTool;
-use super::config::{BuiltinTools, CustomToolDef};
+use super::config::{BuiltinTools, CustomToolDef, ToolsConfig};
 
 fn default_concurrency() -> usize {
     10
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ToolRegistry {
     builtins: BuiltinTools,
     custom: Vec<CustomToolDef>,
@@ -32,40 +30,29 @@ impl Default for ToolRegistry {
     }
 }
 
-impl<'de> Deserialize<'de> for ToolRegistry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RawRegistry {
-            #[serde(flatten)]
-            builtins: BuiltinTools,
-            #[serde(default)]
-            custom: Vec<CustomToolDef>,
-            #[serde(default = "default_concurrency")]
-            concurrency: usize,
-        }
-
-        let raw = RawRegistry::deserialize(deserializer)?;
+impl From<ToolsConfig> for ToolRegistry {
+    fn from(cfg: ToolsConfig) -> Self {
         let mut registry = Self {
-            builtins: raw.builtins,
-            custom: raw.custom,
+            builtins: cfg.builtins,
+            custom: cfg.custom,
             custom_map: HashMap::new(),
             all: Vec::new(),
-            concurrency: raw.concurrency,
+            concurrency: if cfg.concurrency == 0 {
+                default_concurrency()
+            } else {
+                cfg.concurrency
+            },
         };
-        if registry.concurrency == 0 {
-            registry.concurrency = default_concurrency();
-        }
         registry.rebuild_all();
-        Ok(registry)
+        registry
     }
 }
 
 impl PartialEq for ToolRegistry {
     fn eq(&self, other: &Self) -> bool {
         self.custom == other.custom
+            && self.builtins == other.builtins
+            && self.concurrency == other.concurrency
     }
 }
 

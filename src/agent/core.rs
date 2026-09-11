@@ -40,7 +40,7 @@ pub async fn run_agent_loop(
             messages.push(Message::new_user(m));
         }
         let (req, format) = {
-            let cfg = view.borrow();
+            let cfg = view.load();
             let plan = cfg.plan(selection)?;
             let conversation = Conversation {
                 model: plan.target().model(),
@@ -52,10 +52,7 @@ pub async fn run_agent_loop(
             };
             build_request(client, &plan, &conversation)
         };
-        let turn = tokio::select! {
-            _ = view.has_changed() => continue,
-            r = send_and_parse(client, req, format) => r?,
-        };
+        let turn = send_and_parse(client, req, format).await?;
         if turn.tool_calls_empty() {
             if let Some(c) = turn.content() {
                 println!("{c}");
@@ -63,7 +60,7 @@ pub async fn run_agent_loop(
             continue;
         }
         {
-            let cfg = view.borrow();
+            let cfg = view.load();
             let plan = cfg.plan(selection)?;
             execute_tools(
                 session,
@@ -71,8 +68,9 @@ pub async fn run_agent_loop(
                 messages,
                 turn,
                 &mut tool_calls_results,
-                cfg.tools(),
-            )?;
+                view.tools(),
+            )
+            .await?;
         }
         tracing::debug!(iteration, "Tools executed, continuing to next iteration");
     }
@@ -104,42 +102,77 @@ pub async fn send_and_parse(
     parse_response(format, bytes.as_ref()).map_err(|e| AgentError::Parse(e.to_string()))
 }
 
-pub fn execute_tools(
+pub async fn execute_tools(
     session: &Session,
     model_id: &str,
     messages: &mut Vec<Message>,
     turn: AssistantTurn,
     tool_calls_results: &mut Vec<Message>,
-    registry: &ToolRegistry,
+    registry: std::sync::Arc<ToolRegistry>,
 ) -> Result<(), AgentError> {
     let (content, tool_calls) = turn.into_parts();
     tracing::debug!(num_tools=?tool_calls.len(), "Executing tool calls from LLM turn");
 
-    for tool_call in &tool_calls {
-        tracing::debug!(tool=%tool_call.name(), id=%tool_call.id(), arguments=%tool_call.arguments(), "Executing tool call");
-        if let Some(cached) = session.wal_contains_result(tool_call.id()) {
-            tracing::debug!(tool=%tool_call.name(), id=%tool_call.id(), "Skipping already completed tool call via WAL");
-            tool_calls_results.push(Message::new_tool(tool_call.id().to_string(), cached));
-            continue;
+    let wal = session.load_wal();
+    let wal_map: std::collections::HashMap<&str, &str> = wal
+        .iter()
+        .filter_map(|e| Some((e.tool_call_id(), e.result()?)))
+        .collect();
+
+    let mut pending = Vec::with_capacity(tool_calls.len());
+    for tc in &tool_calls {
+        if let Some(&cached) = wal_map.get(tc.id()) {
+            tracing::debug!(tool=%tc.name(), id=%tc.id(), "Skipping already completed tool call via WAL");
+            tool_calls_results.push(Message::new_tool(tc.id().to_string(), cached.to_string()));
+        } else {
+            let _ = session.append_wal(crate::session::WalEntry::new(
+                tc.id().to_string(),
+                tc.name().to_string(),
+                tc.arguments().to_string(),
+                None,
+            ));
+            pending.push(tc);
         }
-        let _ = session.append_wal(crate::session::WalEntry::new(
-            tool_call.id().to_string(),
-            tool_call.name().to_string(),
-            tool_call.arguments().to_string(),
-            None,
-        ));
-        let result = match handle_tool_call(tool_call, session, model_id, registry) {
-            Ok(v) => v,
-            Err(AgentError::Tool(msg)) => format!("tool error: {msg}"),
-            Err(e) => return Err(e),
-        };
-        let _ = session.append_wal(crate::session::WalEntry::new(
-            tool_call.id().to_string(),
-            tool_call.name().to_string(),
-            tool_call.arguments().to_string(),
-            Some(result.clone()),
-        ));
-        tool_calls_results.push(Message::new_tool(tool_call.id().to_string(), result));
+    }
+
+    if !pending.is_empty() {
+        let mut set = tokio::task::JoinSet::new();
+        let limit = registry.concurrency();
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(limit));
+        let session = std::sync::Arc::new(session.clone());
+        let model_id: std::sync::Arc<str> = std::sync::Arc::from(model_id);
+
+        for tc in pending {
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let tc_owned = ToolCall::new(
+                tc.id().to_string(),
+                tc.name().to_string(),
+                tc.arguments().to_string(),
+            );
+            let session = std::sync::Arc::clone(&session);
+            let registry = std::sync::Arc::clone(&registry);
+            let model_id = std::sync::Arc::clone(&model_id);
+            set.spawn(async move {
+                let _permit = permit;
+                let res = match handle_tool_call(&tc_owned, &session, &model_id, &registry).await {
+                    Ok(v) => v,
+                    Err(AgentError::Tool(msg)) => format!("tool error: {msg}"),
+                    Err(e) => format!("tool error: {e}"),
+                };
+                (tc_owned, res)
+            });
+        }
+
+        while let Some(joined) = set.join_next().await {
+            let (tc, result) = joined.map_err(|e| AgentError::Tool(format!("join error: {e}")))?;
+            let _ = session.append_wal(crate::session::WalEntry::new(
+                tc.id().to_string(),
+                tc.name().to_string(),
+                tc.arguments().to_string(),
+                Some(result.clone()),
+            ));
+            tool_calls_results.push(Message::new_tool(tc.id().to_string(), result));
+        }
     }
 
     messages.push(Message::new_assistant(content, tool_calls));
@@ -147,7 +180,7 @@ pub fn execute_tools(
     Ok(())
 }
 
-fn handle_tool_call(
+async fn handle_tool_call(
     tool_call: &ToolCall,
     session: &Session,
     model_id: &str,
@@ -155,19 +188,22 @@ fn handle_tool_call(
 ) -> Result<String, AgentError> {
     match BuiltinToolCall::try_from(tool_call) {
         Ok(call) => match call {
-            BuiltinToolCall::Read { args, .. } => Ok(std::fs::read_to_string(&args.file_path)
+            BuiltinToolCall::Read { args, .. } => Ok(tokio::fs::read_to_string(&args.file_path)
+                .await
                 .map_err(|e| AgentError::Io(e.to_string()))?),
             BuiltinToolCall::Write { args, .. } => {
-                std::fs::write(&args.file_path, &args.content)
+                tokio::fs::write(&args.file_path, &args.content)
+                    .await
                     .map_err(|e| AgentError::Io(e.to_string()))?;
                 record_write!(session, &args.file_path, &args.content, model_id);
                 Ok(String::new())
             }
             BuiltinToolCall::Bash { args, .. } => {
-                let output = std::process::Command::new("bash")
+                let output = tokio::process::Command::new("bash")
                     .arg("-c")
                     .arg(&args.command)
                     .output()
+                    .await
                     .map_err(|e| AgentError::Io(e.to_string()))?;
                 Ok(String::from_utf8_lossy(&output.stdout).into_owned())
             }
@@ -177,12 +213,28 @@ fn handle_tool_call(
             if msg.starts_with("unknown builtin tool:") {
                 if let Some(custom) = registry.find_custom(tool_call.name()) {
                     tracing::info!(tool=%tool_call.name(), command=%custom.command(), "executing custom tool");
-                    return Ok(format!(
-                        "custom tool '{}' executed: command='{}' args={}",
-                        custom.name(),
-                        custom.command(),
-                        tool_call.arguments()
-                    ));
+                    let escaped = tool_call.arguments().replace('\'', "'\\''");
+                    let cmd = format!("{} '{}'", custom.command(), escaped);
+                    let output = tokio::process::Command::new("bash")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .output()
+                        .await
+                        .map_err(|e| AgentError::Io(e.to_string()))?;
+                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                    if !output.status.success() {
+                        return Ok(format!(
+                            "custom tool '{}' failed: stdout={} stderr={}",
+                            custom.name(),
+                            stdout,
+                            stderr
+                        ));
+                    }
+                    if stdout.is_empty() && !stderr.is_empty() {
+                        return Ok(stderr);
+                    }
+                    return Ok(stdout);
                 }
                 tracing::error!(tool=%tool_call.name(), "unknown tool");
                 return Err(AgentError::Tool(format!(

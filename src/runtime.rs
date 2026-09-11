@@ -1,14 +1,12 @@
-use tokio::sync::{mpsc, watch};
-
 use std::time::Duration;
+
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     agent::{Agent, CreativeAgent, Inbound, InteractiveAgent},
     client::LlmClient,
-    config::{
-        AgentError, Backend, ConfigView, CustomStep, Selection, Step, StepBase, ValidateStep,
-    },
-    model::{Message, Tool},
+    config::{AgentError, Backend, ConfigView, CustomStep, Step, StepBase, ValidateStep},
+    model::Message,
     session::Session,
 };
 
@@ -72,7 +70,6 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-#[allow(clippy::too_many_arguments)]
 pub async fn start_workflow(
     workflow: String,
     view: ConfigView,
@@ -83,7 +80,7 @@ pub async fn start_workflow(
     mut rx: mpsc::UnboundedReceiver<Inbound>,
 ) -> Result<(), RuntimeError> {
     let mut current = {
-        let cfg = view.borrow();
+        let cfg = view.load();
         let wf = cfg
             .workflow(workflow.as_str())
             .ok_or_else(|| RuntimeError::UnknownStep(workflow.clone()))?;
@@ -105,40 +102,12 @@ pub async fn start_workflow(
             return Ok(());
         }
 
-        let timeout_secs = {
-            let cfg = view.borrow();
-            cfg.workflow(workflow.as_str())
-                .and_then(|wf| wf.resolve(current.as_str()))
-                .and_then(|s| match s {
-                    Step::Plan(c) => c.timeout_secs(),
-                    Step::Implement(c) => c.timeout_secs(),
-                    Step::Commit(c) => c.timeout_secs(),
-                    Step::Validate(c) => c.timeout_secs(),
-                    Step::Custom(c) => c.timeout_secs(),
-                })
-        };
-
         let mut shutdown_clone = shutdown.clone();
-        let mut has_changed_rx = view.has_changed_receiver();
         let next_step = tokio::select! {
             _ = shutdown_clone.changed() => {
                 let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
                 return Ok(());
             }
-            _ = has_changed_rx.changed() => {
-                let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
-                continue;
-            }
-            _ = async {
-                if let Some(secs) = timeout_secs {
-                    tokio::time::sleep(Duration::from_secs(secs)).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
-                return Err(RuntimeError::Timeout("step timeout"));
-            },
             res = run_step(
                 &workflow,
                 current.as_str(),
@@ -151,41 +120,38 @@ pub async fn start_workflow(
             ) => res?,
         };
 
-        current = next_step.to_string();
+        current = next_step;
         let _ = session.save_checkpoint(&workflow, &current, &messages, &queued);
     }
 }
 
-async fn run_step<'a>(
-    workflow: &'a str,
-    current: &'a str,
-    view: &'a ConfigView,
+async fn run_step(
+    workflow: &str,
+    current: &str,
+    view: &ConfigView,
     client: &impl LlmClient,
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
     rx: &mut mpsc::UnboundedReceiver<Inbound>,
-) -> Result<&'a str, RuntimeError> {
-    let cfg_ref = view.borrow();
-    let wf = cfg_ref
+) -> Result<String, RuntimeError> {
+    let cfg = view.load();
+    let wf = cfg
         .workflow(workflow)
         .ok_or_else(|| RuntimeError::UnknownStep(workflow.to_string()))?;
     let step = wf
         .resolve(current)
         .ok_or_else(|| RuntimeError::UnknownStep(current.to_string()))?;
-    let on_failure: &'a str = unsafe {
-        std::mem::transmute::<&str, &'a str>(match step {
-            Step::Plan(c) => c.on_failure(),
-            Step::Implement(c) => c.on_failure(),
-            Step::Commit(c) => c.on_failure(),
-            Step::Validate(c) => c.on_failure(),
-            Step::Custom(c) => c.on_failure(),
-        })
+    let on_failure = match step {
+        Step::Plan(c) => c.on_failure().unwrap_or("done").to_string(),
+        Step::Implement(c) => c.on_failure().unwrap_or("done").to_string(),
+        Step::Commit(c) => c.on_failure().unwrap_or("done").to_string(),
+        Step::Validate(c) => c.on_failure().unwrap_or("done").to_string(),
+        Step::Custom(c) => c.on_failure().unwrap_or("done").to_string(),
     };
     let res = match step {
         Step::Plan(c) => {
             tracing::info!(step = "plan", current, workflow, "running plan step");
-            let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
             run_plan_step(client, view, c, session, messages, queued, rx).await
         }
         Step::Implement(c) => {
@@ -195,7 +161,6 @@ async fn run_step<'a>(
                 workflow,
                 "running implement step"
             );
-            let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
             run_implement_step(client, view, c, session, messages, queued).await
         }
         Step::Validate(c) => {
@@ -205,19 +170,14 @@ async fn run_step<'a>(
                 workflow,
                 "running validate step"
             );
-            let c: &'a ValidateStep =
-                unsafe { std::mem::transmute::<&ValidateStep, &'a ValidateStep>(c) };
             run_validate_step(client, view, c, session, messages, queued).await
         }
         Step::Commit(c) => {
             tracing::info!(step = "commit", current, workflow, "running commit step");
-            let c: &'a StepBase = unsafe { std::mem::transmute::<&StepBase, &'a StepBase>(c) };
             run_commit_step(client, view, c, session, messages, queued).await
         }
         Step::Custom(c) => {
             tracing::info!(step = "custom", current, workflow, "running custom step");
-            let c: &'a CustomStep =
-                unsafe { std::mem::transmute::<&CustomStep, &'a CustomStep>(c) };
             run_custom_step(client, view, c, session, messages, queued).await
         }
     };
@@ -231,132 +191,108 @@ async fn run_step<'a>(
     }
 }
 
-async fn run_plan_step<'a>(
+async fn run_plan_step(
     client: &impl LlmClient,
-    view: &'a ConfigView,
-    step: &'a StepBase,
+    view: &ConfigView,
+    step: &StepBase,
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
     rx: &mut mpsc::UnboundedReceiver<Inbound>,
-) -> Result<&'a str, RuntimeError> {
-    let cfg_ref = view.borrow();
+) -> Result<String, RuntimeError> {
+    let cfg = view.load();
     let sel = step.selection();
-    let sel_owned = Selection {
-        agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
-        provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
-        model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
-    };
-    let max = cfg_ref
+    let max = cfg
         .plan(&sel)
         .ok()
         .map(|p| p.max_iterations())
         .unwrap_or(25);
-    let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
-    let tools: &'a [Tool] =
-        unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
+    let on_success = step.on_success().unwrap_or("done");
+    let tools_registry = view.tools();
+    let tools = tools_registry.all();
     let mut agent = InteractiveAgent::new(rx);
     let res = agent
-        .run(
-            client, session, view, &sel_owned, messages, tools, queued, max,
-        )
+        .run(client, session, view, &sel, messages, tools, queued, max)
         .await;
-    drop(cfg_ref);
     res?;
-    Ok(on_success)
+    Ok(on_success.to_string())
 }
 
-async fn run_implement_step<'a>(
+async fn run_implement_step(
     client: &impl LlmClient,
-    view: &'a ConfigView,
-    step: &'a StepBase,
+    view: &ConfigView,
+    step: &StepBase,
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
-) -> Result<&'a str, RuntimeError> {
-    let cfg_ref = view.borrow();
+) -> Result<String, RuntimeError> {
+    let cfg = view.load();
     let sel = step.selection();
-    let sel_owned = Selection {
-        agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
-        provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
-        model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
-    };
-    let max = cfg_ref
+    let max = cfg
         .plan(&sel)
         .ok()
         .map(|p| p.max_iterations())
         .unwrap_or(25);
-    let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
-    let tools: &'a [Tool] =
-        unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
+    let on_success = step.on_success().unwrap_or("done");
+    let tools_registry = view.tools();
+    let tools = tools_registry.all();
     let mut agent = CreativeAgent;
     let res = agent
-        .run(
-            client, session, view, &sel_owned, messages, tools, queued, max,
-        )
+        .run(client, session, view, &sel, messages, tools, queued, max)
         .await;
-    drop(cfg_ref);
     res?;
-    Ok(on_success)
+    Ok(on_success.to_string())
 }
 
-async fn run_validate_step<'a>(
+async fn run_validate_step(
     client: &impl LlmClient,
-    view: &'a ConfigView,
-    step: &'a ValidateStep,
+    view: &ConfigView,
+    step: &ValidateStep,
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
-) -> Result<&'a str, RuntimeError> {
+) -> Result<String, RuntimeError> {
     let _ = (client, view, session, messages, queued);
-    Ok(unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) })
+    Ok(step.on_success().unwrap_or("done").to_string())
 }
 
-async fn run_commit_step<'a>(
+async fn run_commit_step(
     client: &impl LlmClient,
-    view: &'a ConfigView,
-    step: &'a StepBase,
+    view: &ConfigView,
+    step: &StepBase,
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
-) -> Result<&'a str, RuntimeError> {
+) -> Result<String, RuntimeError> {
     use crate::agent::{Agent, CreativeAgent};
-    let cfg_ref = view.borrow();
+    let cfg = view.load();
     let sel = step.selection();
-    let sel_owned = Selection {
-        agent: unsafe { std::mem::transmute::<&str, &'a str>(sel.agent) },
-        provider: unsafe { std::mem::transmute::<&str, &'a str>(sel.provider) },
-        model: unsafe { std::mem::transmute::<&str, &'a str>(sel.model) },
-    };
-    let max = cfg_ref
+    let max = cfg
         .plan(&sel)
         .ok()
         .map(|p| p.max_iterations())
         .unwrap_or(25);
-    let on_success = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
-    let tools: &'a [Tool] =
-        unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
+    let on_success = step.on_success().unwrap_or("done");
+    let tools_registry = view.tools();
+    let tools = tools_registry.all();
     let mut agent = CreativeAgent;
     let res = agent
-        .run(
-            client, session, view, &sel_owned, messages, &tools, queued, max,
-        )
+        .run(client, session, view, &sel, messages, tools, queued, max)
         .await;
-    drop(cfg_ref);
     res?;
-    Ok(on_success)
+    Ok(on_success.to_string())
 }
 
-async fn run_custom_step<'a>(
+async fn run_custom_step(
     client: &impl LlmClient,
-    view: &'a ConfigView,
-    step: &'a CustomStep,
+    view: &ConfigView,
+    step: &CustomStep,
     session: &Session,
     messages: &mut Vec<Message>,
     queued: &mut Vec<String>,
-) -> Result<&'a str, RuntimeError> {
-    let on_success: &'a str = unsafe { std::mem::transmute::<&str, &'a str>(step.on_success()) };
-    let on_failure: &'a str = unsafe { std::mem::transmute::<&str, &'a str>(step.on_failure()) };
+) -> Result<String, RuntimeError> {
+    let on_success = step.on_success().unwrap_or("done").to_string();
+    let on_failure = step.on_failure().unwrap_or("done").to_string();
     let timeout = step.timeout_secs();
     match step.backend() {
         Backend::Command { command } => {
@@ -394,20 +330,19 @@ async fn run_custom_step<'a>(
         } => {
             use crate::agent::{Agent, CreativeAgent};
             use crate::config::Selection;
+            let cfg = view.load();
             let selection = Selection {
                 agent: agent.as_str(),
                 provider: provider.as_str(),
                 model: model.as_str(),
             };
-            let cfg_ref = view.borrow();
-            let max_iterations = cfg_ref
+            let max_iterations = cfg
                 .plan(&selection)
                 .ok()
                 .map(|p| p.max_iterations())
                 .unwrap_or(25);
-            let tools: &'a [Tool] =
-                unsafe { std::mem::transmute::<&[Tool], &'a [Tool]>(cfg_ref.tools().all()) };
-            drop(cfg_ref);
+            let tools_registry = view.tools();
+            let tools = tools_registry.all();
             let mut agent_obj = CreativeAgent;
             agent_obj
                 .run(

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use valuable::Valuable;
 
 use crate::provider::{Provider, ProviderConfig};
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolsConfig};
 
 /// Per-provider model definition (deserialized from TOML). Fields private.
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
@@ -68,7 +68,7 @@ pub struct Config {
     watcher: WatcherConfig,
     #[valuable(skip)]
     #[serde(default)]
-    tools: ToolRegistry,
+    tools: ToolsConfig,
     #[valuable(skip)]
     #[serde(default)]
     runtime: RuntimeConfig,
@@ -117,19 +117,19 @@ pub struct StepBase {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
-    on_success: String,
+    on_success: Option<String>,
     #[serde(default)]
-    on_failure: String,
+    on_failure: Option<String>,
     /// Optional execution timeout in seconds.
     timeout_secs: Option<u64>,
 }
 
 impl StepBase {
-    pub fn on_success(&self) -> &str {
-        &self.on_success
+    pub fn on_success(&self) -> Option<&str> {
+        self.on_success.as_deref()
     }
-    pub fn on_failure(&self) -> &str {
-        &self.on_failure
+    pub fn on_failure(&self) -> Option<&str> {
+        self.on_failure.as_deref()
     }
     pub fn timeout_secs(&self) -> Option<u64> {
         self.timeout_secs
@@ -147,9 +147,9 @@ impl StepBase {
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct ValidateStep {
     #[serde(default)]
-    on_success: String,
+    on_success: Option<String>,
     #[serde(default)]
-    on_failure: String,
+    on_failure: Option<String>,
     /// Optional execution timeout in seconds.
     timeout_secs: Option<u64>,
 }
@@ -158,19 +158,19 @@ pub struct ValidateStep {
 pub struct CustomStep {
     backend: Backend,
     #[serde(default)]
-    on_success: String,
+    on_success: Option<String>,
     #[serde(default)]
-    on_failure: String,
+    on_failure: Option<String>,
     /// Optional execution timeout in seconds.
     timeout_secs: Option<u64>,
 }
 
 impl ValidateStep {
-    pub fn on_success(&self) -> &str {
-        &self.on_success
+    pub fn on_success(&self) -> Option<&str> {
+        self.on_success.as_deref()
     }
-    pub fn on_failure(&self) -> &str {
-        &self.on_failure
+    pub fn on_failure(&self) -> Option<&str> {
+        self.on_failure.as_deref()
     }
     pub fn timeout_secs(&self) -> Option<u64> {
         self.timeout_secs
@@ -181,11 +181,11 @@ impl CustomStep {
     pub fn backend(&self) -> &Backend {
         &self.backend
     }
-    pub fn on_success(&self) -> &str {
-        &self.on_success
+    pub fn on_success(&self) -> Option<&str> {
+        self.on_success.as_deref()
     }
-    pub fn on_failure(&self) -> &str {
-        &self.on_failure
+    pub fn on_failure(&self) -> Option<&str> {
+        self.on_failure.as_deref()
     }
     pub fn timeout_secs(&self) -> Option<u64> {
         self.timeout_secs
@@ -299,7 +299,7 @@ impl Config {
     pub fn debounce(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.watcher.debounce_ms)
     }
-    pub fn tools(&self) -> &ToolRegistry {
+    pub fn tools_config(&self) -> &ToolsConfig {
         &self.tools
     }
     pub fn runtime(&self) -> &RuntimeConfig {
@@ -447,61 +447,101 @@ impl std::error::Error for StoreError {
 }
 
 #[derive(Debug)]
-struct PartStore<T: PartialEq> {
-    sender: tokio::sync::watch::Sender<T>,
-}
-
-impl<T: PartialEq> PartStore<T> {
-    fn new(initial: T) -> Self {
-        let (sender, _) = tokio::sync::watch::channel(initial);
-        Self { sender }
-    }
-    fn update(&mut self, value: T) -> bool {
-        if *self.sender.borrow() == value {
-            return false;
-        }
-        let _ = self.sender.send(value);
-        true
-    }
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<T> {
-        self.sender.subscribe()
-    }
-}
-
-#[derive(Debug)]
 pub struct ConfigStore {
     generation: u64,
-    inner: PartStore<Config>,
+    config: std::sync::Arc<arc_swap::ArcSwap<Config>>,
+    tools: std::sync::Arc<arc_swap::ArcSwap<ToolRegistry>>,
 }
 
 impl ConfigStore {
     pub fn new(config: Config) -> Result<Self, StartupError> {
+        let tools = ToolRegistry::from(config.tools_config().clone());
         Ok(Self {
             generation: 0,
-            inner: PartStore::new(config),
+            config: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(config)),
+            tools: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(tools)),
         })
     }
     pub fn apply(&mut self, config: Config) -> Result<bool, StartupError> {
-        let changed = self.inner.update(config);
-        if changed {
-            self.generation += 1;
+        let tools = ToolRegistry::from(config.tools_config().clone());
+        let config_changed = **self.config.load() != config;
+        let tools_changed = **self.tools.load() != tools;
+        if !config_changed && !tools_changed {
+            return Ok(false);
         }
-        Ok(changed)
+        if config_changed {
+            self.config.store(std::sync::Arc::new(config));
+        } else {
+            // config unchanged but tools need update from config's tools_config
+            // we already computed tools from config, but if config unchanged we still need to update tools if tools changed
+            // this branch handles tools-only change via same file
+            self.tools.store(std::sync::Arc::new(tools));
+            self.generation += 1;
+            return Ok(true);
+        }
+        if tools_changed {
+            self.tools.store(std::sync::Arc::new(tools));
+        }
+        self.generation += 1;
+        Ok(true)
     }
     pub fn reload(&mut self, path: &Path) -> Result<bool, StoreError> {
         let config = Config::load(path).map_err(StoreError::Load)?;
+        // validate on_success/on_failure targets
+        for wf in config.workflows.values() {
+            for step in wf.steps.values() {
+                if let Some(t) = step_on_success(step) {
+                    if t != "done" && !wf.steps.contains_key(t) {
+                        return Err(StoreError::Convert(StartupError::InvalidConfig(format!(
+                            "on_success target '{}' not found",
+                            t
+                        ))));
+                    }
+                }
+                if let Some(t) = step_on_failure(step) {
+                    if t != "done" && !wf.steps.contains_key(t) {
+                        return Err(StoreError::Convert(StartupError::InvalidConfig(format!(
+                            "on_failure target '{}' not found",
+                            t
+                        ))));
+                    }
+                }
+            }
+        }
         self.apply(config).map_err(StoreError::Convert)
     }
     pub fn subscribe(&self) -> ConfigView {
         ConfigView {
-            inner: self.inner.subscribe(),
+            config: std::sync::Arc::clone(&self.config),
+            tools: std::sync::Arc::clone(&self.tools),
         }
     }
 }
 
-#[derive(Debug)]
+fn step_on_success(step: &Step) -> Option<&str> {
+    match step {
+        Step::Plan(c) => c.on_success(),
+        Step::Implement(c) => c.on_success(),
+        Step::Commit(c) => c.on_success(),
+        Step::Validate(c) => c.on_success(),
+        Step::Custom(c) => c.on_success(),
+    }
+}
+
+fn step_on_failure(step: &Step) -> Option<&str> {
+    match step {
+        Step::Plan(c) => c.on_failure(),
+        Step::Implement(c) => c.on_failure(),
+        Step::Commit(c) => c.on_failure(),
+        Step::Validate(c) => c.on_failure(),
+        Step::Custom(c) => c.on_failure(),
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ConfigView {
-    inner: tokio::sync::watch::Receiver<Config>,
+    config: std::sync::Arc<arc_swap::ArcSwap<Config>>,
+    tools: std::sync::Arc<arc_swap::ArcSwap<ToolRegistry>>,
 }
 
 impl RuntimeConfig {
@@ -511,15 +551,17 @@ impl RuntimeConfig {
 }
 
 impl ConfigView {
-    pub fn borrow(&self) -> tokio::sync::watch::Ref<'_, Config> {
-        self.inner.borrow()
+    pub fn load(&self) -> std::sync::Arc<Config> {
+        self.config.load_full()
     }
-    pub async fn has_changed(&self) -> Result<(), tokio::sync::watch::error::RecvError> {
-        let mut rx = self.inner.clone();
-        rx.changed().await
+    pub fn borrow(&self) -> std::sync::Arc<Config> {
+        self.config.load_full()
     }
-    pub fn has_changed_receiver(&self) -> tokio::sync::watch::Receiver<Config> {
-        self.inner.clone()
+    pub fn config(&self) -> std::sync::Arc<Config> {
+        self.config.load_full()
+    }
+    pub fn tools(&self) -> std::sync::Arc<ToolRegistry> {
+        self.tools.load_full()
     }
 }
 

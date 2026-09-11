@@ -107,10 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
     {
-        let is_immediate = matches!(
-            view.borrow().runtime().ctrl_c(),
-            config::CtrlCMode::Immediate
-        );
+        let is_immediate = matches!(view.load().runtime().ctrl_c(), config::CtrlCMode::Immediate);
         let shutdown_tx_clone = shutdown_tx.clone();
         let tx_clone = tx.clone();
         tokio::spawn(listen_to_signals(is_immediate, shutdown_tx_clone, tx_clone));

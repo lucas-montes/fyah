@@ -60,7 +60,7 @@ impl<'a> Agent for InteractiveAgent<'a> {
             );
 
             let (req, format) = {
-                let cfg = view.borrow();
+                let cfg = view.load();
                 let plan = cfg.plan(selection)?;
                 let conversation = Conversation {
                     model: plan.target().model(),
@@ -74,7 +74,6 @@ impl<'a> Agent for InteractiveAgent<'a> {
             };
 
             let turn = select! {
-                _ = view.has_changed() => continue,
                 r = send_and_parse(client, req, format) => r?,
                 inbound = self.rx.recv() => match inbound {
                     Some(Inbound::Command(Command::Stop | Command::Exit)) | None => return Ok(()),
@@ -104,7 +103,7 @@ impl<'a> Agent for InteractiveAgent<'a> {
             }
 
             {
-                let cfg = view.borrow();
+                let cfg = view.load();
                 let plan = cfg.plan(selection)?;
                 execute_tools(
                     session,
@@ -112,8 +111,9 @@ impl<'a> Agent for InteractiveAgent<'a> {
                     messages,
                     turn,
                     &mut tool_calls_results,
-                    cfg.tools(),
-                )?;
+                    view.tools(),
+                )
+                .await?;
             }
             tracing::debug!(iteration, "Tools executed, continuing to next iteration");
         }

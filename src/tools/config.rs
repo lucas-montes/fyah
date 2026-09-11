@@ -59,3 +59,27 @@ impl CustomToolDef {
         &self.command
     }
 }
+
+fn default_concurrency() -> usize {
+    10
+}
+
+#[derive(Debug, Deserialize, PartialEq, Clone)]
+pub struct ToolsConfig {
+    #[serde(flatten)]
+    pub builtins: BuiltinTools,
+    #[serde(default)]
+    pub custom: Vec<CustomToolDef>,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            builtins: BuiltinTools::default(),
+            custom: Vec::new(),
+            concurrency: default_concurrency(),
+        }
+    }
+}
