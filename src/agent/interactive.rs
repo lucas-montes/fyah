@@ -3,10 +3,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::client::LlmClient;
 use crate::config::{AgentError, ConfigView, Selection};
-use crate::model::{Conversation, Message, Tool};
+use crate::model::{Message, Tool};
 use crate::session::Session;
 
-use super::core::{Agent, build_request, execute_tools, send_and_parse};
+use super::core::Agent;
 use super::input::{Command, Inbound};
 
 pub struct InteractiveAgent<'a> {
@@ -25,10 +25,13 @@ impl<'a> Agent for InteractiveAgent<'a> {
         client: &impl LlmClient,
         session: &Session,
         view: &ConfigView,
+        //TODO: we need to remove selection and tools from here.
+        // Tools should come from the view as well as the selection.
         selection: &Selection<'_>,
         messages: &mut Vec<Message>,
         tools: &[Tool],
         queued: &mut Vec<String>,
+        //TODO: queded probably only belongs here and should be passed to the 'new' method not in this agent Trait
         max_iterations: u32,
     ) -> Result<(), AgentError> {
         let mut tool_calls_results = Vec::new();
@@ -59,22 +62,11 @@ impl<'a> Agent for InteractiveAgent<'a> {
                 "Messages from the user set in the conversation and sending request to the LLM or waiting for user input"
             );
 
-            let (req, format) = {
-                let cfg = view.load();
-                let plan = cfg.plan(selection)?;
-                let conversation = Conversation {
-                    model: plan.target().model(),
-                    system: plan.system_prompt(),
-                    temperature: plan.target().temperature(),
-                    max_tokens: plan.target().max_tokens(),
-                    messages,
-                    tools,
-                };
-                build_request(client, &plan, &conversation)
-            };
+            let cfg = view.load();
+            let plan = cfg.plan(selection)?;
 
             let turn = select! {
-                r = send_and_parse(client, req, format) => r?,
+                r = Self::send_request(client, plan, tools, messages) => r?,
                 inbound = self.rx.recv() => match inbound {
                     Some(Inbound::Command(Command::Stop | Command::Exit)) | None => return Ok(()),
                     Some(Inbound::Message(m)) => {
@@ -105,7 +97,7 @@ impl<'a> Agent for InteractiveAgent<'a> {
             {
                 let cfg = view.load();
                 let plan = cfg.plan(selection)?;
-                execute_tools(
+                Self::execute_tools(
                     session,
                     plan.target().model_id(),
                     messages,

@@ -131,6 +131,6 @@ pub struct Conversation<'a> {
     pub system: Option<&'a str>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
-    pub messages: &'a mut Vec<Message>,
+    pub messages: &'a Vec<Message>,
     pub tools: &'a [Tool],
 }

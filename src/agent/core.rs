@@ -1,16 +1,18 @@
+use futures::FutureExt;
+use futures::TryFutureExt;
 use reqwest::Method;
-use reqwest::RequestBuilder;
 
 use crate::client::LlmClient;
+use crate::config::AgentPlan;
 use crate::config::{AgentError, ConfigView, Selection};
+use crate::model::Tool;
 use crate::model::{AssistantTurn, Conversation, Message, ToolCall};
-use crate::provider::{WireFormat, parse_response};
+use crate::provider::parse_response;
 use crate::record_write;
 use crate::session::Session;
 use crate::tools::{BuiltinToolCall, ToolRegistry};
 
 pub trait Agent {
-    #[allow(clippy::too_many_arguments)]
     fn run(
         &mut self,
         client: &impl LlmClient,
@@ -18,167 +20,163 @@ pub trait Agent {
         view: &ConfigView,
         selection: &Selection<'_>,
         messages: &mut Vec<Message>,
+        //TODO: we need to remove selection and tools from here.
+        // Tools should come from the view as well as the selection.
         tools: &[crate::model::Tool],
         queued: &mut Vec<String>,
+        //TODO: queded probably only belongs to the interactive agent
         max_iterations: u32,
-    ) -> impl std::future::Future<Output = Result<(), AgentError>>;
-}
+    ) -> impl std::future::Future<Output = Result<(), AgentError>> {
+        async move {
+            //TODO: move tool_calls_results outisde as messages so we can test it more easily
+            let mut tool_calls_results = Vec::new();
+            for iteration in 0..max_iterations {
+                while let Some(m) = queued.pop() {
+                    messages.push(Message::new_user(m));
+                }
 
-pub async fn run_agent_loop(
-    client: &impl LlmClient,
-    session: &Session,
-    view: &ConfigView,
-    selection: &Selection<'_>,
-    messages: &mut Vec<Message>,
-    tools: &[crate::model::Tool],
-    queued: &mut Vec<String>,
-    max_iterations: u32,
-) -> Result<(), AgentError> {
-    let mut tool_calls_results = Vec::new();
-    for iteration in 0..max_iterations {
-        while let Some(m) = queued.pop() {
-            messages.push(Message::new_user(m));
-        }
-        let (req, format) = {
-            let cfg = view.load();
-            let plan = cfg.plan(selection)?;
-            let conversation = Conversation {
-                model: plan.target().model(),
-                system: plan.system_prompt(),
-                temperature: plan.target().temperature(),
-                max_tokens: plan.target().max_tokens(),
-                messages,
-                tools,
-            };
-            build_request(client, &plan, &conversation)
-        };
-        let turn = send_and_parse(client, req, format).await?;
-        if turn.tool_calls_empty() {
-            if let Some(c) = turn.content() {
-                println!("{c}");
+                let cfg = view.load();
+                let plan = cfg.plan(selection)?;
+
+                let turn = Self::send_request(client, plan, tools, messages).await?;
+                if turn.tool_calls_empty() {
+                    if let Some(c) = turn.content() {
+                        println!("{c}");
+                    }
+                    //TODO: what should happen on empty tool calls? Should we continue or break?
+                    continue;
+                }
+
+                {
+                    let cfg = view.load();
+                    let plan = cfg.plan(selection)?;
+                    Self::execute_tools(
+                        session,
+                        plan.target().model_id(),
+                        messages,
+                        turn,
+                        &mut tool_calls_results,
+                        view.tools(),
+                    )
+                    .await?;
+                }
+                tracing::debug!(iteration, "Tools executed, continuing to next iteration");
             }
-            continue;
-        }
-        {
-            let cfg = view.load();
-            let plan = cfg.plan(selection)?;
-            execute_tools(
-                session,
-                plan.target().model_id(),
-                messages,
-                turn,
-                &mut tool_calls_results,
-                view.tools(),
-            )
-            .await?;
-        }
-        tracing::debug!(iteration, "Tools executed, continuing to next iteration");
-    }
-    Ok(())
-}
-
-pub fn build_request<'a>(
-    client: &impl LlmClient,
-    plan: &crate::config::AgentPlan<'a>,
-    conversation: &Conversation<'a>,
-) -> (RequestBuilder, WireFormat) {
-    let provider = plan.target().provider();
-    let format = provider.format();
-    let req = client.create_request(Method::POST, provider.endpoint());
-    let req = provider.apply_auth(req);
-    let req = provider.attach_body(req, conversation);
-    (req, format)
-}
-
-pub async fn send_and_parse(
-    client: &impl LlmClient,
-    req: RequestBuilder,
-    format: WireFormat,
-) -> Result<AssistantTurn, AgentError> {
-    let bytes = client
-        .send_request(req)
-        .await
-        .map_err(|e| AgentError::Transport(e.to_string()))?;
-    parse_response(format, bytes.as_ref()).map_err(|e| AgentError::Parse(e.to_string()))
-}
-
-pub async fn execute_tools(
-    session: &Session,
-    model_id: &str,
-    messages: &mut Vec<Message>,
-    turn: AssistantTurn,
-    tool_calls_results: &mut Vec<Message>,
-    registry: std::sync::Arc<ToolRegistry>,
-) -> Result<(), AgentError> {
-    let (content, tool_calls) = turn.into_parts();
-    tracing::debug!(num_tools=?tool_calls.len(), "Executing tool calls from LLM turn");
-
-    let wal = session.load_wal();
-    let wal_map: std::collections::HashMap<&str, &str> = wal
-        .iter()
-        .filter_map(|e| Some((e.tool_call_id(), e.result()?)))
-        .collect();
-
-    let mut pending = Vec::with_capacity(tool_calls.len());
-    for tc in &tool_calls {
-        if let Some(&cached) = wal_map.get(tc.id()) {
-            tracing::debug!(tool=%tc.name(), id=%tc.id(), "Skipping already completed tool call via WAL");
-            tool_calls_results.push(Message::new_tool(tc.id().to_string(), cached.to_string()));
-        } else {
-            let _ = session.append_wal(crate::session::WalEntry::new(
-                tc.id().to_string(),
-                tc.name().to_string(),
-                tc.arguments().to_string(),
-                None,
-            ));
-            pending.push(tc);
+            Ok(())
         }
     }
 
-    if !pending.is_empty() {
-        let mut set = tokio::task::JoinSet::new();
-        let limit = registry.concurrency();
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(limit));
-        let session = std::sync::Arc::new(session.clone());
-        let model_id: std::sync::Arc<str> = std::sync::Arc::from(model_id);
+    fn execute_tools(
+        session: &Session,
+        model_id: &str,
+        messages: &mut Vec<Message>,
+        turn: AssistantTurn,
+        tool_calls_results: &mut Vec<Message>,
+        registry: std::sync::Arc<ToolRegistry>,
+    ) -> impl std::future::Future<Output = Result<(), AgentError>> {
+        async move {
+            let (content, tool_calls) = turn.into_parts();
+            tracing::debug!(num_tools=?tool_calls.len(), "Executing tool calls from LLM turn");
 
-        for tc in pending {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let tc_owned = ToolCall::new(
-                tc.id().to_string(),
-                tc.name().to_string(),
-                tc.arguments().to_string(),
-            );
-            let session = std::sync::Arc::clone(&session);
-            let registry = std::sync::Arc::clone(&registry);
-            let model_id = std::sync::Arc::clone(&model_id);
-            set.spawn(async move {
-                let _permit = permit;
-                let res = match handle_tool_call(&tc_owned, &session, &model_id, &registry).await {
-                    Ok(v) => v,
-                    Err(AgentError::Tool(msg)) => format!("tool error: {msg}"),
-                    Err(e) => format!("tool error: {e}"),
-                };
-                (tc_owned, res)
-            });
-        }
+            let wal = session.load_wal();
+            let wal_map: std::collections::HashMap<&str, &str> = wal
+                .iter()
+                .filter_map(|e| Some((e.tool_call_id(), e.result()?)))
+                .collect();
 
-        while let Some(joined) = set.join_next().await {
-            let (tc, result) = joined.map_err(|e| AgentError::Tool(format!("join error: {e}")))?;
-            let _ = session.append_wal(crate::session::WalEntry::new(
-                tc.id().to_string(),
-                tc.name().to_string(),
-                tc.arguments().to_string(),
-                Some(result.clone()),
-            ));
-            tool_calls_results.push(Message::new_tool(tc.id().to_string(), result));
+            let mut pending = Vec::with_capacity(tool_calls.len());
+            for tc in &tool_calls {
+                if let Some(&cached) = wal_map.get(tc.id()) {
+                    tracing::debug!(tool=%tc.name(), id=%tc.id(), "Skipping already completed tool call via WAL");
+                    tool_calls_results
+                        .push(Message::new_tool(tc.id().to_string(), cached.to_string()));
+                } else {
+                    let _ = session.append_wal(crate::session::WalEntry::new(
+                        tc.id().to_string(),
+                        tc.name().to_string(),
+                        tc.arguments().to_string(),
+                        None,
+                    ));
+                    pending.push(tc);
+                }
+            }
+
+            if !pending.is_empty() {
+                let mut set = tokio::task::JoinSet::new();
+                let limit = registry.concurrency();
+                let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(limit));
+                let session = std::sync::Arc::new(session.clone());
+                let model_id: std::sync::Arc<str> = std::sync::Arc::from(model_id);
+
+                for tc in pending {
+                    let permit = semaphore.clone().acquire_owned().await.unwrap();
+                    let tc_owned = ToolCall::new(
+                        tc.id().to_string(),
+                        tc.name().to_string(),
+                        tc.arguments().to_string(),
+                    );
+                    let session = std::sync::Arc::clone(&session);
+                    let registry = std::sync::Arc::clone(&registry);
+                    let model_id = std::sync::Arc::clone(&model_id);
+                    set.spawn(async move {
+                        let _permit = permit;
+                        let res = match handle_tool_call(&tc_owned, &session, &model_id, &registry)
+                            .await
+                        {
+                            Ok(v) => v,
+                            Err(AgentError::Tool(msg)) => format!("tool error: {msg}"),
+                            Err(e) => format!("tool error: {e}"),
+                        };
+                        (tc_owned, res)
+                    });
+                }
+
+                while let Some(joined) = set.join_next().await {
+                    let (tc, result) =
+                        joined.map_err(|e| AgentError::Tool(format!("join error: {e}")))?;
+                    let _ = session.append_wal(crate::session::WalEntry::new(
+                        tc.id().to_string(),
+                        tc.name().to_string(),
+                        tc.arguments().to_string(),
+                        Some(result.clone()),
+                    ));
+                    tool_calls_results.push(Message::new_tool(tc.id().to_string(), result));
+                }
+            }
+
+            messages.push(Message::new_assistant(content, tool_calls));
+            messages.append(tool_calls_results);
+            Ok(())
         }
     }
 
-    messages.push(Message::new_assistant(content, tool_calls));
-    messages.append(tool_calls_results);
-    Ok(())
+    fn send_request(
+        client: &impl LlmClient,
+        plan: AgentPlan<'_>,
+        tools: &[Tool],
+        messages: &Vec<Message>,
+    ) -> impl std::future::Future<Output = Result<AssistantTurn, AgentError>> {
+        let conversation = Conversation {
+            model: plan.target().model(),
+            system: plan.system_prompt(),
+            temperature: plan.target().temperature(),
+            max_tokens: plan.target().max_tokens(),
+            messages,
+            tools,
+        };
+        let provider = plan.target().provider();
+        let format = provider.format();
+        let req = client.create_request(Method::POST, provider.endpoint());
+        let req = provider.apply_auth(req);
+        let req = provider.attach_body(req, &conversation);
+
+        client
+            .send_request(req)
+            .map(move |bytes| parse_response(format, bytes?.as_ref()))
+            .map_err(|e| AgentError::Transport(e.to_string()))
+    }
 }
+
 
 async fn handle_tool_call(
     tool_call: &ToolCall,
