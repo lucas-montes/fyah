@@ -20,6 +20,13 @@ pub struct ModelConfig {
 }
 
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
+#[serde(rename_all = "lowercase")]
+pub enum OnInput {
+    Queue,
+    Abort,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct AgentConfig {
     provider: String,
     model: String,
@@ -29,7 +36,8 @@ pub struct AgentConfig {
     #[serde(default)]
     tools: Vec<String>,
     max_concurrent_tools: NonZeroUsize,
-    interactive: bool,
+    #[serde(default)]
+    on_input: Option<OnInput>,
 }
 
 
@@ -314,12 +322,12 @@ impl Workspace {
         self.workflows.get(name).expect("We have already validated that the workflow exists so we should be able to find it")
     }
 
-    pub fn get_agent<'a>(&self, name: &str) -> AgentView<'a> {
-        let agent = = self.agents.get(name).expect("We have already validated that the agent exists so we should be able to find it");
+    pub fn get_agent(&self, name: &str) -> Option<AgentView<'_>> {
+        //TODO: well in a hot reload the current agent being used in a loop could be deleted and this would panic
+        let agent = self.agents.get(name)?;
         let provider = self.providers.get(agent.provider()).expect("We have already validated that the provider exists so we should be able to find it");
-        let model = self.models.get(agent.model()).expect("We have already validated that the model exists so we should be able to find it");
-        AgentView::new(agent, provider, model)
-
+        let model = provider.get_model(agent.model()).expect("We have already validated that the model exists so we should be able to find it");
+        Some(AgentView::new(agent, provider, model))
     }
 }
 
@@ -335,14 +343,53 @@ impl<'a> AgentView<'a> {
         Self { agent, provider, model }
     }
 
-        pub fn interactive(&self) -> bool {
-        self.agent.interactive
+    pub fn on_input(&self) -> Option<&OnInput> {
+        self.agent.on_input.as_ref()
     }
 
     pub fn streaming(&self) -> bool {
-        self.model.s
+        self.model.streaming
     }
 
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.agent.system_prompt.as_deref()
+    }
+
+    pub fn provider_config(&self) -> &ProviderConfig {
+        self.provider
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.agent.model
+    }
+
+    pub fn max_iterations(&self) -> usize {
+        self.agent.max_iterations.get()
+    }
+}
+
+impl AgentConfig {
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+impl ModelConfig {
+    pub fn streaming(&self) -> bool {
+        self.streaming
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+    pub fn max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+    }
 }
 
 #[derive(Debug)]

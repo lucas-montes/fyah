@@ -136,23 +136,23 @@ pub struct Conversation<'a> {
 }
 
 impl<'a> Conversation<'a> {
-    // pub fn new(
-    //     model: &'a str,
-    //     system: Option<&'a str>,
-    //     temperature: Option<f32>,
-    //     max_tokens: Option<u32>,
-    //     messages: &'a Vec<Message>,
-    //     tools: &'a [Tool],
-    // ) -> Self {
-    //     Self {
-    //         model,
-    //         system,
-    //         temperature,
-    //         max_tokens,
-    //         messages,
-    //         tools,
-    //     }
-    // }
+    pub fn new(
+        model: &'a str,
+        system: Option<&'a str>,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+        messages: &'a Vec<Message>,
+        tools: &'a [Tool],
+    ) -> Self {
+        Self {
+            model,
+            system,
+            temperature,
+            max_tokens,
+            messages,
+            tools,
+        }
+    }
 
     pub fn model(&self) -> &str {
         self.model

@@ -25,7 +25,6 @@ provider = "ollama"
 model = "qwen25"
 tools = []
 max_concurrent_tools = 1
-interactive = false
 
 [agents.default]
 system_prompt = "You are Fyah, an AI coding assistant. You are in plan mode"
@@ -34,7 +33,7 @@ model = "nemotron"
 max_iterations = 25
 tools = []
 max_concurrent_tools = 10
-interactive = true
+on_input = "queue"
 
 
 [runtime]
