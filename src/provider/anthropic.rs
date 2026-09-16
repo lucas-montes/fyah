@@ -78,7 +78,7 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
         let mut messages: Vec<AnthropicMessage<'c>> = Vec::new();
         let mut pending: Vec<AnthropicBlock<'c>> = Vec::new();
 
-        for m in &*conv.messages {
+        for m in &*conv.messages() {
             match m {
                 Message::User { content } => {
                     flush(&mut pending, &mut messages);
@@ -131,12 +131,12 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
         flush(&mut pending, &mut messages);
 
         AnthropicRequest {
-            model: conv.model,
-            max_tokens: conv.max_tokens.unwrap_or(MAX_TOKENS),
-            system: conv.system,
+            model: conv.model(),
+            max_tokens: conv.max_tokens().unwrap_or(MAX_TOKENS),
+            system: conv.system(),
             messages,
-            tools: conv.tools.iter().map(AnthropicTool::from).collect(),
-            temperature: conv.temperature,
+            tools: conv.tools().iter().map(AnthropicTool::from).collect(),
+            temperature: conv.temperature(),
             stream: false,
         }
     }

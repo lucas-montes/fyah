@@ -94,16 +94,16 @@ impl<'a> From<&'a ToolCall> for OpenAiToolCall<'a> {
 impl<'c, 'a> From<&'c Conversation<'a>> for OpenAiRequest<'c> {
     fn from(conv: &'c Conversation<'a>) -> Self {
         let mut messages: Vec<OpenAiMessage<'c>> = Vec::new();
-        if let Some(sys) = conv.system {
+        if let Some(sys) = conv.system() {
             messages.push(OpenAiMessage::System { content: sys });
         }
-        messages.extend(conv.messages.iter().map(OpenAiMessage::from));
+        messages.extend(conv.messages().iter().map(OpenAiMessage::from));
         OpenAiRequest {
-            model: conv.model,
+            model: conv.model(),
             messages,
-            tools: conv.tools.iter().map(OpenAiTool::from).collect(),
-            temperature: conv.temperature,
-            max_tokens: conv.max_tokens,
+            tools: conv.tools().iter().map(OpenAiTool::from).collect(),
+            temperature: conv.temperature(),
+            max_tokens: conv.max_tokens(),
             stream: false,
         }
     }

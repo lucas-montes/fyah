@@ -1,4 +1,6 @@
+use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -13,25 +15,33 @@ use valuable::Valuable;
 
 pub mod agent;
 pub mod client;
+mod communication;
 pub mod config;
 pub mod fs_watcher;
 pub mod model;
 pub mod provider;
 pub mod runtime;
 pub mod session;
-pub mod tools;
 mod traces;
 
+use crate::communication::spawn_stdin;
+use crate::runtime::start_session;
+
 use {
-    agent::{Inbound, spawn_stdin_source},
     client::Client,
-    config::{Config, ConfigStore, ConfigView},
+    communication::{Command, Inbound},
+    config::{Config, ConfigStore},
     fs_watcher::FsWatcher,
-    model::Message,
-    runtime::start_workflow,
-    session::{Session, VcsKind, current_git_revision},
 };
 
+#[derive(Debug, Clone, PartialEq, Default, clap::ValueEnum)]
+enum CtrlCMode {
+    #[default]
+    Immediate,
+    Graceful,
+}
+
+// TODO: create a subcommand to lauch in different modes like server or cli
 #[derive(Parser)]
 #[command(name = "agent", version, about)]
 struct Cli {
@@ -39,6 +49,10 @@ struct Cli {
     config: PathBuf,
     #[arg(short = 'w', long, default_value = "default")]
     workflow: String,
+    #[arg(short = 'm', long, default_value = "immediate")]
+    ctrl_c: CtrlCMode,
+    #[arg(short = 'd', long, default_value = "2000")]
+    debounce: NonZeroU64,
 }
 
 fn start_loggers() -> WorkerGuard {
@@ -72,51 +86,73 @@ fn start_loggers() -> WorkerGuard {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let _guard = start_loggers();
     let cli = Cli::parse();
 
-    tracing::info!(workflow=%cli.workflow, "starting fyah");
+    tracing::info!(selected_workflow=%cli.workflow,
+        cli_config=%cli.config.display(),
+        debounce=%cli.debounce,
+        ctrl_c_mode=?cli.ctrl_c,
+        "starting fyah"
+    );
 
     let config_path = cli.config;
-    let config = match Config::load(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
+    let (config, tools) = match Config::load(&config_path).map(Config::validate) {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) | Err(e) => {
             eprintln!("Config error: {e}");
             std::process::exit(1);
         }
     };
 
-    if config.workflow(&cli.workflow).is_none() {
-        eprintln!("Config error: unknown workflow: {}", cli.workflow);
-        std::process::exit(1);
-    }
-
     tracing::info!(
         config = config.as_value(),
-        path=%config_path.display(),
-        selected_workflow=%cli.workflow,
+        tools = tools.as_value(),
         "loaded config"
     );
 
-    let debounce = config.debounce();
-    let store = ConfigStore::new(config)?;
-    let view = store.subscribe();
-    let _fs_watcher = FsWatcher::spawn(store, config_path, debounce);
-
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
-    {
-        let is_immediate = matches!(view.load().runtime().ctrl_c(), config::CtrlCMode::Immediate);
-        let shutdown_tx_clone = shutdown_tx.clone();
-        let tx_clone = tx.clone();
-        tokio::spawn(listen_to_signals(is_immediate, shutdown_tx_clone, tx_clone));
-    }
-    let _shutdown_tx = shutdown_tx;
+    let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
+    let (user_output_tx, user_output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    spawn_stdin_source(tx);
+    tracing::debug!("Channels spawned for shutdown, user input, and user output");
+
+    let store = ConfigStore::new(config, tools);
+    let view = store.subscribe();
+    let _fs_watcher = FsWatcher::spawn(
+        store,
+        config_path,
+        Duration::from_millis(cli.debounce.get()),
+        user_output_tx.clone(),
+    );
+    tracing::debug!("Spawning fs watcher");
+
+    let is_immediate = matches!(cli.ctrl_c, CtrlCMode::Immediate);
+
+    tokio::spawn(listen_to_signals(
+        is_immediate,
+        shutdown_tx,
+        user_input_tx.clone(),
+    ));
+
+    spawn_stdin(user_input_tx, user_output_rx);
     tracing::debug!("Spawning stdin source");
-    start_session(cli.workflow, view, shutdown_rx, rx).await
+    let client = Client::default();
+
+    if let Err(e) = start_session(
+        client,
+        cli.workflow,
+        view,
+        shutdown_rx,
+        user_input_rx,
+        user_output_tx,
+    )
+    .await
+    {
+        tracing::error!(error = %e, "Error during session");
+        std::process::exit(1);
+    }
 }
 
 async fn listen_to_signals(
@@ -137,12 +173,12 @@ async fn listen_to_signals(
                         std::process::exit(130)
                     } else {
                         let _ = shutdown_tx_clone.send(true);
-                        let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+                        let _ = tx_clone.send(Inbound::Command(Command::Stop));
                     }
                 },
                 _ = sigterm.recv() => {
                     let _ = shutdown_tx_clone.send(true);
-                    let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+                    let _ = tx_clone.send(Inbound::Command(Command::Stop));
                 },
                 _ = sighup.recv() => {
                     let _ = shutdown_tx_clone.send(true);
@@ -157,30 +193,7 @@ async fn listen_to_signals(
             std::process::exit(130)
         } else {
             let _ = shutdown_tx_clone.send(true);
-            let _ = tx_clone.send(Inbound::Command(crate::agent::Command::Stop));
+            let _ = tx_clone.send(Inbound::Command(Command::Stop));
         }
     }
-}
-
-async fn start_session(
-    workflow: String,
-    view: ConfigView,
-    shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::default();
-    let session = Session::new(
-        uuid::Uuid::now_v7().to_string(),
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-        VcsKind::Git,
-        current_git_revision(),
-    );
-
-    let messages: Vec<Message> = Vec::new();
-    start_workflow(workflow, view, shutdown_rx, client, session, messages, rx)
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-    Ok(())
 }

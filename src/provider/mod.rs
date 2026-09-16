@@ -35,9 +35,6 @@ impl ProviderConfig {
     pub fn get_model(&self, key: &str) -> Option<&ModelConfig> {
         self.models.get(key)
     }
-    pub fn models_len(&self) -> usize {
-        self.models.len()
-    }
 }
 
 /// Runtime provider: wire format + borrowed connection details (no clones).

@@ -36,7 +36,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Tool {
     name: String,
     description: String,
@@ -127,10 +127,54 @@ impl AssistantTurn {
 
 #[derive(Debug)]
 pub struct Conversation<'a> {
-    pub model: &'a str,
-    pub system: Option<&'a str>,
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<u32>,
-    pub messages: &'a Vec<Message>,
-    pub tools: &'a [Tool],
+    model: &'a str,
+    system: Option<&'a str>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    messages: &'a Vec<Message>,
+    tools: &'a [Tool],
+}
+
+impl<'a> Conversation<'a> {
+    // pub fn new(
+    //     model: &'a str,
+    //     system: Option<&'a str>,
+    //     temperature: Option<f32>,
+    //     max_tokens: Option<u32>,
+    //     messages: &'a Vec<Message>,
+    //     tools: &'a [Tool],
+    // ) -> Self {
+    //     Self {
+    //         model,
+    //         system,
+    //         temperature,
+    //         max_tokens,
+    //         messages,
+    //         tools,
+    //     }
+    // }
+
+    pub fn model(&self) -> &str {
+        self.model
+    }
+
+    pub fn system(&self) -> Option<&str> {
+        self.system
+    }
+
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    pub fn max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        self.messages
+    }
+
+    pub fn tools(&self) -> &[Tool] {
+        self.tools
+    }
 }

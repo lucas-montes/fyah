@@ -64,7 +64,7 @@ pub enum ResponsesOutputContent {
 }
 
 fn build_input<'r>(conv: &'r Conversation<'_>, cursor: usize) -> Vec<ResponsesInputItem<'r>> {
-    (&*conv.messages)[cursor..]
+    (&*conv.messages())[cursor..]
         .iter()
         .filter_map(|m| match m {
             Message::User { content } => Some(ResponsesInputItem::Message {
@@ -90,17 +90,17 @@ pub fn build_responses_request_stateful<'r>(
     stream: bool,
 ) -> ResponsesRequest<'r> {
     let instructions = if previous_response_id.is_none() {
-        conv.system
+        conv.system()
     } else {
         None
     };
     ResponsesRequest {
-        model: conv.model,
+        model: conv.model(),
         instructions,
         input: build_input(conv, cursor),
-        tools: conv.tools.iter().map(OpenAiTool::from).collect(),
-        temperature: conv.temperature,
-        max_output_tokens: conv.max_tokens,
+        tools: conv.tools().iter().map(OpenAiTool::from).collect(),
+        temperature: conv.temperature(),
+        max_output_tokens: conv.max_tokens(),
         previous_response_id: previous_response_id.map(|s| s.to_string()),
         stream,
     }

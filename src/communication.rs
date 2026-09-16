@@ -31,13 +31,20 @@ fn parse_line(line: String) -> Inbound {
     }
 }
 
-pub fn spawn_stdin_source(tx: UnboundedSender<Inbound>) {
+pub fn spawn_stdin(tx: UnboundedSender<Inbound>, rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if tx.send(parse_line(line)).is_err() {
                 break;
             }
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut rx = rx;
+        while let Some(line) = rx.recv().await {
+            println!("{}", line);
         }
     });
 }

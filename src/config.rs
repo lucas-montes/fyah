@@ -1,58 +1,85 @@
 use std::collections::HashMap;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
+use serde_json::Value;
 use valuable::Valuable;
 
-use crate::provider::{Provider, ProviderConfig};
-use crate::tools::{ToolRegistry, ToolsConfig};
+use crate::provider::ProviderConfig;
+use crate::runtime::StepAction;
 
-/// Per-provider model definition (deserialized from TOML). Fields private.
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct ModelConfig {
     name: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    #[serde(default)]
+    streaming: bool,
 }
 
-/// Persona config (deserialized from TOML). No model — agents are model-agnostic.
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct AgentConfig {
+    provider: String,
+    model: String,
+    #[serde(default)]
     system_prompt: Option<String>,
-    max_iterations: u32,
+    max_iterations: NonZeroUsize,
+    #[serde(default)]
+    tools: Vec<String>,
+    max_concurrent_tools: NonZeroUsize,
+    interactive: bool,
 }
 
-fn default_debounce_ms() -> u64 {
-    2000
+
+#[derive(Debug, Deserialize, PartialEq, Valuable, Default)]
+pub struct CustomToolDef {
+    name: String,
+    description: String,
+    command: String,
+    #[valuable(skip)]
+    parameters: Value,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct WatcherConfig {
-    #[serde(default = "default_debounce_ms")]
-    debounce_ms: u64,
+pub struct WorkflowConfig {
+    initial: String,
+    #[serde(default)]
+    steps: HashMap<String, StepConfig>,
 }
 
-impl Default for WatcherConfig {
-    fn default() -> Self {
-        Self {
-            debounce_ms: default_debounce_ms(),
-        }
+impl WorkflowConfig {
+    pub fn get_step(&self, name: &str) -> &StepConfig {
+        self.steps.get(name).expect("We validated this before, step should exist")
+    }
+
+    pub fn initial_step(&self) -> &StepConfig {
+        self.get_step(&self.initial)
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq, Valuable, Default)]
-pub enum CtrlCMode {
-    #[default]
-    #[serde(rename = "immediate")]
-    Immediate,
-    #[serde(rename = "graceful")]
-    Graceful,
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct StepConfig {
+    #[serde(flatten)]
+    step: StepAction,
+    #[serde(default = "default_step")]
+    on_success: String,
+    #[serde(default = "default_step")]
+    on_failure: String,
+    /// Optional execution timeout in seconds.
+    timeout_secs: Option<NonZeroU64>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Default)]
-pub struct RuntimeConfig {
-    #[serde(default)]
-    ctrl_c: CtrlCMode,
+impl StepConfig {
+    pub fn action(&self) -> &StepAction {
+        &self.step
+    }
+}
+
+fn default_step() -> String {
+    String::from("done")
 }
 
 /// Raw, fully-parsed configuration. Fields private.
@@ -65,220 +92,7 @@ pub struct Config {
     #[serde(default)]
     workflows: HashMap<String, WorkflowConfig>,
     #[serde(default)]
-    watcher: WatcherConfig,
-    #[valuable(skip)]
-    #[serde(default)]
-    tools: ToolsConfig,
-    #[valuable(skip)]
-    #[serde(default)]
-    runtime: RuntimeConfig,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct WorkflowConfig {
-    initial: String,
-    #[serde(default)]
-    max_iterations: u32,
-    #[serde(default)]
-    steps: HashMap<String, Step>,
-}
-
-impl WorkflowConfig {
-    pub fn initial(&self) -> &str {
-        &self.initial
-    }
-    pub fn max_iterations(&self) -> u32 {
-        self.max_iterations
-    }
-    pub fn steps(&self) -> &HashMap<String, Step> {
-        &self.steps
-    }
-    pub fn resolve(&self, name: &str) -> Option<&Step> {
-        self.steps.get(name)
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Step {
-    Plan(StepBase),
-    Implement(StepBase),
-    Commit(StepBase),
-    Validate(ValidateStep),
-    Custom(CustomStep),
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct StepBase {
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    on_success: Option<String>,
-    #[serde(default)]
-    on_failure: Option<String>,
-    /// Optional execution timeout in seconds.
-    timeout_secs: Option<u64>,
-}
-
-impl StepBase {
-    pub fn on_success(&self) -> Option<&str> {
-        self.on_success.as_deref()
-    }
-    pub fn on_failure(&self) -> Option<&str> {
-        self.on_failure.as_deref()
-    }
-    pub fn timeout_secs(&self) -> Option<u64> {
-        self.timeout_secs
-    }
-
-    pub fn selection(&self) -> Selection<'_> {
-        Selection {
-            agent: self.agent.as_deref().unwrap_or("default"),
-            provider: self.provider.as_deref().unwrap_or("default"),
-            model: self.model.as_deref().unwrap_or("default"),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct ValidateStep {
-    #[serde(default)]
-    on_success: Option<String>,
-    #[serde(default)]
-    on_failure: Option<String>,
-    /// Optional execution timeout in seconds.
-    timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-pub struct CustomStep {
-    backend: Backend,
-    #[serde(default)]
-    on_success: Option<String>,
-    #[serde(default)]
-    on_failure: Option<String>,
-    /// Optional execution timeout in seconds.
-    timeout_secs: Option<u64>,
-}
-
-impl ValidateStep {
-    pub fn on_success(&self) -> Option<&str> {
-        self.on_success.as_deref()
-    }
-    pub fn on_failure(&self) -> Option<&str> {
-        self.on_failure.as_deref()
-    }
-    pub fn timeout_secs(&self) -> Option<u64> {
-        self.timeout_secs
-    }
-}
-
-impl CustomStep {
-    pub fn backend(&self) -> &Backend {
-        &self.backend
-    }
-    pub fn on_success(&self) -> Option<&str> {
-        self.on_success.as_deref()
-    }
-    pub fn on_failure(&self) -> Option<&str> {
-        self.on_failure.as_deref()
-    }
-    pub fn timeout_secs(&self) -> Option<u64> {
-        self.timeout_secs
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Valuable)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Backend {
-    Command {
-        command: String,
-    },
-    Llm {
-        agent: String,
-        provider: String,
-        model: String,
-    },
-    Ipc {
-        channel: String,
-    },
-    Wasm {
-        module: String,
-    },
-    Dylib {
-        path: String,
-    },
-}
-
-/// Runtime selection of which agent + which provider/model to use.
-pub struct Selection<'a> {
-    pub agent: &'a str,
-    pub provider: &'a str,
-    pub model: &'a str,
-}
-
-/// Resolved model target (IR): provider + model identity + generation params.
-/// All borrows come from the `Config` it was built from.
-#[derive(Debug)]
-pub struct ModelTarget<'a> {
-    provider: Provider<'a>,
-    model: &'a str,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-}
-
-/// Fully resolved, provider-neutral agent plan (IR). Built once per run.
-#[derive(Debug)]
-pub struct AgentPlan<'a> {
-    system_prompt: Option<&'a str>,
-    max_iterations: u32,
-    target: ModelTarget<'a>,
-}
-
-impl<'a> AgentPlan<'a> {
-    pub fn system_prompt(&self) -> Option<&str> {
-        self.system_prompt
-    }
-
-    pub fn max_iterations(&self) -> u32 {
-        self.max_iterations
-    }
-
-    pub fn target(&self) -> &ModelTarget<'a> {
-        &self.target
-    }
-}
-
-impl<'a> ModelTarget<'a> {
-    pub fn provider(&self) -> &Provider<'a> {
-        &self.provider
-    }
-
-    pub fn model(&self) -> &str {
-        self.model
-    }
-
-    pub fn temperature(&self) -> Option<f32> {
-        self.temperature
-    }
-
-    pub fn max_tokens(&self) -> Option<u32> {
-        self.max_tokens
-    }
-
-    pub fn model_id(&self) -> &str {
-        self.model
-        //TODO: not sure that using this prefix is useful at all
-        // let prefix = match self.provider.format() {
-        //     WireFormat::OpenAi | WireFormat::OpenAiResponses => "openai",
-        //     WireFormat::Anthropic => "anthropic",
-        // };
-        // format!("{prefix}/{}", self.model)
-    }
+    tools: Vec<CustomToolDef>,
 }
 
 impl Config {
@@ -293,53 +107,79 @@ impl Config {
         })
     }
 
-    pub fn workflow(&self, name: &str) -> Option<&WorkflowConfig> {
-        self.workflows.get(name)
-    }
-    pub fn debounce(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.watcher.debounce_ms)
-    }
-    pub fn tools_config(&self) -> &ToolsConfig {
-        &self.tools
-    }
-    pub fn runtime(&self) -> &RuntimeConfig {
-        &self.runtime
-    }
+    pub fn validate(self) -> Result<(Workspace, ToolRegistry), ConfigError> {
+        let mut errors = Vec::new();
+        let tools = ToolRegistry::from(self.tools);
 
-    /// Resolve `Selection` into a single `AgentPlan`, borrowing from `self`.
-    pub fn plan<'a>(&'a self, sel: &Selection<'_>) -> Result<AgentPlan<'a>, ConfigError> {
-        if sel.provider.is_empty() || sel.model.is_empty() {
-            return Err(ConfigError::InvalidField(
-                "provider and model must be non-empty".to_string(),
-            ));
+        validate_agents(&self.agents, &self.providers, &tools, &mut errors);
+
+        validate_workflows(&self.workflows, &self.agents, &mut errors);
+
+        errors
+            .is_empty()
+            .then(|| {
+                (
+                    Workspace::new(self.providers, self.agents, self.workflows),
+                    tools,
+                )
+            })
+            .ok_or(ConfigError::Validation(errors))
+    }
+}
+
+/// Validate that all agents reference known providers, models and tools.
+fn validate_agents(
+    agents: &HashMap<String, AgentConfig>,
+    providers: &HashMap<String, ProviderConfig>,
+    tools: &ToolRegistry,
+    errors: &mut Vec<ConfigError>,
+) {
+    for (agent_name, agent_config) in agents {
+        if let Some(provider) = providers.get(&agent_config.provider) {
+            if provider.get_model(&agent_config.model).is_none() {
+                errors.push(ConfigError::model(agent_name, &agent_config.model));
+            }
+        } else {
+            errors.push(ConfigError::provider(agent_name, &agent_config.provider));
         }
-        let provider_name = sel.provider;
-        let model_key = sel.model;
+        for tool_name in &agent_config.tools {
+            if !tools.0.contains_key(tool_name) {
+                errors.push(ConfigError::tool(agent_name, tool_name));
+            }
+        }
+    }
+}
 
-        let provider_cfg = self
-            .providers
-            .get(provider_name)
-            .ok_or_else(|| ConfigError::UnknownProvider(provider_name.to_string()))?;
-        let model_cfg = provider_cfg
-            .get_model(model_key)
-            .ok_or_else(|| ConfigError::UnknownModel(model_key.to_string()))?;
-        let agent_cfg = self
-            .agents
-            .get(sel.agent)
-            .ok_or_else(|| ConfigError::UnknownAgent(sel.agent.to_string()))?;
+/// Validate that all workflows reference known steps and agents
+fn validate_workflows(
+    workflows: &HashMap<String, WorkflowConfig>,
+    _agents: &HashMap<String, AgentConfig>,
+    errors: &mut Vec<ConfigError>,
+) {
+    //TODO: validate that all steps reference known agents
 
-        let provider = Provider::from(provider_cfg);
+    for (workflow_name, workflow_config) in workflows {
+        if !workflow_config.steps.contains_key(&workflow_config.initial) {
+            errors.push(ConfigError::step(workflow_name, &workflow_config.initial));
+        }
 
-        Ok(AgentPlan {
-            system_prompt: agent_cfg.system_prompt.as_deref(),
-            max_iterations: agent_cfg.max_iterations,
-            target: ModelTarget {
-                provider,
-                model: &model_cfg.name,
-                temperature: model_cfg.temperature,
-                max_tokens: model_cfg.max_tokens,
-            },
-        })
+        let step_exists = |step_name: &str| workflow_config.steps.contains_key(step_name) || step_name == "done" ;
+
+        for step_config in workflow_config.steps.values() {
+            if !step_exists(&step_config.on_success) {
+                errors.push(ConfigError::step(
+                    workflow_name,
+                    step_config.on_success.as_str(),
+                ));
+            }
+
+            if !step_exists(&step_config.on_failure) {
+                errors.push(ConfigError::step(
+                    workflow_name,
+                    step_config.on_failure.as_str(),
+                ));
+            }
+        }
     }
 }
 
@@ -353,10 +193,30 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
-    InvalidField(String),
+    UnknownStep(String),
+    UnknownTool(String),
     UnknownProvider(String),
     UnknownModel(String),
     UnknownAgent(String),
+    Validation(Vec<ConfigError>),
+}
+
+impl ConfigError {
+    fn step(workflow: &str, step: &str) -> Self {
+        Self::UnknownStep(format!("{} (referenced by workflow {})", step, workflow))
+    }
+
+    fn tool(agent: &str, tool: &str) -> Self {
+        Self::UnknownTool(format!("{} (referenced by agent {})", tool, agent))
+    }
+
+    fn provider(agent: &str, provider: &str) -> Self {
+        Self::UnknownProvider(format!("{} (referenced by agent {})", provider, agent))
+    }
+
+    fn model(agent: &str, model: &str) -> Self {
+        Self::UnknownModel(format!("{} (referenced by agent {})", model, agent))
+    }
 }
 
 impl std::fmt::Display for ConfigError {
@@ -387,7 +247,19 @@ impl std::fmt::Display for ConfigError {
                     write!(f, "TOML parse error in {}: {}", path.display(), msg)
                 }
             }
-            Self::InvalidField(m) => write!(f, "{m}"),
+            Self::Validation(errors) => {
+                write!(
+                    f,
+                    "configuration validation failed with {} error(s):",
+                    errors.len()
+                )?;
+                for error in errors {
+                    write!(f, "\n  - {}", error)?;
+                }
+                Ok(())
+            }
+            Self::UnknownTool(t) => write!(f, "unknown tool: {t}"),
+            Self::UnknownStep(s) => write!(f, "unknown step: {s}"),
             Self::UnknownProvider(p) => write!(f, "unknown provider: {p}"),
             Self::UnknownModel(m) => write!(f, "unknown model: {m}"),
             Self::UnknownAgent(a) => write!(f, "unknown agent: {a}"),
@@ -405,203 +277,115 @@ impl std::error::Error for ConfigError {
     }
 }
 
-#[derive(Debug)]
-pub enum StartupError {
-    InvalidConfig(String),
-    UnknownWorkflow(String),
-}
+#[derive(Debug, Valuable)]
+pub struct ToolRegistry(HashMap<String, CustomToolDef>);
 
-impl std::fmt::Display for StartupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidConfig(m) => write!(f, "invalid config: {m}"),
-            Self::UnknownWorkflow(w) => write!(f, "unknown workflow: {w}"),
+impl From<Vec<CustomToolDef>> for ToolRegistry {
+    fn from(custom_tools: Vec<CustomToolDef>) -> Self {
+        let mut tools = HashMap::new();
+        for tool in custom_tools {
+            tools.insert(tool.name.clone(), tool);
         }
+        Self(tools)
     }
 }
 
-impl std::error::Error for StartupError {}
-
-#[derive(Debug)]
-pub enum StoreError {
-    Load(ConfigError),
-    Convert(StartupError),
+#[derive(Debug, Valuable)]
+pub struct Workspace {
+    providers: HashMap<String, ProviderConfig>,
+    agents: HashMap<String, AgentConfig>,
+    workflows: HashMap<String, WorkflowConfig>,
 }
 
-impl std::fmt::Display for StoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Load(e) => write!(f, "config load failed: {e}"),
-            Self::Convert(e) => write!(f, "config validation failed: {e}"),
+impl Workspace {
+    pub fn new(
+        providers: HashMap<String, ProviderConfig>,
+        agents: HashMap<String, AgentConfig>,
+        workflows: HashMap<String, WorkflowConfig>,
+    ) -> Self {
+        Self {
+            providers,
+            agents,
+            workflows,
         }
+    }
+
+    pub fn get_workflow(&self, name: &str) -> &WorkflowConfig {
+        self.workflows.get(name).expect("We have already validated that the workflow exists so we should be able to find it")
+    }
+
+    pub fn get_agent<'a>(&self, name: &str) -> AgentView<'a> {
+        let agent = = self.agents.get(name).expect("We have already validated that the agent exists so we should be able to find it");
+        let provider = self.providers.get(agent.provider()).expect("We have already validated that the provider exists so we should be able to find it");
+        let model = self.models.get(agent.model()).expect("We have already validated that the model exists so we should be able to find it");
+        AgentView::new(agent, provider, model)
+
     }
 }
 
-impl std::error::Error for StoreError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Load(e) => Some(e),
-            Self::Convert(e) => Some(e),
-        }
+
+pub struct AgentView<'a> {
+    agent: &'a AgentConfig,
+    provider: &'a ProviderConfig,
+    model: &'a ModelConfig,
+}
+
+impl<'a> AgentView<'a> {
+    pub fn new(agent: &'a AgentConfig, provider: &'a ProviderConfig, model: &'a ModelConfig) -> Self {
+        Self { agent, provider, model }
     }
+
+        pub fn interactive(&self) -> bool {
+        self.agent.interactive
+    }
+
+    pub fn streaming(&self) -> bool {
+        self.model.s
+    }
+
 }
 
 #[derive(Debug)]
 pub struct ConfigStore {
     generation: u64,
-    config: std::sync::Arc<arc_swap::ArcSwap<Config>>,
-    tools: std::sync::Arc<arc_swap::ArcSwap<ToolRegistry>>,
+    config: Arc<arc_swap::ArcSwap<Workspace>>,
+    tools: Arc<arc_swap::ArcSwap<ToolRegistry>>,
 }
 
 impl ConfigStore {
-    pub fn new(config: Config) -> Result<Self, StartupError> {
-        let tools = ToolRegistry::from(config.tools_config().clone());
-        Ok(Self {
+    pub fn new(config: Workspace, tools: ToolRegistry) -> Self {
+        Self {
             generation: 0,
-            config: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(config)),
-            tools: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(tools)),
-        })
+            config: Arc::new(arc_swap::ArcSwap::from_pointee(config)),
+            tools: Arc::new(arc_swap::ArcSwap::from_pointee(tools)),
+        }
     }
-    pub fn apply(&mut self, config: Config) -> Result<bool, StartupError> {
-        let tools = ToolRegistry::from(config.tools_config().clone());
-        let config_changed = **self.config.load() != config;
-        let tools_changed = **self.tools.load() != tools;
-        if !config_changed && !tools_changed {
-            return Ok(false);
-        }
-        if config_changed {
-            self.config.store(std::sync::Arc::new(config));
-        } else {
-            // config unchanged but tools need update from config's tools_config
-            // we already computed tools from config, but if config unchanged we still need to update tools if tools changed
-            // this branch handles tools-only change via same file
-            self.tools.store(std::sync::Arc::new(tools));
-            self.generation += 1;
-            return Ok(true);
-        }
-        if tools_changed {
-            self.tools.store(std::sync::Arc::new(tools));
-        }
+
+    pub fn update(&mut self, config: Workspace, tools: ToolRegistry) {
         self.generation += 1;
-        Ok(true)
+        self.config.store(Arc::new(config));
+        self.tools.store(Arc::new(tools));
     }
-    pub fn reload(&mut self, path: &Path) -> Result<bool, StoreError> {
-        let config = Config::load(path).map_err(StoreError::Load)?;
-        // validate on_success/on_failure targets
-        for wf in config.workflows.values() {
-            for step in wf.steps.values() {
-                if let Some(t) = step_on_success(step) {
-                    if t != "done" && !wf.steps.contains_key(t) {
-                        return Err(StoreError::Convert(StartupError::InvalidConfig(format!(
-                            "on_success target '{}' not found",
-                            t
-                        ))));
-                    }
-                }
-                if let Some(t) = step_on_failure(step) {
-                    if t != "done" && !wf.steps.contains_key(t) {
-                        return Err(StoreError::Convert(StartupError::InvalidConfig(format!(
-                            "on_failure target '{}' not found",
-                            t
-                        ))));
-                    }
-                }
-            }
-        }
-        self.apply(config).map_err(StoreError::Convert)
-    }
+
     pub fn subscribe(&self) -> ConfigView {
         ConfigView {
-            config: std::sync::Arc::clone(&self.config),
-            tools: std::sync::Arc::clone(&self.tools),
+            config: Arc::clone(&self.config),
+            tools: Arc::clone(&self.tools),
         }
-    }
-}
-
-fn step_on_success(step: &Step) -> Option<&str> {
-    match step {
-        Step::Plan(c) => c.on_success(),
-        Step::Implement(c) => c.on_success(),
-        Step::Commit(c) => c.on_success(),
-        Step::Validate(c) => c.on_success(),
-        Step::Custom(c) => c.on_success(),
-    }
-}
-
-fn step_on_failure(step: &Step) -> Option<&str> {
-    match step {
-        Step::Plan(c) => c.on_failure(),
-        Step::Implement(c) => c.on_failure(),
-        Step::Commit(c) => c.on_failure(),
-        Step::Validate(c) => c.on_failure(),
-        Step::Custom(c) => c.on_failure(),
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ConfigView {
-    config: std::sync::Arc<arc_swap::ArcSwap<Config>>,
-    tools: std::sync::Arc<arc_swap::ArcSwap<ToolRegistry>>,
-}
-
-impl RuntimeConfig {
-    pub fn ctrl_c(&self) -> &CtrlCMode {
-        &self.ctrl_c
-    }
+    config: Arc<arc_swap::ArcSwap<Workspace>>,
+    tools: Arc<arc_swap::ArcSwap<ToolRegistry>>,
 }
 
 impl ConfigView {
-    pub fn load(&self) -> std::sync::Arc<Config> {
+    pub fn config(&self) -> Arc<Workspace> {
         self.config.load_full()
     }
-    pub fn borrow(&self) -> std::sync::Arc<Config> {
-        self.config.load_full()
-    }
-    pub fn config(&self) -> std::sync::Arc<Config> {
-        self.config.load_full()
-    }
-    pub fn tools(&self) -> std::sync::Arc<ToolRegistry> {
+    pub fn tools(&self) -> Arc<ToolRegistry> {
         self.tools.load_full()
-    }
-}
-
-#[derive(Debug)]
-pub enum AgentError {
-    Config(ConfigError),
-    Transport(String),
-    Parse(String),
-    Tool(String),
-    Io(String),
-}
-
-impl std::fmt::Display for AgentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Config(e) => write!(f, "config error: {e}"),
-            Self::Transport(e) => write!(f, "transport error: {e}"),
-            Self::Parse(e) => write!(f, "parse error: {e}"),
-            Self::Tool(e) => write!(f, "tool error: {e}"),
-            Self::Io(e) => write!(f, "io error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for AgentError {}
-
-impl From<ConfigError> for AgentError {
-    fn from(e: ConfigError) -> Self {
-        Self::Config(e)
-    }
-}
-
-impl From<std::io::Error> for AgentError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e.to_string())
-    }
-}
-
-impl From<serde_json::Error> for AgentError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::Parse(e.to_string())
     }
 }

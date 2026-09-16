@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
-use crate::config::ConfigStore;
+use crate::config::{Config, ConfigStore};
 
 /// Events emitted by the filesystem watcher.
 #[derive(Debug)]
@@ -33,7 +34,12 @@ pub struct FsWatcher {
 }
 
 impl FsWatcher {
-    pub fn spawn(store: ConfigStore, config_path: PathBuf, debounce: Duration) -> Self {
+    pub fn spawn(
+        store: ConfigStore,
+        config_path: PathBuf,
+        debounce: Duration,
+        user_output_tx: UnboundedSender<String>,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<FsEvent>();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
@@ -47,7 +53,7 @@ impl FsWatcher {
 
         let processor_join = thread::Builder::new()
             .name("fs-processor".into())
-            .spawn(move || processor_loop(event_rx, store, processor_config_path))
+            .spawn(move || processor_loop(event_rx, store, processor_config_path, user_output_tx))
             .expect("fs_processor: thread spawn");
 
         FsWatcher {
@@ -135,15 +141,35 @@ fn watcher_loop(
 /// use. On a reload error the store keeps serving the last good config.
 ///
 /// Exits when the channel is closed (the watcher thread dropped its sender).
-fn processor_loop(event_rx: mpsc::Receiver<FsEvent>, mut store: ConfigStore, config_path: PathBuf) {
+fn processor_loop(
+    event_rx: mpsc::Receiver<FsEvent>,
+    mut store: ConfigStore,
+    config_path: PathBuf,
+    user_output_tx: UnboundedSender<String>,
+) {
     loop {
         match event_rx.recv() {
-            Ok(FsEvent::ConfigChanged) => match store.reload(&config_path) {
-                Ok(changed) => info!(changed, "config reloaded"),
-                Err(e) => {
-                    error!(path = %config_path.display(), error = %e, "failed to reload config")
+            Ok(FsEvent::ConfigChanged) => {
+                if let Ok(config) = Config::load(&config_path) {
+                    match config.validate() {
+                        Ok((config, tools)) => {
+                            store.update(config, tools);
+                            let _ = user_output_tx
+                                .send(format!("Config reloaded from {}", config_path.display()));
+                        }
+                        Err(e) => {
+                            error!(error = %e, "failed to reload config");
+                            let _ = user_output_tx.send(format!("Failed to reload config: {e}"));
+                        }
+                    }
+                } else {
+                    error!("failed to load config from {}", config_path.display());
+                    let _ = user_output_tx.send(format!(
+                        "Failed to load config from {}",
+                        config_path.display()
+                    ));
                 }
-            },
+            }
             Err(_) => {
                 debug!("fs processor stopped; watcher channel closed");
                 break;
