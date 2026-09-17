@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use valuable::Valuable;
 
+use crate::model::Tool;
 use crate::provider::ProviderConfig;
 use crate::runtime::StepAction;
 
@@ -19,13 +20,36 @@ pub struct ModelConfig {
     streaming: bool,
 }
 
+/// Controls how the agent handles new user input arriving while busy.
+///
+/// - `Queue`: let the current LLM request or tool batch finish, then enqueue
+///   the inbound message for the next iteration.
+/// - `Interrupt`: cancel the in-flight request/tool batch immediately, enqueue
+///   the message and restart the loop so a fresh LLM request is sent.
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 #[serde(rename_all = "lowercase")]
 pub enum OnInput {
     Queue,
-    Abort,
+    Interrupt,
 }
 
+/// Controls what happens to partially completed tool results when a tool
+/// batch is interrupted via `tools_on_input = "interrupt"`.
+///
+/// - `Keep`: retain already-completed tool outputs (they remain in the
+///   conversation as `Tool` messages and are sent on the next LLM request).
+/// - `Discard`: drop all partial results for this tool batch; the next
+///   iteration restarts with only the queued user message, the interrupted tools
+///   are not retried.
+#[derive(Debug, Default, Deserialize, PartialEq, Valuable)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolsInterruptStrategy {
+    #[default]
+    Keep,
+    Discard,
+}
+
+//TODO: we should create another struct that would use this to create a better agent config which would have all the tools defined instead of string
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct AgentConfig {
     provider: String,
@@ -38,6 +62,10 @@ pub struct AgentConfig {
     max_concurrent_tools: NonZeroUsize,
     #[serde(default)]
     on_input: Option<OnInput>,
+    #[serde(default)]
+    tools_on_input: Option<OnInput>,
+    #[serde(default)]
+    tools_interrupt_strategy: ToolsInterruptStrategy,
 }
 
 
@@ -298,6 +326,28 @@ impl From<Vec<CustomToolDef>> for ToolRegistry {
     }
 }
 
+impl ToolRegistry {
+    pub fn get(&self, name: &str) -> Option<&CustomToolDef> {
+        self.0.get(name)
+    }
+
+    /// Resolve an agent's tool names into LLM `Tool` definitions.
+    /// Unknown names are skipped (validation reports them at load time).
+    pub fn resolve_tools(&self, names: &[String]) -> Vec<Tool> {
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(def) = self.0.get(name) {
+                out.push(Tool::new(
+                    def.name.clone(),
+                    def.description.clone(),
+                    def.parameters.clone(),
+                ));
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Valuable)]
 pub struct Workspace {
     providers: HashMap<String, ProviderConfig>,
@@ -323,7 +373,7 @@ impl Workspace {
     }
 
     pub fn get_agent(&self, name: &str) -> Option<AgentView<'_>> {
-        //TODO: well in a hot reload the current agent being used in a loop could be deleted and this would panic
+        //NOTE: well in a hot reload the current agent being used in a loop could be deleted and this would panic
         let agent = self.agents.get(name)?;
         let provider = self.providers.get(agent.provider()).expect("We have already validated that the provider exists so we should be able to find it");
         let model = provider.get_model(agent.model()).expect("We have already validated that the model exists so we should be able to find it");
@@ -347,6 +397,14 @@ impl<'a> AgentView<'a> {
         self.agent.on_input.as_ref()
     }
 
+    pub fn tools_on_input(&self) -> Option<&OnInput> {
+        self.agent.tools_on_input.as_ref()
+    }
+
+    pub fn tools_interrupt_strategy(&self) -> &ToolsInterruptStrategy {
+        &self.agent.tools_interrupt_strategy
+    }
+
     pub fn streaming(&self) -> bool {
         self.model.streaming
     }
@@ -363,8 +421,16 @@ impl<'a> AgentView<'a> {
         &self.agent.model
     }
 
-    pub fn max_iterations(&self) -> usize {
-        self.agent.max_iterations.get()
+    pub fn model_config(&self) -> &ModelConfig {
+        self.model
+    }
+
+    pub fn max_concurrent_tools(&self) -> usize {
+        self.agent.max_concurrent_tools.get()
+    }
+
+    pub fn tool_names(&self) -> &[String] {
+        &self.agent.tools
     }
 }
 

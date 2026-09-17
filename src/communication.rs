@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -31,7 +33,54 @@ fn parse_line(line: String) -> Inbound {
     }
 }
 
-pub fn spawn_stdin(tx: UnboundedSender<Inbound>, rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
+pub enum Outbound {
+    Ai(String),
+    User(String),
+    Notification(String),
+}
+
+pub struct OutboundChannel(UnboundedSender<Outbound>);
+
+impl OutboundChannel {
+    pub fn ai(&self, msg: String) {
+        if self.0.send(Outbound::Ai(msg)).is_err() {
+            tracing::error!("failed to send AI message to user output channel");
+        }
+    }
+
+    pub fn user(&self, msg: String) {
+        if self.0.send(Outbound::User(msg)).is_err() {
+            tracing::error!("failed to send AI message to user output channel");
+        }
+    }
+
+    pub fn notification(&self, msg: String) {
+        if self.0.send(Outbound::Notification(msg)).is_err() {
+            tracing::error!("failed to send AI message to user output channel");
+        }
+    }
+}
+
+impl From<UnboundedSender<Outbound>> for OutboundChannel {
+    fn from(tx: UnboundedSender<Outbound>) -> Self {
+        OutboundChannel(tx)
+    }
+}
+
+impl Display for Outbound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Outbound::Ai(msg) => write!(f, "AI: {}", msg),
+            Outbound::User(msg) => write!(f, "User: {}", msg),
+            Outbound::Notification(msg) => write!(f, "Notification: {}", msg),
+        }
+    }
+}
+
+pub fn spawn_stdin(
+    tx: UnboundedSender<Inbound>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<Outbound>,
+) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -44,7 +93,8 @@ pub fn spawn_stdin(tx: UnboundedSender<Inbound>, rx: tokio::sync::mpsc::Unbounde
     tokio::spawn(async move {
         let mut rx = rx;
         while let Some(line) = rx.recv().await {
-            println!("{}", line);
+            println!("{line}");
+            println!("*******************************************************");
         }
     });
 }

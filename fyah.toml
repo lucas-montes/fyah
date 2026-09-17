@@ -17,6 +17,13 @@ api_key = "ollama"
 format = "openai"
 models = { "qwen25" = { name = "qwen2.5-coder:14b", temperature = 0.3 } }
 
+[providers.mistral]
+url = "https://api.mistral.ai/v1/chat/completions"
+api_key = "test"
+format = "openai"
+models = { "medium" = { name = "mistral-medium-3-5", temperature = 0.3 } }
+
+
 
 [agents.coder]
 system_prompt = "You are Fyah, an AI coding assistant."
@@ -28,12 +35,14 @@ max_concurrent_tools = 1
 
 [agents.default]
 system_prompt = "You are Fyah, an AI coding assistant. You are in plan mode"
-provider = "openrouter"
-model = "nemotron"
+provider = "ollama"
+model = "qwen25"
 max_iterations = 25
 tools = []
 max_concurrent_tools = 10
 on_input = "queue"
+tools_on_input = "interrupt"
+tools_interrupt_strategy = "keep"
 
 
 [runtime]

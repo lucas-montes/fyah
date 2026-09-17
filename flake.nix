@@ -53,6 +53,11 @@
         # [ "qwen2.5:1.5b" ] for the bigger instruct model (pin its hash in
         # nix/ollama-models.nix after the first build).
         ollamaModels = [ "qwen2.5:0.5b" ];
+        rocmEnabled = system == "x86_64-linux";
+        ollamaPkg = if rocmEnabled then pkgs.ollama-rocm else pkgs.ollama;
+        ollamaEnv = lib.optionalString rocmEnabled ''
+          export OLLAMA_IGPU_ENABLE="''${OLLAMA_IGPU_ENABLE:-1}"
+        '';
 
         ollamaModelsDir = import ./nix/ollama-models.nix {
           inherit pkgs;
@@ -68,6 +73,8 @@
         packages = {
           inherit fyah;
           default = fyah;
+        } // lib.optionalAttrs rocmEnabled {
+          ollama-rocm = pkgs.ollama-rocm;
         };
 
         checks = {
@@ -92,10 +99,14 @@
           buildInputs = [
             sce.packages.${system}.default
             rust
-            pkgs.ollama
+            ollamaPkg
             pkgs.bazel
             pkgs.buildifier
+          ] ++ lib.optionals rocmEnabled [
+            pkgs.rocmPackages.rocminfo
+            pkgs.amdgpu_top
           ];
+          shellHook = ollamaEnv;
           RUSTFLAGS="--cfg tracing_unstable";
         };
 
@@ -105,8 +116,9 @@
             type = "app";
             program = "${
               pkgs.writeShellScript "ollama-dev" ''
+                ${ollamaEnv}
                 export OLLAMA_MODELS="${ollamaModelsDir}"
-                exec ${pkgs.ollama}/bin/ollama serve
+                exec ${ollamaPkg}/bin/ollama serve
               ''
             }";
           };

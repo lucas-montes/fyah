@@ -5,7 +5,7 @@ use tokio::process::Command;
 use valuable::Valuable;
 
 use crate::{
-    agent::run_agent_loop, client::LlmClient, communication::Inbound, config::ConfigView, model::Message, session::{Session, VcsKind, current_git_revision}
+    agent::run_agent_loop, client::LlmClient, communication::{Inbound, OutboundChannel}, config::ConfigView, model::Message, session::{Session, VcsKind, current_git_revision}
 };
 
 #[derive(Debug)]
@@ -25,7 +25,7 @@ pub async fn start_session(
     view: ConfigView,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
-    user_output_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    user_output_tx: OutboundChannel,
 ) -> Result<(), Error> {
     let session = Session::new(
         uuid::Uuid::now_v7().to_string(),
@@ -57,7 +57,7 @@ async fn start_workflow(
     session: Session,
     mut messages: Vec<Message>,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
-    user_output_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    user_output_tx: OutboundChannel,
 ) -> Result<(), Error> {
     tracing::debug!(workflow, "Starting workflow");
     let config = view.config();
@@ -68,10 +68,12 @@ async fn start_workflow(
     // TODO: add the cancelation logic
     match current_step.action() {
         StepAction::Llm { agent } => {
+            let registry = view.tools();
             run_agent_loop(
                 agent,
                 &client,
                 &config,
+                &registry,
                 &mut messages,
                 user_input_rx,
                 user_output_tx,

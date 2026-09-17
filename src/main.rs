@@ -24,6 +24,7 @@ pub mod runtime;
 pub mod session;
 mod traces;
 
+use crate::communication::Outbound;
 use crate::communication::spawn_stdin;
 use crate::runtime::start_session;
 
@@ -114,7 +115,7 @@ async fn main() {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
-    let (user_output_tx, user_output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (user_output_tx, user_output_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
 
     tracing::debug!("Channels spawned for shutdown, user input, and user output");
 
@@ -124,7 +125,7 @@ async fn main() {
         store,
         config_path,
         Duration::from_millis(cli.debounce.get()),
-        user_output_tx.clone(),
+        user_output_tx.clone().into(),
     );
     tracing::debug!("Spawning fs watcher");
 
@@ -146,7 +147,7 @@ async fn main() {
         view,
         shutdown_rx,
         user_input_rx,
-        user_output_tx,
+        user_output_tx.into(),
     )
     .await
     {

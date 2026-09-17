@@ -5,10 +5,13 @@ use std::time::Duration;
 
 use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
+use valuable::Valuable;
 
-use crate::config::{Config, ConfigStore};
+use crate::{
+    communication::OutboundChannel,
+    config::{Config, ConfigStore},
+};
 
 /// Events emitted by the filesystem watcher.
 #[derive(Debug)]
@@ -38,7 +41,7 @@ impl FsWatcher {
         store: ConfigStore,
         config_path: PathBuf,
         debounce: Duration,
-        user_output_tx: UnboundedSender<String>,
+        user_output_tx: OutboundChannel,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<FsEvent>();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -145,7 +148,7 @@ fn processor_loop(
     event_rx: mpsc::Receiver<FsEvent>,
     mut store: ConfigStore,
     config_path: PathBuf,
-    user_output_tx: UnboundedSender<String>,
+    user_output_tx: OutboundChannel,
 ) {
     loop {
         match event_rx.recv() {
@@ -153,18 +156,22 @@ fn processor_loop(
                 if let Ok(config) = Config::load(&config_path) {
                     match config.validate() {
                         Ok((config, tools)) => {
+                            tracing::info!(
+                                config = config.as_value(),
+                                tools = tools.as_value(),
+                                "store updated"
+                            );
                             store.update(config, tools);
-                            let _ = user_output_tx
-                                .send(format!("Config reloaded from {}", config_path.display()));
                         }
                         Err(e) => {
                             error!(error = %e, "failed to reload config");
-                            let _ = user_output_tx.send(format!("Failed to reload config: {e}"));
+                            let _ = user_output_tx
+                                .notification(format!("Failed to reload config: {e}"));
                         }
                     }
                 } else {
-                    error!("failed to load config from {}", config_path.display());
-                    let _ = user_output_tx.send(format!(
+                    error!(path=%config_path.display(), "failed to load config");
+                    let _ = user_output_tx.notification(format!(
                         "Failed to load config from {}",
                         config_path.display()
                     ));
