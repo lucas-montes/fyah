@@ -5,7 +5,12 @@ use tokio::process::Command;
 use valuable::Valuable;
 
 use crate::{
-    agent::run_agent_loop, client::LlmClient, communication::{Inbound, OutboundChannel}, config::ConfigView, model::Message, session::{Session, VcsKind, current_git_revision}
+    agent::run_agent_loop,
+    client::LlmClient,
+    communication::{Inbound, OutboundChannel},
+    config::ConfigView,
+    model::Message,
+    session::{Session, VcsKind, current_git_revision},
 };
 
 #[derive(Debug)]
@@ -59,25 +64,27 @@ async fn start_workflow(
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
 ) -> Result<(), Error> {
-    tracing::debug!(workflow, "Starting workflow");
     let config = view.config();
     let workflow_config = config.get_workflow(&workflow);
     let current_step = workflow_config.initial_step();
-    tracing::debug!(workflow, current_step= current_step.as_value(), "Starting workflow step");
+    tracing::debug!(
+        workflow,
+        current_step = current_step.as_value(),
+        "Starting workflow step"
+    );
 
     // TODO: add the cancelation logic
     match current_step.action() {
         StepAction::Llm { agent } => {
-            let registry = view.tools();
             run_agent_loop(
                 agent,
                 &client,
-                &config,
-                &registry,
+                view,
                 &mut messages,
                 user_input_rx,
                 user_output_tx,
-            ).await;
+            )
+            .await;
         }
         StepAction::Command { command } => {
             Command::new(command)
@@ -89,17 +96,12 @@ async fn start_workflow(
         }
     }
 
-
     Ok(())
 }
 
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 #[serde(untagged)]
 pub enum StepAction {
-    Llm {
-        agent: String,
-    },
-    Command {
-        command: String,
-    },
+    Llm { agent: String },
+    Command { command: String },
 }

@@ -71,11 +71,12 @@ fn start_loggers() -> WorkerGuard {
         .unwrap_or_else(|_| EnvFilter::new("info,h2=off,hyper=off,tower=off,reqwest=off"));
 
     let app_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
         .with_target(true)
         .with_line_number(true)
         .with_level(true)
-        .compact()
+        .pretty()
         .with_filter(filter_fn(|meta| meta.target() != "agent_trace"))
         .with_filter(env_filter);
     tracing_subscriber::registry()

@@ -41,7 +41,7 @@ max_iterations = 25
 tools = []
 max_concurrent_tools = 10
 on_input = "queue"
-tools_on_input = "interrupt"
+tools_on_input = "queue"
 tools_interrupt_strategy = "keep"
 
 

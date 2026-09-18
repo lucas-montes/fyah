@@ -68,7 +68,6 @@ pub struct AgentConfig {
     tools_interrupt_strategy: ToolsInterruptStrategy,
 }
 
-
 #[derive(Debug, Deserialize, PartialEq, Valuable, Default)]
 pub struct CustomToolDef {
     name: String,
@@ -87,14 +86,15 @@ pub struct WorkflowConfig {
 
 impl WorkflowConfig {
     pub fn get_step(&self, name: &str) -> &StepConfig {
-        self.steps.get(name).expect("We validated this before, step should exist")
+        self.steps
+            .get(name)
+            .expect("We validated this before, step should exist")
     }
 
     pub fn initial_step(&self) -> &StepConfig {
         self.get_step(&self.initial)
     }
 }
-
 
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct StepConfig {
@@ -199,7 +199,8 @@ fn validate_workflows(
             errors.push(ConfigError::step(workflow_name, &workflow_config.initial));
         }
 
-        let step_exists = |step_name: &str| workflow_config.steps.contains_key(step_name) || step_name == "done" ;
+        let step_exists =
+            |step_name: &str| workflow_config.steps.contains_key(step_name) || step_name == "done";
 
         for step_config in workflow_config.steps.values() {
             if !step_exists(&step_config.on_success) {
@@ -369,19 +370,25 @@ impl Workspace {
     }
 
     pub fn get_workflow(&self, name: &str) -> &WorkflowConfig {
-        self.workflows.get(name).expect("We have already validated that the workflow exists so we should be able to find it")
+        self.workflows.get(name).expect(
+            "We have already validated that the workflow exists so we should be able to find it",
+        )
     }
 
     pub fn get_agent(&self, name: &str) -> Option<AgentView<'_>> {
         //NOTE: well in a hot reload the current agent being used in a loop could be deleted and this would panic
         let agent = self.agents.get(name)?;
-        let provider = self.providers.get(agent.provider()).expect("We have already validated that the provider exists so we should be able to find it");
-        let model = provider.get_model(agent.model()).expect("We have already validated that the model exists so we should be able to find it");
+        let provider = self.providers.get(agent.provider()).expect(
+            "We have already validated that the provider exists so we should be able to find it",
+        );
+        let model = provider.get_model(agent.model()).expect(
+            "We have already validated that the model exists so we should be able to find it",
+        );
         Some(AgentView::new(agent, provider, model))
     }
 }
 
-
+#[derive(Debug)]
 pub struct AgentView<'a> {
     agent: &'a AgentConfig,
     provider: &'a ProviderConfig,
@@ -389,8 +396,16 @@ pub struct AgentView<'a> {
 }
 
 impl<'a> AgentView<'a> {
-    pub fn new(agent: &'a AgentConfig, provider: &'a ProviderConfig, model: &'a ModelConfig) -> Self {
-        Self { agent, provider, model }
+    pub fn new(
+        agent: &'a AgentConfig,
+        provider: &'a ProviderConfig,
+        model: &'a ModelConfig,
+    ) -> Self {
+        Self {
+            agent,
+            provider,
+            model,
+        }
     }
 
     pub fn on_input(&self) -> Option<&OnInput> {
@@ -423,6 +438,10 @@ impl<'a> AgentView<'a> {
 
     pub fn model_config(&self) -> &ModelConfig {
         self.model
+    }
+
+    pub fn max_iterations(&self) -> usize {
+        self.agent.max_iterations.get()
     }
 
     pub fn max_concurrent_tools(&self) -> usize {

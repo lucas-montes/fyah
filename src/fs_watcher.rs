@@ -156,7 +156,7 @@ fn processor_loop(
                 if let Ok(config) = Config::load(&config_path) {
                     match config.validate() {
                         Ok((config, tools)) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 config = config.as_value(),
                                 tools = tools.as_value(),
                                 "store updated"

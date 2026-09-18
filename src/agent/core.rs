@@ -1,22 +1,15 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use reqwest::Method;
 use tokio::select;
 
 use crate::client::LlmClient;
 use crate::communication::{Command, Inbound, OutboundChannel};
-use crate::config::{OnInput, ToolRegistry, ToolsInterruptStrategy, Workspace};
+use crate::config::{ConfigView, OnInput, ToolsInterruptStrategy};
 use crate::model::{AssistantTurn, Conversation, Message, Tool, ToolCall};
 use crate::provider::{Provider, parse_response};
 
-// ---------------------------------------------------------------------------
-// Tool execution WAL — decoupled from `Session` / filesystem.
-// In-memory map of tool_call_id -> completed result.
-// Only completed results are stored; in-flight calls live in the `JoinSet`
-// and are either awaited to completion or aborted via `abort_all()`.
-// `Keep` retains completed entries so the next LLM request sees partial
-// tool outputs. `Discard` removes the aborted turn's entries.
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
 struct ToolWal {
@@ -24,7 +17,6 @@ struct ToolWal {
 }
 
 impl ToolWal {
-
     /// Look up a completed result by tool_call id.
     fn cached_result(&self, id: &str) -> Option<&str> {
         self.entries.get(id).map(|s| s.as_str())
@@ -56,28 +48,10 @@ impl ToolWal {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Main agent loop — executes tools in parallel and checks user config on
-// inbound messages.
-//
-// - `on_input = None`  → blocking `send_request().await`, no interleaving.
-// - `on_input = Queue` → let the request finish, then drain `rx.try_recv()`
-//   into `queued` (FIFO).
-// - `on_input = Interrupt` → `select!` between request and `rx.recv()`; on
-//   message push it to `queued` and `continue` so the outer loop restarts
-//   with a fresh LLM request.
-//
-// Same pattern for `tools_on_input`, plus `tools_abort_strategy`:
-// - `Keep`    → aborted tools keep completed results as `Tool` messages.
-// - `Discard` → aborted tools drop everything for this turn.
-// In both cases an abort restarts the loop (fresh LLM request).
-// ---------------------------------------------------------------------------
-
 pub async fn run_agent_loop(
     agent_name: &str,
     client: &impl LlmClient,
-    config: &Workspace,
-    registry: &ToolRegistry,
+    view: ConfigView,
     messages: &mut Vec<Message>,
     mut user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
@@ -87,6 +61,8 @@ pub async fn run_agent_loop(
     let mut wal = ToolWal::default();
 
     loop {
+        let config = view.config();
+        let registry = view.tools();
         // Flush queued user messages first so the next request sees them.
         while let Some(m) = queued.pop_front() {
             messages.push(Message::new_user(m));
@@ -94,14 +70,19 @@ pub async fn run_agent_loop(
 
         // Single config lookup per iteration.
         let Some(view) = config.get_agent(agent_name) else {
-            tracing::warn!(agent_name, "Agent not found in config you might have removed from the config while the agent was running");
+            tracing::warn!(
+                agent_name,
+                "Agent not found in config you might have removed from the config while the agent was running"
+            );
             user_output_tx.notification(format!("Agent {agent_name} not found in config"));
             return;
         };
+
+        tracing::debug!(agent_name, messages=?messages, view=?view, "Agent loop iteration");
+
         let limit = view.max_concurrent_tools();
         // Resolve the agent's tool definitions once per iteration.
         let tools: Vec<Tool> = registry.resolve_tools(view.tool_names());
-
 
         // --- LLM request phase: None / Queue / Interrupt ---
         let turn: AssistantTurn = match view.on_input() {
@@ -123,7 +104,13 @@ pub async fn run_agent_loop(
                     }
                 };
                 // Request finished; drain anything that arrived meanwhile.
-                if drain_queue(&mut user_input_rx, &mut queued, &user_output_tx, messages.len(), &wal) {
+                if drain_queue(
+                    &mut user_input_rx,
+                    &mut queued,
+                    &user_output_tx,
+                    messages.len(),
+                    &wal,
+                ) {
                     return;
                 }
                 turn
@@ -159,7 +146,6 @@ pub async fn run_agent_loop(
         };
 
         if turn.tool_calls_empty() {
-
             if let (Some(content), _tools) = turn.into_parts() {
                 let _ = user_output_tx.ai(content);
             }
@@ -170,7 +156,8 @@ pub async fn run_agent_loop(
                     Some(Inbound::Command(Command::Stop | Command::Exit)) | None => return,
                     Some(Inbound::Command(Command::Interrupt(text))) => queued.push_back(text),
                     Some(Inbound::Command(Command::Status)) => {
-                        let _ = user_output_tx.notification(status_line(&queued, &wal, messages.len()));
+                        let _ =
+                            user_output_tx.notification(status_line(&queued, &wal, messages.len()));
                     }
                 },
             }
@@ -189,13 +176,28 @@ pub async fn run_agent_loop(
                 let (assistant_msg, tool_messages) = execute_tools(&mut wal, turn, limit).await;
                 messages.push(assistant_msg);
                 messages.extend(tool_messages);
-                if drain_queue(&mut user_input_rx, &mut queued, &user_output_tx, messages.len(), &wal) {
+                if drain_queue(
+                    &mut user_input_rx,
+                    &mut queued,
+                    &user_output_tx,
+                    messages.len(),
+                    &wal,
+                ) {
                     return;
                 }
             }
             Some(&OnInput::Interrupt) => {
-                if let Some(restart) =
-                    execute_tools_abortable(&mut wal, turn, limit, strategy, &mut user_input_rx, &mut queued, &user_output_tx, messages).await
+                if let Some(restart) = execute_tools_abortable(
+                    &mut wal,
+                    turn,
+                    limit,
+                    strategy,
+                    &mut user_input_rx,
+                    &mut queued,
+                    &user_output_tx,
+                    messages,
+                )
+                .await
                 {
                     match restart {
                         Restart::Stop => return,
@@ -461,15 +463,26 @@ async fn handle_tool_call(tool_call: &ToolCall) -> String {
     match tool_call.name() {
         "read_file" | "read" => {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
-                if let Some(path) = v.get("path").and_then(|p| p.as_str()).or_else(|| v.get("file_path").and_then(|p| p.as_str())) {
-                    return tokio::fs::read_to_string(path).await.unwrap_or_else(|e| format!("read error: {e}"));
+                if let Some(path) = v
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .or_else(|| v.get("file_path").and_then(|p| p.as_str()))
+                {
+                    return tokio::fs::read_to_string(path)
+                        .await
+                        .unwrap_or_else(|e| format!("read error: {e}"));
                 }
             }
             format!("read error: invalid args {args}")
         }
         "write_file" | "write" => {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
-                if let (Some(path), Some(content)) = (v.get("path").or_else(|| v.get("file_path")).and_then(|p| p.as_str()), v.get("content").and_then(|c| c.as_str())) {
+                if let (Some(path), Some(content)) = (
+                    v.get("path")
+                        .or_else(|| v.get("file_path"))
+                        .and_then(|p| p.as_str()),
+                    v.get("content").and_then(|c| c.as_str()),
+                ) {
                     return match tokio::fs::write(path, content).await {
                         Ok(_) => String::new(),
                         Err(e) => format!("write error: {e}"),
@@ -480,11 +493,19 @@ async fn handle_tool_call(tool_call: &ToolCall) -> String {
         }
         "bash" => {
             let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
-                v.get("command").and_then(|c| c.as_str()).unwrap_or(args).to_string()
+                v.get("command")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or(args)
+                    .to_string()
             } else {
                 args.to_string()
             };
-            match tokio::process::Command::new("bash").arg("-c").arg(&cmd).output().await {
+            match tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .await
+            {
                 Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
                 Err(e) => format!("bash error: {e}"),
             }
@@ -515,10 +536,7 @@ async fn send_request(
     let req = client.create_request(Method::POST, provider.endpoint());
     let req = provider.apply_auth(req);
     let req = provider.attach_body(req, &conversation);
-    let bytes = client
-        .send_request(req)
-        .await
-        .map_err(|e| e.to_string())?;
+    let bytes = client.send_request(req).await.map_err(|e| e.to_string())?;
     parse_response(format, bytes.as_ref()).map_err(|e| e.to_string())
 }
 
@@ -541,7 +559,11 @@ mod tests {
         let mut wal = ToolWal::default();
         wal.record_result("a", "out-a");
         wal.record_result("b", "out-b");
-        let kept = handle_tool_abort(&ToolsInterruptStrategy::Discard, &mut wal, &["a".to_string()]);
+        let kept = handle_tool_abort(
+            &ToolsInterruptStrategy::Discard,
+            &mut wal,
+            &["a".to_string()],
+        );
         assert!(kept.is_empty());
         assert!(wal.cached_result("a").is_none());
         assert!(wal.cached_result("b").is_some());
