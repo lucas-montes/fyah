@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 
 use reqwest::Method;
 use tokio::select;
@@ -9,7 +8,6 @@ use crate::communication::{Command, Inbound, OutboundChannel};
 use crate::config::{ConfigView, OnInput, ToolsInterruptStrategy};
 use crate::model::{AssistantTurn, Conversation, Message, Tool, ToolCall};
 use crate::provider::{Provider, parse_response};
-
 
 #[derive(Debug, Default)]
 struct ToolWal {
@@ -63,12 +61,11 @@ pub async fn run_agent_loop(
     loop {
         let config = view.config();
         let registry = view.tools();
-        // Flush queued user messages first so the next request sees them.
+        // TODO: not sure we need this
         while let Some(m) = queued.pop_front() {
             messages.push(Message::new_user(m));
         }
 
-        // Single config lookup per iteration.
         let Some(view) = config.get_agent(agent_name) else {
             tracing::warn!(
                 agent_name,
@@ -80,9 +77,9 @@ pub async fn run_agent_loop(
 
         tracing::debug!(agent_name, messages=?messages, view=?view, "Agent loop iteration");
 
-        let limit = view.max_concurrent_tools();
-        // Resolve the agent's tool definitions once per iteration.
-        let tools: Vec<Tool> = registry.resolve_tools(view.tool_names());
+
+        // TODO: this should be done way before to avoid allocating at each iteration
+        let tools = registry.resolve_tools(view.tool_names());
 
         // --- LLM request phase: None / Queue / Interrupt ---
         let turn: AssistantTurn = match view.on_input() {
@@ -166,6 +163,7 @@ pub async fn run_agent_loop(
 
         // --- Tool execution phase: parallel JoinSet + config-checked abort ---
         let strategy = view.tools_interrupt_strategy();
+        let limit = view.max_concurrent_tools();
         match view.tools_on_input() {
             None => {
                 let (assistant_msg, tool_messages) = execute_tools(&mut wal, turn, limit).await;
@@ -458,7 +456,7 @@ async fn execute_tools_abortable(
     None
 }
 
-async fn handle_tool_call(tool_call: &ToolCall) -> String {
+pub(crate) async fn handle_tool_call(tool_call: &ToolCall) -> String {
     let args = tool_call.arguments();
     match tool_call.name() {
         "read_file" | "read" => {
@@ -491,7 +489,7 @@ async fn handle_tool_call(tool_call: &ToolCall) -> String {
             }
             format!("write error: invalid args {args}")
         }
-        "bash" => {
+        "bash" | "sh" => {
             let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
                 v.get("command")
                     .and_then(|c| c.as_str())
