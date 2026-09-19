@@ -58,7 +58,11 @@ pub async fn run_agent_loop(
     let mut queued: VecDeque<String> = VecDeque::new();
     let mut wal = ToolWal::default();
 
+    let mut iteration = 0;
+
     loop {
+        iteration += 1;
+
         let config = view.config();
         let registry = view.tools();
         // TODO: not sure we need this
@@ -75,14 +79,13 @@ pub async fn run_agent_loop(
             return;
         };
 
-        tracing::debug!(agent_name, messages=?messages, view=?view, "Agent loop iteration");
-
+        tracing::debug!(agent_name, messages=?messages, view=?view, iteration, "Agent loop iteration");
 
         // TODO: this should be done way before to avoid allocating at each iteration
         let tools = registry.resolve_tools(view.tool_names());
 
         // --- LLM request phase: None / Queue / Interrupt ---
-        let turn: AssistantTurn = match view.on_input() {
+        let turn = match view.on_input() {
             None => match send_request(client, &view, messages, &tools).await {
                 Ok(t) => t,
                 Err(e) => {
