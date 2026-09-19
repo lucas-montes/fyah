@@ -52,7 +52,7 @@ ctrl_c = "immediate"
 [[tools]]
 name = "read_file"
 description = "Read a file from disk"
-command = "execute_read_file"
+executable = "execute_read_file"
 parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = [
     "path",
 ] }

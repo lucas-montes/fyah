@@ -147,7 +147,8 @@ pub async fn run_agent_loop(
 
         if turn.tool_calls_empty() {
             if let (Some(content), _tools) = turn.into_parts() {
-                let _ = user_output_tx.ai(content);
+                let _ = user_output_tx.ai(content.clone());
+                messages.push(Message::new_assistant(Some(content), Vec::new()));
             }
             match view.on_input() {
                 None => return,

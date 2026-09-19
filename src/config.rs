@@ -9,7 +9,7 @@ use valuable::Valuable;
 
 use crate::model::Tool;
 use crate::provider::ProviderConfig;
-use crate::runtime::StepAction;
+use crate::runtime::{ExecutableConfig, StepAction};
 
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct ModelConfig {
@@ -49,6 +49,68 @@ pub enum ToolsInterruptStrategy {
     Discard,
 }
 
+trait HookExt {
+    type Input;
+    type Output;
+
+    fn execute(&self, input: &Self::Input) -> impl futures::Future<Output = Self::Output> {
+        async move {
+            todo!()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct Hook<T: Valuable + HookExt> {
+    name: String,
+    executable: String,
+    #[serde(flatten)]
+    options: T,
+}
+
+impl<T: Valuable + HookExt> Hook<T> {
+    pub fn execute(&self, input: &T::Input) -> impl futures::Future<Output = T::Output> {
+        self.options.execute(input)
+    }
+}
+
+
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct PreToolOptions {
+    mode: Option<String>,
+}
+impl HookExt for PreToolOptions {
+    type Input = String;
+    type Output = ();
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct PostToolOptions {
+    max_bytes: Option<usize>,
+}
+impl HookExt for PostToolOptions {
+    type Input = String;
+    type Output = ();
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct PrePromptOptions {
+    max_tokens: Option<usize>,
+}
+impl HookExt for PrePromptOptions {
+    type Input = String;
+    type Output = ();
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct EmptyOptions;
+impl HookExt for EmptyOptions {
+    type Input = String;
+    type Output = ();
+}
+
+
 //TODO: we should create another struct that would use this to create a better agent config which would have all the tools defined instead of string
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct AgentConfig {
@@ -66,13 +128,22 @@ pub struct AgentConfig {
     tools_on_input: Option<OnInput>,
     #[serde(default)]
     tools_interrupt_strategy: ToolsInterruptStrategy,
+
+    #[serde(default)]
+    pre_prompt: Option<Hook<PrePromptOptions>>,
+    #[serde(default)]
+    pre_tool: Option<Hook<PreToolOptions>>,
+    #[serde(default)]
+    post_tool: Option<Hook<PostToolOptions>>,
+    #[serde(default)]
+    on_error: Option<Hook<EmptyOptions>>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Valuable, Default)]
 pub struct CustomToolDef {
     name: String,
     description: String,
-    command: String,
+    executable: String,
     #[valuable(skip)]
     parameters: Value,
 }
@@ -106,11 +177,21 @@ pub struct StepConfig {
     on_failure: String,
     /// Optional execution timeout in seconds.
     timeout_secs: Option<NonZeroU64>,
+    before: Option<Hook<EmptyOptions>>,
+    after: Option<Hook<EmptyOptions>>,
 }
 
 impl StepConfig {
     pub fn action(&self) -> &StepAction {
         &self.step
+    }
+
+    pub fn before(&self) -> Option<&Hook<EmptyOptions>> {
+        self.before.as_ref()
+    }
+
+    pub fn after(&self) -> Option<&Hook<EmptyOptions>> {
+        self.after.as_ref()
     }
 }
 
@@ -129,6 +210,8 @@ pub struct Config {
     workflows: HashMap<String, WorkflowConfig>,
     #[serde(default)]
     tools: Vec<CustomToolDef>,
+    #[serde(default)]
+    executables: HashMap<String, ExecutableConfig>
 }
 
 impl Config {

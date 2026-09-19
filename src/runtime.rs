@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, num::NonZeroU64};
 
 use serde::Deserialize;
 use tokio::process::Command;
@@ -73,6 +73,10 @@ async fn start_workflow(
         "Starting workflow step"
     );
 
+    if let Some(hook) = current_step.before() {
+        hook.execute(&view, &session).await;
+    }
+
     // TODO: add the cancelation logic
     match current_step.action() {
         StepAction::Llm { agent } => {
@@ -96,6 +100,10 @@ async fn start_workflow(
         }
     }
 
+    if let Some(hook) = current_step.after() {
+        hook.execute(&view, &session).await;
+    }
+
     Ok(())
 }
 
@@ -104,4 +112,34 @@ async fn start_workflow(
 pub enum StepAction {
     Llm { agent: String },
     Command { command: String },
+}
+
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
+pub enum FailMode {
+    #[default]
+    Message,
+    AbortStep,
+    AbortWorkflow,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct ExecutableConfig {
+    timeout_secs: Option<NonZeroU64>,
+    #[serde(default)]
+    fail_mode: FailMode,
+    #[serde(flatten)]
+    params: ExecutableParams,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ExecutableParams {
+    Command {
+        command: String,
+        args: Option<Vec<String>>,
+    },
+    Wasm {
+        path: String,
+        function: Option<String>,
+    },
 }
