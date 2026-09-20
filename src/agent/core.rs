@@ -6,6 +6,12 @@ use tokio::select;
 use crate::client::LlmClient;
 use crate::communication::{Command, Inbound, OutboundChannel};
 use crate::config::{ConfigView, OnInput, ToolsInterruptStrategy};
+use crate::context::{ManagedContext, apply_outcome, policy_for};
+
+use crate::hooks::{
+    HookRunner, HookState,  TurnEndInput, TurnEndOutcome, TurnStartInput,
+    TurnStartOutcome, VerifyInput, VerifyOutcome,
+};
 use crate::model::{AssistantTurn, Conversation, Message, Tool, ToolCall};
 use crate::provider::{Provider, parse_response};
 
@@ -49,7 +55,9 @@ impl ToolWal {
 pub async fn run_agent_loop(
     agent_name: &str,
     client: &impl LlmClient,
+    runner: &impl HookRunner,
     view: ConfigView,
+    session_id: &str,
     messages: &mut Vec<Message>,
     mut user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
@@ -80,6 +88,58 @@ pub async fn run_agent_loop(
         };
 
         tracing::debug!(agent_name, messages=?messages, view=?view, iteration, "Agent loop iteration");
+
+        if iteration > view.max_iterations() {
+            tracing::warn!(agent_name, iteration, "max_iterations reached");
+            user_output_tx.notification(format!(
+                "agent {agent_name} reached max_iterations ({})",
+                view.max_iterations()
+            ));
+            return;
+        }
+
+        // Context management: enforce the agent's configured policy before the
+        // turn starts. Policies only return declarative outcomes; applied here.
+        {
+            let ctx = ManagedContext::new(messages, queued.len());
+            let policy = policy_for(view.agent_config().context_config().strategy());
+            let outcome = policy.enforce(&ctx, view.agent_config().context_config());
+            let removed = apply_outcome(messages, outcome);
+            if removed > 0 {
+                tracing::info!(agent_name, removed, "context policy pruned messages");
+            }
+        }
+
+        // Turn start hook (single hook, fail-open).
+        {
+            let agent_cfg = view.agent_config();
+            if let Some(hook) = agent_cfg.turn_start() {
+                if let Some(exe) = config.get_executable(hook.executable()) {
+                    let ctx = ManagedContext::new(messages, queued.len());
+                    let input = TurnStartInput::new(
+                        agent_name,
+                        iteration,
+                        ctx.len(),
+                        ctx.queued_len(),
+                        ctx.estimated_tokens(),
+                    );
+                    let mut state = HookState::new(messages, session_id);
+
+                    match runner.run_hook(exe, hook, &input, &mut state).await {
+                        TurnStartOutcome::Continue => {}
+                        TurnStartOutcome::PruneTo { keep } => {
+                            let removed = state.prune_to(keep);
+                            tracing::info!(agent_name, removed, "turn_start pruned messages");
+                        }
+                        TurnStartOutcome::Abort { reason } => {
+                            tracing::warn!(agent_name, reason, "turn_start aborted loop");
+                            user_output_tx.notification(format!("turn aborted: {reason}"));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
 
         // TODO: this should be done way before to avoid allocating at each iteration
         let tools = registry.resolve_tools(view.tool_names());
@@ -145,7 +205,52 @@ pub async fn run_agent_loop(
             }
         };
 
+        // Turn end hook (single hook, fail-open).
+        {
+            let n_tool_calls = turn.tool_calls().len();
+            let has_text = turn.content().is_some();
+            if let Some(hook) = view.agent_config().turn_end() {
+                if let Some(exe) = config.get_executable(hook.executable()) {
+                    let input = TurnEndInput::new(agent_name, iteration, n_tool_calls, has_text);
+                    let mut state = HookState::new(messages, session_id);
+                    match runner.run_hook(&exe, hook, &input, &mut state).await {
+                        TurnEndOutcome::Continue => {}
+                        TurnEndOutcome::DropTurn => {
+                            tracing::info!(agent_name, iteration, "turn_end dropped turn");
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         if turn.tool_calls_empty() {
+            let last_text_owned = turn.content().map(str::to_string);
+            // Verify hook: external checker decides if the agent is really done.
+            // NotDone feedback is injected as a user message (notify the agent).
+            if let Some(hook) = view.agent_config().verify_done() {
+                if let Some(exe) = config.get_executable(hook.executable()) {
+                    let input = VerifyInput::new(
+                        agent_name,
+                        iteration,
+                        last_text_owned.as_deref(),
+                        messages.len(),
+                    );
+                    let mut state = HookState::new(messages, session_id);
+                    match runner.run_hook(&exe, hook, &input, &mut state).await {
+                        VerifyOutcome::Done => {}
+                        VerifyOutcome::NotDone { feedback } => {
+                            tracing::info!(agent_name, "verify hook requested another turn");
+                            if let (Some(content), _tools) = turn.into_parts() {
+                                let _ = user_output_tx.ai(content.clone());
+                                messages.push(Message::new_assistant(Some(content), Vec::new()));
+                            }
+                            messages.push(Message::new_user(feedback));
+                            continue;
+                        }
+                    }
+                }
+            }
             if let (Some(content), _tools) = turn.into_parts() {
                 let _ = user_output_tx.ai(content.clone());
                 messages.push(Message::new_assistant(Some(content), Vec::new()));

@@ -57,6 +57,28 @@ parameters = { type = "object", properties = { path = { type = "string", descrip
     "path",
 ] }
 
+[executables.execute_read_file]
+type = "builtin"
+builtin = "read_file"
+
+# --- Hook / executable examples (uncomment to enable) ---
+# [executables.audit_sh]
+# type = "command"
+# command = "./hooks/audit.sh"
+#
+# [workflows.default.hooks]
+# session_start = { name = "s", executable = "audit_sh" }
+# session_end = { name = "e", executable = "audit_sh" }
+#
+# [agents.coder.hooks]
+# turn_start = { name = "t", executable = "audit_sh" }
+# turn_end = { name = "u", executable = "audit_sh" }
+# verify_done = { name = "v", executable = "audit_sh" }
+#
+# [agents.coder.context]
+# strategy = "slidingwindow"
+# max_messages = 50
+
 
 [workflows.default]
 initial = "plan"

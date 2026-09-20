@@ -39,6 +39,7 @@ pub enum Outbound {
     Notification(String),
 }
 
+#[derive(Debug, Clone)]
 pub struct OutboundChannel(UnboundedSender<Outbound>);
 
 impl OutboundChannel {

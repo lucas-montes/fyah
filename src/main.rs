@@ -17,7 +17,10 @@ pub mod agent;
 pub mod client;
 mod communication;
 pub mod config;
+pub mod context;
+pub mod executable;
 pub mod fs_watcher;
+pub mod hooks;
 pub mod model;
 pub mod provider;
 pub mod runtime;
@@ -26,6 +29,7 @@ mod traces;
 
 use crate::communication::Outbound;
 use crate::communication::spawn_stdin;
+use crate::hooks::RealHookRunner;
 use crate::runtime::start_session;
 
 use {
@@ -141,9 +145,11 @@ async fn main() {
     spawn_stdin(user_input_tx, user_output_rx);
     tracing::debug!("Spawning stdin source");
     let client = Client::default();
+    let runner = RealHookRunner;
 
     if let Err(e) = start_session(
         client,
+        runner,
         cli.workflow,
         view,
         shutdown_rx,
