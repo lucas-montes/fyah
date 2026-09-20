@@ -11,7 +11,7 @@ use valuable::Valuable;
 use crate::config::ModelConfig;
 use crate::model::{AssistantTurn, Conversation};
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Default, Valuable)]
 #[serde(rename_all = "lowercase")]
 pub enum WireFormat {
     #[default]
@@ -40,7 +40,7 @@ impl ProviderConfig {
 /// Runtime provider: wire format + borrowed connection details (no clones).
 #[derive(Debug)]
 pub struct Provider<'a> {
-    format: WireFormat,
+    format: &'a WireFormat,
     url: &'a str,
     api_key: Option<&'a str>,
 }
@@ -48,7 +48,7 @@ pub struct Provider<'a> {
 impl<'a> From<&'a ProviderConfig> for Provider<'a> {
     fn from(p: &'a ProviderConfig) -> Self {
         Provider {
-            format: p.format,
+            format: &p.format,
             url: p.url.as_str(),
             api_key: Some(p.api_key.as_str()),
         }
@@ -60,8 +60,8 @@ impl<'a> Provider<'a> {
         self.url
     }
 
-    pub fn format(&self) -> WireFormat {
-        self.format
+    pub fn format(&self) -> &WireFormat {
+        &self.format
     }
 
     pub fn apply_auth(&self, req: RequestBuilder) -> RequestBuilder {
@@ -109,7 +109,7 @@ impl<'a> Provider<'a> {
 }
 
 pub fn parse_response(
-    format: WireFormat,
+    format: &WireFormat,
     bytes: &[u8],
 ) -> Result<AssistantTurn, Box<dyn std::error::Error>> {
     match format {

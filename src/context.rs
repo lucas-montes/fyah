@@ -78,7 +78,7 @@ fn message_chars(msg: &Message) -> usize {
 
 /// Which built-in policy to apply. The user selects one in config or points
 /// a `context` hook at a custom [`crate::executable::Executable`].
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Default, Valuable)]
 #[serde(rename_all = "lowercase")]
 pub enum ContextStrategy {
     #[default]
@@ -88,7 +88,7 @@ pub enum ContextStrategy {
 }
 
 /// User-facing knobs. All fields private; use accessors.
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct ContextConfig {
     #[serde(default)]
     strategy: ContextStrategy,
@@ -98,8 +98,8 @@ pub struct ContextConfig {
 }
 
 impl ContextConfig {
-    pub fn strategy(&self) -> ContextStrategy {
-        self.strategy
+    pub fn strategy(&self) -> &ContextStrategy {
+        &self.strategy
     }
 
     pub fn max_messages(&self) -> Option<usize> {
@@ -116,7 +116,7 @@ impl ContextConfig {
 }
 
 /// Declarative result. The caller applies it; policies never mutate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ContextOutcome {
     Continue,
     PruneTo(usize),
@@ -175,7 +175,7 @@ impl ContextPolicy for BudgetPolicy {
 }
 
 /// Select the built-in policy for a strategy.
-pub fn policy_for(strategy: ContextStrategy) -> Box<dyn ContextPolicy> {
+pub fn policy_for(strategy: &ContextStrategy) -> Box<dyn ContextPolicy> {
     match strategy {
         ContextStrategy::Null => Box::new(NullPolicy),
         ContextStrategy::SlidingWindow => Box::new(SlidingWindowPolicy),

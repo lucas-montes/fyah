@@ -65,7 +65,7 @@ impl Tool {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     id: String,
     name: String,

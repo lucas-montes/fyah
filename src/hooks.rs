@@ -7,7 +7,7 @@ use crate::model::Message;
 
 /// Structured hook failure. Replaces every `reason: String` payload; pure
 /// enum (breaking wire format by design — scripts emit the new shape).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum HookError {
     Denied { rule: String, detail: String },
@@ -61,7 +61,7 @@ impl std::fmt::Display for HookError {
 impl std::error::Error for HookError {}
 
 /// Abort level for [`HookError::Aborted`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AbortScope {
     Step,
@@ -99,7 +99,7 @@ pub trait Slot: std::fmt::Debug + 'static {
 /// Reusable hook reference. All fields private; resolve `executable` via the
 /// [`crate::executable::ExecutableRegistry`]. `T::Options` holds only static
 /// knobs — never JSON schema (tools own that).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct Hook<T: Slot> {
     name: String,
     executable: String,
@@ -125,16 +125,16 @@ impl<T: Slot> Hook<T> {
 // Option structs (private fields + accessors)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct EmptyOptions;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct SessionStartOptions;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct SessionEndOptions;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct TurnStartOptions {
     max_tokens: Option<usize>,
 }
@@ -145,10 +145,10 @@ impl TurnStartOptions {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct TurnEndOptions;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct VerifyOptions {
     min_iterations: Option<usize>,
 }
@@ -159,7 +159,7 @@ impl VerifyOptions {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct StepOptions {
     abort_on_fail: Option<bool>,
 }
@@ -170,7 +170,7 @@ impl StepOptions {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct PrePromptOptions {
     max_tokens: Option<usize>,
 }
@@ -181,7 +181,7 @@ impl PrePromptOptions {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct PreToolOptions {
     mode: Option<String>,
 }
@@ -192,7 +192,7 @@ impl PreToolOptions {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct PostToolOptions {
     max_bytes: Option<usize>,
 }
@@ -203,7 +203,7 @@ impl PostToolOptions {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct ContextHookOptions {
     max_tokens: Option<usize>,
 }
@@ -218,27 +218,27 @@ impl ContextHookOptions {
 // Slot markers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SessionStartSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SessionEndSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TurnStartSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct TurnEndSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct VerifySlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct StepSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PrePromptSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PreToolSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PostToolSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct OnErrorSlot;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ContextSlot;
 
 // ---------------------------------------------------------------------------
@@ -585,7 +585,7 @@ impl<'a> OnErrorInput<'a> {
 // Outputs (concrete per slot, Deserialize from stdout JSON)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum SessionStartOutcome {
     #[default]
@@ -593,14 +593,14 @@ pub enum SessionStartOutcome {
     Abort { error: HookError },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum SessionEndOutcome {
     #[default]
     Continue,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum TurnStartOutcome {
     #[default]
@@ -617,7 +617,7 @@ impl TurnStartOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum TurnEndOutcome {
     #[default]
@@ -625,7 +625,7 @@ pub enum TurnEndOutcome {
     DropTurn,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum VerifyOutcome {
     #[default]
@@ -646,7 +646,7 @@ impl VerifyOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum StepHookOutcome {
     #[default]
@@ -655,7 +655,7 @@ pub enum StepHookOutcome {
     AbortWorkflow { error: HookError },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum PrePromptOutcome {
     #[default]
@@ -663,7 +663,7 @@ pub enum PrePromptOutcome {
     Abort { error: HookError },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum PreToolOutcome {
     #[default]
@@ -671,7 +671,7 @@ pub enum PreToolOutcome {
     Deny { error: HookError },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum PostToolOutcome {
     #[default]
@@ -679,7 +679,7 @@ pub enum PostToolOutcome {
     DropResult,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum OnErrorOutcome {
     #[default]
