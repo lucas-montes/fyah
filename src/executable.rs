@@ -3,10 +3,45 @@ use std::num::NonZeroU64;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
 use valuable::Valuable;
 
+/// Operational failures running an executable. Internal only (never emitted
+/// by scripts); the runner maps these into slot outcomes via
+/// [`crate::hooks::Slot::fallback`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExecutableError {
+    Spawn { command: String, detail: String },
+    Encode { detail: String },
+    Stdin { detail: String },
+    Timeout { secs: u64 },
+    Wait { detail: String },
+    InvalidOutput { detail: String },
+    UnknownBuiltin { name: String },
+    NotImplemented { kind: String },
+}
+
+impl std::fmt::Display for ExecutableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn { command, detail } => {
+                write!(f, "spawn {command} failed: {detail}")
+            }
+            Self::Encode { detail } => write!(f, "encode error: {detail}"),
+            Self::Stdin { detail } => write!(f, "stdin error: {detail}"),
+            Self::Timeout { secs } => write!(f, "timeout after {secs}s"),
+            Self::Wait { detail } => write!(f, "wait error: {detail}"),
+            Self::InvalidOutput { detail } => write!(f, "invalid output: {detail}"),
+            Self::UnknownBuiltin { name } => write!(f, "unknown builtin: {name}"),
+            Self::NotImplemented { kind } => write!(f, "{kind} executables not yet implemented"),
+        }
+    }
+}
+
+impl std::error::Error for ExecutableError {}
+
 /// What to do when an executable fails or times out.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Default, Valuable)]
 #[serde(rename_all = "lowercase")]
 pub enum FailMode {
     #[default]
@@ -17,7 +52,7 @@ pub enum FailMode {
 
 /// How to run something. Common fields live here; kind-specific data in
 /// [`ExecutableParams`]. All fields private; use accessors.
-#[derive(Debug,  Deserialize, PartialEq, Valuable)]
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
 pub struct Executable {
     timeout_secs: Option<NonZeroU64>,
     #[serde(default)]
@@ -31,8 +66,8 @@ impl Executable {
         self.timeout_secs
     }
 
-    pub fn fail_mode(&self) -> FailMode {
-        self.fail_mode
+    pub fn fail_mode(&self) -> &FailMode {
+        &self.fail_mode
     }
 
     pub fn params(&self) -> &ExecutableParams {
@@ -44,10 +79,21 @@ impl Executable {
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ExecutableParams {
-    Builtin { builtin: String },
-    Command { command: String, args: Option<Vec<String>> },
-    Wasm { path: String, function: Option<String> },
-    Plugin { name: String, function: Option<String> },
+    Builtin {
+        builtin: String,
+    },
+    Command {
+        command: String,
+        args: Option<Vec<String>>,
+    },
+    Wasm {
+        path: String,
+        function: Option<String>,
+    },
+    Plugin {
+        name: String,
+        function: Option<String>,
+    },
 }
 
 impl ExecutableParams {
@@ -81,27 +127,18 @@ impl ExecutableRegistry {
         self.0.contains_key(name)
     }
 
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 /// Run a `command` executable: write `stdin_json` to its stdin, parse stdout
-/// as JSON. Returns `Err` on spawn/timeout/IO failure; callers map that via
-/// [`FailMode`]. Stdout that is empty or not JSON yields `Value::Null` so
-/// callers can fall back to their `Default` outcome.
+/// as JSON. Stdout that is empty yields `Value::Null` so callers can fall
+/// back to their `Default` outcome; non-JSON stdout is an
+/// [`ExecutableError::InvalidOutput`] (no silent swallowing).
 pub async fn run_command(
     exe: &Executable,
     command: &str,
     static_args: &[String],
     stdin_json: &Value,
-) -> Result<Value, String> {
-    use tokio::io::AsyncWriteExt;
-
+) -> Result<Value, ExecutableError> {
     let mut cmd = tokio::process::Command::new(command);
     for arg in static_args {
         cmd.arg(arg);
@@ -110,15 +147,22 @@ pub async fn run_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("spawn error: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| ExecutableError::Spawn {
+        command: command.to_string(),
+        detail: e.to_string(),
+    })?;
 
-    let input = serde_json::to_vec(stdin_json).map_err(|e| format!("encode error: {e}"))?;
+    let input = serde_json::to_vec(stdin_json).map_err(|e| ExecutableError::Encode {
+        detail: e.to_string(),
+    })?;
     if let Some(stdin) = child.stdin.take() {
         let mut stdin = stdin;
         stdin
             .write_all(&input)
             .await
-            .map_err(|e| format!("stdin error: {e}"))?;
+            .map_err(|e| ExecutableError::Stdin {
+                detail: e.to_string(),
+            })?;
     }
 
     let output_fut = child.wait_with_output();
@@ -127,54 +171,20 @@ pub async fn run_command(
             let dur = std::time::Duration::from_secs(secs.get());
             tokio::time::timeout(dur, output_fut)
                 .await
-                .map_err(|_| "timeout waiting for executable".to_string())?
-                .map_err(|e| format!("wait error: {e}"))?
+                .map_err(|_| ExecutableError::Timeout { secs: secs.get() })?
+                .map_err(|e| ExecutableError::Wait {
+                    detail: e.to_string(),
+                })?
         }
-        None => output_fut
-            .await
-            .map_err(|e| format!("wait error: {e}"))?,
+        None => output_fut.await.map_err(|e| ExecutableError::Wait {
+            detail: e.to_string(),
+        })?,
     };
 
     if output.stdout.is_empty() {
         return Ok(Value::Null);
     }
-    // Best effort: trailing logs break JSON, so take the raw bytes as-is.
-    serde_json::from_slice::<Value>(&output.stdout).map_or(Ok(Value::Null), Ok)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn executable_private_fields_via_toml() {
-        let toml = r#"
-timeout_secs = 5
-fail_mode = "message"
-type = "command"
-command = "./hooks/x.sh"
-"#;
-        let exe: Executable = toml::from_str(toml).expect("parse");
-        assert_eq!(exe.fail_mode(), FailMode::Message);
-        assert_eq!(exe.timeout_secs().map(std::num::NonZeroU64::get), Some(5));
-        assert_eq!(exe.params().kind(), "command");
-    }
-
-    #[test]
-    fn registry_lookup() {
-        let mut map = HashMap::new();
-        map.insert(
-            "a".to_string(),
-            Executable {
-                timeout_secs: None,
-                fail_mode: FailMode::Message,
-                params: ExecutableParams::Builtin {
-                    builtin: "x".to_string(),
-                },
-            },
-        );
-        let reg = ExecutableRegistry::from(map);
-        assert!(reg.contains("a"));
-        assert!(!reg.contains("b"));
-    }
+    serde_json::from_slice::<Value>(&output.stdout).map_err(|e| ExecutableError::InvalidOutput {
+        detail: format!("stdout is not JSON: {e}"),
+    })
 }

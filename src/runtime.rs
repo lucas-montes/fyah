@@ -9,7 +9,7 @@ use crate::{
     communication::{Inbound, OutboundChannel},
     config::ConfigView,
     hooks::{
-        HookRunner, HookState, RealHookRunner, SessionEndInput, SessionEndOutcome,
+        HookRunner, HookState, SessionEndInput, SessionEndOutcome,
         SessionStartInput, SessionStartOutcome, StepHookInput, StepHookOutcome,
     },
     model::Message,
@@ -57,12 +57,11 @@ pub async fn start_session(
                 SessionStartInput::new(session.id(), workflow.as_str(), session.vcs_revision());
             let mut messages: Vec<Message> = Vec::new();
             let mut state = HookState::new(&mut messages, session.id());
-            let runner = RealHookRunner;
             match runner.run_hook(&exe, hook, &input, &mut state).await {
                 SessionStartOutcome::Continue => {}
-                SessionStartOutcome::Abort { reason } => {
-                    tracing::warn!(reason, "session_start aborted workflow");
-                    user_output_tx.notification(format!("session aborted: {reason}"));
+                SessionStartOutcome::Abort { error } => {
+                    tracing::warn!(error = %error, "session_start aborted workflow");
+                    user_output_tx.notification(format!("session aborted: {error}"));
                     return Ok(());
                 }
             }
@@ -75,7 +74,7 @@ pub async fn start_session(
         view.clone(),
         shutdown_rx,
         client,
-        runner,
+        &runner,
         session.clone(),
         messages,
         user_input_rx,
@@ -96,7 +95,6 @@ pub async fn start_session(
             let input = SessionEndInput::new(session.id(), workflow.as_str(), success, 0);
             let mut messages: Vec<Message> = Vec::new();
             let mut state = HookState::new(&mut messages, session.id());
-            let runner = RealHookRunner;
             let _outcome: SessionEndOutcome = runner.run_hook(&exe, hook, &input, &mut state).await;
         }
     }
@@ -110,7 +108,7 @@ async fn start_workflow(
     view: ConfigView,
     _shutdown_rx: tokio::sync::watch::Receiver<bool>,
     client: impl LlmClient,
-    runner: impl HookRunner,
+    runner: &impl HookRunner,
     session: Session,
     mut messages: Vec<Message>,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
@@ -132,12 +130,12 @@ async fn start_workflow(
 
         match runner.run_hook(&exe, hook, &input, &mut state).await {
             StepHookOutcome::Continue => {}
-            StepHookOutcome::AbortStep { reason } => {
-                tracing::warn!(reason, "step before hook aborted step");
+            StepHookOutcome::AbortStep { error } => {
+                tracing::warn!(error = %error, "step before hook aborted step");
                 return Ok(());
             }
-            StepHookOutcome::AbortWorkflow { reason } => {
-                tracing::warn!(reason, "step before hook aborted workflow");
+            StepHookOutcome::AbortWorkflow { error } => {
+                tracing::warn!(error = %error, "step before hook aborted workflow");
                 return Ok(());
             }
         }
@@ -149,7 +147,7 @@ async fn start_workflow(
             run_agent_loop(
                 agent,
                 &client,
-                &runner,
+                runner,
                 view.clone(),
                 session.id(),
                 &mut messages,
@@ -181,11 +179,11 @@ async fn start_workflow(
 
         match runner.run_hook(exe, hook, &input, &mut state).await {
             StepHookOutcome::Continue => {}
-            StepHookOutcome::AbortStep { reason } => {
-                tracing::warn!(reason, "step after hook reported failure");
+            StepHookOutcome::AbortStep { error } => {
+                tracing::warn!(error = %error, "step after hook reported failure");
             }
-            StepHookOutcome::AbortWorkflow { reason } => {
-                tracing::warn!(reason, "step after hook aborted workflow");
+            StepHookOutcome::AbortWorkflow { error } => {
+                tracing::warn!(error = %error, "step after hook aborted workflow");
             }
         }
     }

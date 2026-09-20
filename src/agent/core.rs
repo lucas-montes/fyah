@@ -131,9 +131,9 @@ pub async fn run_agent_loop(
                             let removed = state.prune_to(keep);
                             tracing::info!(agent_name, removed, "turn_start pruned messages");
                         }
-                        TurnStartOutcome::Abort { reason } => {
-                            tracing::warn!(agent_name, reason, "turn_start aborted loop");
-                            user_output_tx.notification(format!("turn aborted: {reason}"));
+                        TurnStartOutcome::Abort { error } => {
+                            tracing::warn!(agent_name, error = %error, "turn_start aborted loop");
+                            user_output_tx.notification(format!("turn aborted: {error}"));
                             return;
                         }
                     }
@@ -239,13 +239,13 @@ pub async fn run_agent_loop(
                     let mut state = HookState::new(messages, session_id);
                     match runner.run_hook(&exe, hook, &input, &mut state).await {
                         VerifyOutcome::Done => {}
-                        VerifyOutcome::NotDone { feedback } => {
-                            tracing::info!(agent_name, "verify hook requested another turn");
+                        VerifyOutcome::NotDone { error } => {
+                            tracing::info!(agent_name, error = %error, "verify hook requested another turn");
                             if let (Some(content), _tools) = turn.into_parts() {
                                 let _ = user_output_tx.ai(content.clone());
                                 messages.push(Message::new_assistant(Some(content), Vec::new()));
                             }
-                            messages.push(Message::new_user(feedback));
+                            messages.push(Message::new_user(error.detail().to_string()));
                             continue;
                         }
                     }

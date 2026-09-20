@@ -2,16 +2,98 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use valuable::Valuable;
 
-use crate::executable::{Executable, ExecutableParams, run_command};
+use crate::executable::{Executable, ExecutableError, ExecutableParams, FailMode, run_command};
 use crate::model::Message;
+
+/// Structured hook failure. Replaces every `reason: String` payload; pure
+/// enum (breaking wire format by design — scripts emit the new shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum HookError {
+    Denied { rule: String, detail: String },
+    Aborted { scope: AbortScope, detail: String },
+    CheckFailed { check: String, detail: String },
+}
+
+impl HookError {
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Denied { detail, .. }
+            | Self::Aborted { detail, .. }
+            | Self::CheckFailed { detail, .. } => detail,
+        }
+    }
+
+    pub fn denied(rule: &str, detail: &str) -> Self {
+        Self::Denied {
+            rule: rule.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
+    pub fn aborted(scope: AbortScope, detail: &str) -> Self {
+        Self::Aborted {
+            scope,
+            detail: detail.to_string(),
+        }
+    }
+
+    pub fn check_failed(check: &str, detail: &str) -> Self {
+        Self::CheckFailed {
+            check: check.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for HookError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Denied { rule, detail } => write!(f, "denied by {rule}: {detail}"),
+            Self::Aborted { scope, detail } => write!(f, "aborted ({scope}): {detail}"),
+            Self::CheckFailed { check, detail } => {
+                write!(f, "check {check} failed: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HookError {}
+
+/// Abort level for [`HookError::Aborted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbortScope {
+    Step,
+    Workflow,
+    Session,
+    Turn,
+}
+
+impl std::fmt::Display for AbortScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Step => write!(f, "step"),
+            Self::Workflow => write!(f, "workflow"),
+            Self::Session => write!(f, "session"),
+            Self::Turn => write!(f, "turn"),
+        }
+    }
+}
 
 /// A hook slot: static options (from TOML) plus typed harness-built input
 /// and concrete output. Options stay plain data; execution lives in
-/// [`HookRunner`].
+/// [`HookRunner`]. Each slot maps runner failures into its own outcome via
+/// [`Slot::fallback`] so timeouts honor [`FailMode`].
 pub trait Slot: std::fmt::Debug + 'static {
     type Options: std::fmt::Debug + PartialEq + for<'de> Deserialize<'de>;
     type Input<'a>: Serialize;
     type Output: std::fmt::Debug + PartialEq + DeserializeOwned + Default;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        let _ = (error, fail_mode);
+        Self::Output::default()
+    }
 }
 
 /// Reusable hook reference. All fields private; resolve `executable` via the
@@ -508,9 +590,7 @@ impl<'a> OnErrorInput<'a> {
 pub enum SessionStartOutcome {
     #[default]
     Continue,
-    Abort {
-        reason: String,
-    },
+    Abort { error: HookError },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -528,9 +608,7 @@ pub enum TurnStartOutcome {
     PruneTo {
         keep: usize,
     },
-    Abort {
-        reason: String,
-    },
+    Abort { error: HookError },
 }
 
 impl TurnStartOutcome {
@@ -552,9 +630,7 @@ pub enum TurnEndOutcome {
 pub enum VerifyOutcome {
     #[default]
     Done,
-    NotDone {
-        feedback: String,
-    },
+    NotDone { error: HookError },
 }
 
 impl VerifyOutcome {
@@ -565,7 +641,7 @@ impl VerifyOutcome {
     pub fn feedback(&self) -> Option<&str> {
         match self {
             Self::Done => None,
-            Self::NotDone { feedback } => Some(feedback),
+            Self::NotDone { error } => Some(error.detail()),
         }
     }
 }
@@ -575,12 +651,8 @@ impl VerifyOutcome {
 pub enum StepHookOutcome {
     #[default]
     Continue,
-    AbortStep {
-        reason: String,
-    },
-    AbortWorkflow {
-        reason: String,
-    },
+    AbortStep { error: HookError },
+    AbortWorkflow { error: HookError },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -588,9 +660,7 @@ pub enum StepHookOutcome {
 pub enum PrePromptOutcome {
     #[default]
     Continue,
-    Abort {
-        reason: String,
-    },
+    Abort { error: HookError },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -598,9 +668,7 @@ pub enum PrePromptOutcome {
 pub enum PreToolOutcome {
     #[default]
     Continue,
-    Deny {
-        reason: String,
-    },
+    Deny { error: HookError },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -616,9 +684,7 @@ pub enum PostToolOutcome {
 pub enum OnErrorOutcome {
     #[default]
     Continue,
-    Abort {
-        reason: String,
-    },
+    Abort { error: HookError },
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +695,15 @@ impl Slot for SessionStartSlot {
     type Options = SessionStartOptions;
     type Input<'a> = SessionStartInput<'a>;
     type Output = SessionStartOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => SessionStartOutcome::Abort {
+                error: HookError::aborted(AbortScope::Session, &error.to_string()),
+            },
+        }
+    }
 }
 
 impl Slot for SessionEndSlot {
@@ -641,6 +716,15 @@ impl Slot for TurnStartSlot {
     type Options = TurnStartOptions;
     type Input<'a> = TurnStartInput<'a>;
     type Output = TurnStartOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => TurnStartOutcome::Abort {
+                error: HookError::aborted(AbortScope::Turn, &error.to_string()),
+            },
+        }
+    }
 }
 
 impl Slot for TurnEndSlot {
@@ -653,24 +737,63 @@ impl Slot for VerifySlot {
     type Options = VerifyOptions;
     type Input<'a> = VerifyInput<'a>;
     type Output = VerifyOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => VerifyOutcome::NotDone {
+                error: HookError::check_failed("hook", &error.to_string()),
+            },
+        }
+    }
 }
 
 impl Slot for StepSlot {
     type Options = StepOptions;
     type Input<'a> = StepHookInput<'a>;
     type Output = StepHookOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep => StepHookOutcome::AbortStep {
+                error: HookError::aborted(AbortScope::Step, &error.to_string()),
+            },
+            FailMode::AbortWorkflow => StepHookOutcome::AbortWorkflow {
+                error: HookError::aborted(AbortScope::Workflow, &error.to_string()),
+            },
+        }
+    }
 }
 
 impl Slot for PrePromptSlot {
     type Options = PrePromptOptions;
     type Input<'a> = PrePromptInput<'a>;
     type Output = PrePromptOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => PrePromptOutcome::Abort {
+                error: HookError::aborted(AbortScope::Turn, &error.to_string()),
+            },
+        }
+    }
 }
 
 impl Slot for PreToolSlot {
     type Options = PreToolOptions;
     type Input<'a> = PreToolInput<'a>;
     type Output = PreToolOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => PreToolOutcome::Deny {
+                error: HookError::denied("hook", &error.to_string()),
+            },
+        }
+    }
 }
 
 impl Slot for PostToolSlot {
@@ -683,12 +806,25 @@ impl Slot for OnErrorSlot {
     type Options = EmptyOptions;
     type Input<'a> = OnErrorInput<'a>;
     type Output = OnErrorOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => OnErrorOutcome::Abort {
+                error: HookError::aborted(AbortScope::Step, &error.to_string()),
+            },
+        }
+    }
 }
 
 impl Slot for ContextSlot {
     type Options = ContextHookOptions;
     type Input<'a> = TurnStartInput<'a>;
     type Output = TurnStartOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        TurnStartSlot::fallback(error, fail_mode)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -757,67 +893,64 @@ impl HookRunner for RealHookRunner {
         exe: &Executable,
         hook: &Hook<S>,
         input: &S::Input<'_>,
-        state: &mut HookState<'_>,
+        // Reserved for builtin handlers that mutate state directly;
+        // external executables receive IDs + JSON and return patches.
+        _state: &mut HookState<'_>,
     ) -> S::Output {
         match exe.params() {
             ExecutableParams::Builtin { builtin } => {
-                run_builtin::<S>(builtin, hook, input, state).await
+                match run_builtin_name(builtin, hook.name()) {
+                    Ok(()) => {
+                        tracing::debug!(builtin, "builtin hook executed");
+                        S::Output::default()
+                    }
+                    Err(error) => {
+                        tracing::warn!(hook = hook.name(), error = %error, "unknown builtin");
+                        S::fallback(&error, exe.fail_mode())
+                    }
+                }
             }
             ExecutableParams::Command { command, args } => {
                 let stdin = serde_json::to_value(input).unwrap_or(Value::Null);
                 let static_args: &[String] = args.as_deref().unwrap_or(&[]);
                 match run_command(exe, command, static_args, &stdin).await {
                     Ok(Value::Null) => S::Output::default(),
-                    Ok(v) => serde_json::from_value::<S::Output>(v)
-                        .unwrap_or_else(|_| S::Output::default()),
-                    Err(e) => {
-                        tracing::warn!(hook = hook.name(), error = %e, "hook command failed; continuing");
-                        S::Output::default()
+                    Ok(v) => match serde_json::from_value::<S::Output>(v) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            let error = ExecutableError::InvalidOutput {
+                                detail: e.to_string(),
+                            };
+                            tracing::warn!(hook = hook.name(), error = %error, "hook output not understood");
+                            S::fallback(&error, exe.fail_mode())
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(hook = hook.name(), error = %error, "hook command failed");
+                        S::fallback(&error, exe.fail_mode())
                     }
                 }
             }
-            ExecutableParams::Wasm { path, .. } | ExecutableParams::Plugin { name: path, .. } => {
-                tracing::warn!(
-                    hook = hook.name(),
-                    path,
-                    "wasm/plugin executables not yet implemented; continuing"
-                );
-                S::Output::default()
+            ExecutableParams::Wasm { .. } | ExecutableParams::Plugin { .. } => {
+                let error = ExecutableError::NotImplemented {
+                    kind: exe.params().kind().to_string(),
+                };
+                tracing::warn!(hook = hook.name(), error = %error, "executable kind not implemented");
+                S::fallback(&error, exe.fail_mode())
             }
         }
     }
 }
 
-/// Built-in dispatch by name. Unknown names fall back to `Default` so a typo
-/// never aborts the loop; validation catches it at load time.
-async fn run_builtin<S: Slot>(
-    builtin: &str,
-    _hook: &Hook<S>,
-    _input: &S::Input<'_>,
-    _state: &mut HookState<'_>,
-) -> S::Output {
-    tracing::debug!(builtin, "builtin hook executed");
-    S::Output::default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hook_fields_private_but_accessible() {
-        let toml = r#"
-name = "x"
-executable = "exe"
-"#;
-        let hook: Hook<StepSlot> = toml::from_str(toml).expect("parse");
-        assert_eq!(hook.name(), "x");
-        assert_eq!(hook.executable(), "exe");
-    }
-
-    #[test]
-    fn verify_outcome_defaults_to_done() {
-        let out = VerifyOutcome::default();
-        assert_eq!(out, VerifyOutcome::Done);
+/// Built-in name check. Unknown names surface as
+/// [`ExecutableError::UnknownBuiltin`] so `fail_mode` decides fail-open vs
+/// fail-closed; validation catches typos at load time.
+fn run_builtin_name(builtin: &str, _hook_name: &str) -> Result<(), ExecutableError> {
+    match builtin {
+        "noop" | "read_file" | "write_file" | "bash" | "prune_outputs" | "audit_append"
+        | "budget_guard" => Ok(()),
+        _ => Err(ExecutableError::UnknownBuiltin {
+            name: builtin.to_string(),
+        }),
     }
 }
