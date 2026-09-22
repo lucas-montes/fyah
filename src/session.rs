@@ -282,4 +282,22 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(session.session_dir());
     }
+
+    #[test]
+    fn session_is_send_sync_and_sharable() {
+        // Tool tasks spawn onto 'static futures; Session must travel in an
+        // Arc. This pins the bound so future field additions can't silently
+        // break task spawning. Never mutated — shared as Arc<Session>, no lock.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Session>();
+        let session = Session::new(
+            "arc-test".to_string(),
+            "fyah",
+            "0.1.0",
+            VcsKind::Git,
+            None,
+        );
+        let shared = std::sync::Arc::new(session);
+        assert_eq!(std::sync::Arc::clone(&shared).id(), "arc-test");
+    }
 }

@@ -86,6 +86,7 @@ impl std::fmt::Display for AbortScope {
 /// [`HookRunner`]. Each slot maps runner failures into its own outcome via
 /// [`Slot::fallback`] so timeouts honor [`FailMode`].
 pub trait Slot: std::fmt::Debug + 'static {
+    const NAME: &'static str;
     type Options: std::fmt::Debug + PartialEq + for<'de> Deserialize<'de>;
     type Input<'a>: Serialize;
     type Output: std::fmt::Debug + PartialEq + DeserializeOwned + Default;
@@ -98,20 +99,16 @@ pub trait Slot: std::fmt::Debug + 'static {
 
 /// Reusable hook reference. All fields private; resolve `executable` via the
 /// [`crate::executable::ExecutableRegistry`]. `T::Options` holds only static
-/// knobs — never JSON schema (tools own that).
+/// knobs — never JSON schema (tools own that). The slot is known from `T`,
+/// so no user-supplied `name` is needed; logging uses `T::NAME`.
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Hook<T: Slot> {
-    name: String,
     executable: String,
     #[serde(flatten)]
     options: T::Options,
 }
 
 impl<T: Slot> Hook<T> {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     pub fn executable(&self) -> &str {
         &self.executable
     }
@@ -692,6 +689,7 @@ pub enum OnErrorOutcome {
 // ---------------------------------------------------------------------------
 
 impl Slot for SessionStartSlot {
+    const NAME: &'static str = "session_start";
     type Options = SessionStartOptions;
     type Input<'a> = SessionStartInput<'a>;
     type Output = SessionStartOutcome;
@@ -707,12 +705,14 @@ impl Slot for SessionStartSlot {
 }
 
 impl Slot for SessionEndSlot {
+    const NAME: &'static str = "session_end";
     type Options = SessionEndOptions;
     type Input<'a> = SessionEndInput<'a>;
     type Output = SessionEndOutcome;
 }
 
 impl Slot for TurnStartSlot {
+    const NAME: &'static str = "turn_start";
     type Options = TurnStartOptions;
     type Input<'a> = TurnStartInput<'a>;
     type Output = TurnStartOutcome;
@@ -728,12 +728,14 @@ impl Slot for TurnStartSlot {
 }
 
 impl Slot for TurnEndSlot {
+    const NAME: &'static str = "turn_end";
     type Options = TurnEndOptions;
     type Input<'a> = TurnEndInput<'a>;
     type Output = TurnEndOutcome;
 }
 
 impl Slot for VerifySlot {
+    const NAME: &'static str = "verify_done";
     type Options = VerifyOptions;
     type Input<'a> = VerifyInput<'a>;
     type Output = VerifyOutcome;
@@ -749,6 +751,7 @@ impl Slot for VerifySlot {
 }
 
 impl Slot for StepSlot {
+    const NAME: &'static str = "step_hook";
     type Options = StepOptions;
     type Input<'a> = StepHookInput<'a>;
     type Output = StepHookOutcome;
@@ -767,6 +770,7 @@ impl Slot for StepSlot {
 }
 
 impl Slot for PrePromptSlot {
+    const NAME: &'static str = "pre_prompt";
     type Options = PrePromptOptions;
     type Input<'a> = PrePromptInput<'a>;
     type Output = PrePromptOutcome;
@@ -782,6 +786,7 @@ impl Slot for PrePromptSlot {
 }
 
 impl Slot for PreToolSlot {
+    const NAME: &'static str = "pre_tool";
     type Options = PreToolOptions;
     type Input<'a> = PreToolInput<'a>;
     type Output = PreToolOutcome;
@@ -797,12 +802,14 @@ impl Slot for PreToolSlot {
 }
 
 impl Slot for PostToolSlot {
+    const NAME: &'static str = "post_tool";
     type Options = PostToolOptions;
     type Input<'a> = PostToolInput<'a>;
     type Output = PostToolOutcome;
 }
 
 impl Slot for OnErrorSlot {
+    const NAME: &'static str = "on_error";
     type Options = EmptyOptions;
     type Input<'a> = OnErrorInput<'a>;
     type Output = OnErrorOutcome;
@@ -818,6 +825,7 @@ impl Slot for OnErrorSlot {
 }
 
 impl Slot for ContextSlot {
+    const NAME: &'static str = "context";
     type Options = ContextHookOptions;
     type Input<'a> = TurnStartInput<'a>;
     type Output = TurnStartOutcome;
@@ -897,15 +905,44 @@ impl HookRunner for RealHookRunner {
         // external executables receive IDs + JSON and return patches.
         _state: &mut HookState<'_>,
     ) -> S::Output {
+        let slot = S::NAME;
+        let executable = hook.executable();
+        let kind = exe.params().kind();
+        let start = std::time::Instant::now();
+        tracing::debug!(
+            slot,
+            executable,
+            kind,
+            fail_mode = ?exe.fail_mode(),
+            "hook start"
+        );
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let input_json = serde_json::to_value(input).unwrap_or(Value::Null);
+            tracing::trace!(slot, executable, input = %input_json, "hook input");
+        }
         match exe.params() {
             ExecutableParams::Builtin { builtin } => {
-                match run_builtin_name(builtin, hook.name()) {
+                match run_builtin_name(builtin) {
                     Ok(()) => {
-                        tracing::debug!(builtin, "builtin hook executed");
+                        tracing::debug!(
+                            slot,
+                            executable,
+                            builtin,
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "builtin hook executed"
+                        );
                         S::Output::default()
                     }
                     Err(error) => {
-                        tracing::warn!(hook = hook.name(), error = %error, "unknown builtin");
+                        tracing::warn!(
+                            slot,
+                            executable,
+                            builtin,
+                            error = %error,
+                            fail_mode = ?exe.fail_mode(),
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "unknown builtin"
+                        );
                         S::fallback(&error, exe.fail_mode())
                     }
                 }
@@ -913,29 +950,97 @@ impl HookRunner for RealHookRunner {
             ExecutableParams::Command { command, args } => {
                 let stdin = serde_json::to_value(input).unwrap_or(Value::Null);
                 let static_args: &[String] = args.as_deref().unwrap_or(&[]);
+                tracing::debug!(
+                    slot,
+                    executable,
+                    command,
+                    args = ?static_args,
+                    "spawning hook command"
+                );
                 match run_command(exe, command, static_args, &stdin).await {
-                    Ok(Value::Null) => S::Output::default(),
-                    Ok(v) => match serde_json::from_value::<S::Output>(v) {
-                        Ok(out) => out,
+                    Ok(Value::Null) => {
+                        tracing::debug!(
+                            slot,
+                            executable,
+                            command,
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "hook command completed with empty output (default outcome)"
+                        );
+                        S::Output::default()
+                    }
+                    Ok(v) => match serde_json::from_value::<S::Output>(v.clone()) {
+                        Ok(out) => {
+                            tracing::debug!(
+                                slot,
+                                executable,
+                                command,
+                                elapsed_ms = start.elapsed().as_millis() as u64,
+                                outcome = ?out,
+                                "hook command completed"
+                            );
+                            out
+                        }
                         Err(e) => {
                             let error = ExecutableError::InvalidOutput {
                                 detail: e.to_string(),
                             };
-                            tracing::warn!(hook = hook.name(), error = %error, "hook output not understood");
+                            tracing::warn!(
+                                slot,
+                                executable,
+                                command,
+                                error = %error,
+                                stdout = %v,
+                                fail_mode = ?exe.fail_mode(),
+                                elapsed_ms = start.elapsed().as_millis() as u64,
+                                "hook output not understood"
+                            );
                             S::fallback(&error, exe.fail_mode())
                         }
                     },
                     Err(error) => {
-                        tracing::warn!(hook = hook.name(), error = %error, "hook command failed");
+                        tracing::warn!(
+                            slot,
+                            executable,
+                            command,
+                            error = %error,
+                            fail_mode = ?exe.fail_mode(),
+                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            "hook command failed"
+                        );
                         S::fallback(&error, exe.fail_mode())
                     }
                 }
             }
-            ExecutableParams::Wasm { .. } | ExecutableParams::Plugin { .. } => {
+            ExecutableParams::Wasm { path, function } => {
                 let error = ExecutableError::NotImplemented {
                     kind: exe.params().kind().to_string(),
                 };
-                tracing::warn!(hook = hook.name(), error = %error, "executable kind not implemented");
+                tracing::warn!(
+                    slot,
+                    executable,
+                    path,
+                    function = ?function,
+                    error = %error,
+                    fail_mode = ?exe.fail_mode(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "executable kind not implemented"
+                );
+                S::fallback(&error, exe.fail_mode())
+            }
+            ExecutableParams::Plugin { name, function } => {
+                let error = ExecutableError::NotImplemented {
+                    kind: exe.params().kind().to_string(),
+                };
+                tracing::warn!(
+                    slot,
+                    executable,
+                    plugin = name,
+                    function = ?function,
+                    error = %error,
+                    fail_mode = ?exe.fail_mode(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "executable kind not implemented"
+                );
                 S::fallback(&error, exe.fail_mode())
             }
         }
@@ -945,9 +1050,9 @@ impl HookRunner for RealHookRunner {
 /// Built-in name check. Unknown names surface as
 /// [`ExecutableError::UnknownBuiltin`] so `fail_mode` decides fail-open vs
 /// fail-closed; validation catches typos at load time.
-fn run_builtin_name(builtin: &str, _hook_name: &str) -> Result<(), ExecutableError> {
+fn run_builtin_name(builtin: &str) -> Result<(), ExecutableError> {
     match builtin {
-        "noop" | "read_file" | "write_file" | "bash" | "prune_outputs" | "audit_append"
+        "noop" | "read_file" | "write_file" | "prune_outputs" | "audit_append"
         | "budget_guard" => Ok(()),
         _ => Err(ExecutableError::UnknownBuiltin {
             name: builtin.to_string(),

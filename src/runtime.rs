@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use valuable::Valuable;
@@ -36,13 +37,15 @@ pub async fn start_session(
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
 ) -> Result<(), Error> {
-    let session = Session::new(
+    // Shared, never mutated and never dropped before session end: `Arc`
+    // (not a raw pointer) is the safe way to hand it to spawned tool tasks.
+    let session = Arc::new(Session::new(
         uuid::Uuid::now_v7().to_string(),
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
         VcsKind::Git,
         current_git_revision(),
-    );
+    ));
 
     // Session start hook (single hook, fail-open on missing executable).
     {
@@ -60,7 +63,13 @@ pub async fn start_session(
             match runner.run_hook(&exe, hook, &input, &mut state).await {
                 SessionStartOutcome::Continue => {}
                 SessionStartOutcome::Abort { error } => {
-                    tracing::warn!(error = %error, "session_start aborted workflow");
+                    tracing::warn!(
+                        slot = "session_start",
+                        executable = hook.executable(),
+                        workflow = workflow.as_str(),
+                        error = %error,
+                        "session_start aborted workflow"
+                    );
                     user_output_tx.notification(format!("session aborted: {error}"));
                     return Ok(());
                 }
@@ -75,7 +84,7 @@ pub async fn start_session(
         shutdown_rx,
         client,
         &runner,
-        &session,
+        Arc::clone(&session),
         messages,
         user_input_rx,
         user_output_tx.clone(),
@@ -109,7 +118,7 @@ async fn start_workflow(
     _shutdown_rx: tokio::sync::watch::Receiver<bool>,
     client: impl LlmClient,
     runner: &impl HookRunner,
-    session: &Session,
+    session: Arc<Session>,
     mut messages: Vec<Message>,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
@@ -131,11 +140,25 @@ async fn start_workflow(
         match runner.run_hook(&exe, hook, &input, &mut state).await {
             StepHookOutcome::Continue => {}
             StepHookOutcome::AbortStep { error } => {
-                tracing::warn!(error = %error, "step before hook aborted step");
+                tracing::warn!(
+                    slot = "step_before",
+                    executable = hook.executable(),
+                    workflow = workflow.as_str(),
+                    step = step_name.as_str(),
+                    error = %error,
+                    "step before hook aborted step"
+                );
                 return Ok(());
             }
             StepHookOutcome::AbortWorkflow { error } => {
-                tracing::warn!(error = %error, "step before hook aborted workflow");
+                tracing::warn!(
+                    slot = "step_before",
+                    executable = hook.executable(),
+                    workflow = workflow.as_str(),
+                    step = step_name.as_str(),
+                    error = %error,
+                    "step before hook aborted workflow"
+                );
                 return Ok(());
             }
         }
@@ -149,7 +172,7 @@ async fn start_workflow(
                 &client,
                 runner,
                 view.clone(),
-                session.id(),
+                Arc::clone(&session),
                 &mut messages,
                 user_input_rx,
                 user_output_tx,
@@ -180,10 +203,24 @@ async fn start_workflow(
         match runner.run_hook(exe, hook, &input, &mut state).await {
             StepHookOutcome::Continue => {}
             StepHookOutcome::AbortStep { error } => {
-                tracing::warn!(error = %error, "step after hook reported failure");
+                tracing::warn!(
+                    slot = "step_after",
+                    executable = hook.executable(),
+                    workflow = workflow.as_str(),
+                    step = step_name.as_str(),
+                    error = %error,
+                    "step after hook reported failure"
+                );
             }
             StepHookOutcome::AbortWorkflow { error } => {
-                tracing::warn!(error = %error, "step after hook aborted workflow");
+                tracing::warn!(
+                    slot = "step_after",
+                    executable = hook.executable(),
+                    workflow = workflow.as_str(),
+                    step = step_name.as_str(),
+                    error = %error,
+                    "step after hook aborted workflow"
+                );
             }
         }
     }

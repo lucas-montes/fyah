@@ -794,9 +794,15 @@ on_failure = "done"
     }
 
     #[test]
+    fn tmp_dev_fyah_toml_validates() {
+        let config = Config::load(std::path::Path::new("fyah.toml")).expect("load dev config");
+        let _ = config.validate().expect("dev config validates");
+    }
+
+    #[test]
     fn hook_executable_ref_must_exist() {
         let raw = minimal_toml(
-            "[agents.coder.hooks]\nturn_start = { name = \"t\", executable = \"missing\" }\n",
+            "[agents.coder.hooks]\nturn_start = { executable = \"missing\" }\n",
         );
         let config: Config = toml::from_str(&raw).expect("parse");
         let err = config.validate().expect_err("must fail");
@@ -812,13 +818,13 @@ type = "command"
 command = "./hooks/audit.sh"
 
 [workflows.default.hooks]
-session_start = { name = "s", executable = "audit_sh" }
-session_end = { name = "e", executable = "audit_sh" }
+session_start = { executable = "audit_sh" }
+session_end = { executable = "audit_sh" }
 
 [agents.coder.hooks]
-turn_start = { name = "t", executable = "audit_sh" }
-turn_end = { name = "u", executable = "audit_sh" }
-verify_done = { name = "v", executable = "audit_sh" }
+turn_start = { executable = "audit_sh" }
+turn_end = { executable = "audit_sh" }
+verify_done = { executable = "audit_sh" }
 
 [agents.coder.context]
 strategy = "slidingwindow"

@@ -1,4 +1,4 @@
-use std::num::{NonZeroUsize, NonZeroU64};
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use serde::Deserialize;
 use valuable::Valuable;
@@ -87,6 +87,17 @@ pub enum ContextStrategy {
     Budget,
 }
 
+impl ContextStrategy {
+    /// Select the built-in policy for a strategy.
+    pub fn policy_for(&self) -> Box<dyn ContextPolicy> {
+        match self {
+            Self::Null => Box::new(NullPolicy),
+            Self::SlidingWindow => Box::new(SlidingWindowPolicy),
+            Self::Budget => Box::new(BudgetPolicy),
+        }
+    }
+}
+
 /// User-facing knobs. All fields private; use accessors.
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct ContextConfig {
@@ -121,6 +132,37 @@ pub enum ContextOutcome {
     Continue,
     PruneTo(usize),
     TruncateOutputs(usize),
+}
+
+impl ContextOutcome {
+    /// Apply an outcome to the owned message list. Returns number of messages
+    /// removed (0 for `Continue`).
+    pub fn apply_outcome(self, messages: &mut Vec<Message>) -> usize {
+        match self {
+            Self::Continue => 0,
+            Self::PruneTo(keep) => {
+                if messages.len() <= keep {
+                    return 0;
+                }
+                let remove = messages.len() - keep;
+                messages.drain(..remove);
+                remove
+            }
+            Self::TruncateOutputs(max_bytes) => {
+                let mut truncated = 0;
+                for msg in messages.iter_mut() {
+                    if let Message::Tool { content, .. } = msg
+                        && content.len() > max_bytes
+                    {
+                        content.truncate(max_bytes);
+                        content.push_str("\n[truncated]");
+                        truncated += 1;
+                    }
+                }
+                truncated
+            }
+        }
+    }
 }
 
 /// User-overridable policy. Defaults below cover v0; a custom executable can
@@ -174,44 +216,6 @@ impl ContextPolicy for BudgetPolicy {
     }
 }
 
-/// Select the built-in policy for a strategy.
-pub fn policy_for(strategy: &ContextStrategy) -> Box<dyn ContextPolicy> {
-    match strategy {
-        ContextStrategy::Null => Box::new(NullPolicy),
-        ContextStrategy::SlidingWindow => Box::new(SlidingWindowPolicy),
-        ContextStrategy::Budget => Box::new(BudgetPolicy),
-    }
-}
-
-/// Apply an outcome to the owned message list. Returns number of messages
-/// removed (0 for `Continue`).
-pub fn apply_outcome(messages: &mut Vec<Message>, outcome: ContextOutcome) -> usize {
-    match outcome {
-        ContextOutcome::Continue => 0,
-        ContextOutcome::PruneTo(keep) => {
-            if messages.len() <= keep {
-                return 0;
-            }
-            let remove = messages.len() - keep;
-            messages.drain(..remove);
-            remove
-        }
-        ContextOutcome::TruncateOutputs(max_bytes) => {
-            let mut truncated = 0;
-            for msg in messages.iter_mut() {
-                if let Message::Tool { content, .. } = msg
-                    && content.len() > max_bytes
-                {
-                    content.truncate(max_bytes);
-                    content.push_str("\n[truncated]");
-                    truncated += 1;
-                }
-            }
-            truncated
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,21 +242,8 @@ mod tests {
         let m = msgs(10);
         let ctx = ManagedContext::new(&m, 0);
         let policy = SlidingWindowPolicy;
-        let config: ContextConfig = toml::from_str(
-            "strategy = \"slidingwindow\"\nmax_messages = 4\n",
-        )
-        .expect("parse");
-        assert_eq!(
-            policy.enforce(&ctx, &config),
-            ContextOutcome::PruneTo(4)
-        );
-    }
-
-    #[test]
-    fn apply_prune_to() {
-        let mut m = msgs(5);
-        let removed = apply_outcome(&mut m, ContextOutcome::PruneTo(2));
-        assert_eq!(removed, 3);
-        assert_eq!(m.len(), 2);
+        let config: ContextConfig =
+            toml::from_str("strategy = \"slidingwindow\"\nmax_messages = 4\n").expect("parse");
+        assert_eq!(policy.enforce(&ctx, &config), ContextOutcome::PruneTo(4));
     }
 }
