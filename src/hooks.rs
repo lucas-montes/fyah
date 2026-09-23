@@ -955,30 +955,45 @@ impl HookRunner for RealHookRunner {
                     executable,
                     command,
                     args = ?static_args,
+                    stdin_len = stdin.to_string().len(),
                     "spawning hook command"
                 );
                 match run_command(exe, command, static_args, &stdin).await {
-                    Ok(Value::Null) => {
+                    Ok(out) if *out.value() == Value::Null => {
                         tracing::debug!(
                             slot,
                             executable,
                             command,
-                            elapsed_ms = start.elapsed().as_millis() as u64,
+                            exit_code = ?out.exit_code(),
+                            success = out.success(),
+                            elapsed_ms = out.elapsed_ms(),
+                            stdin_len = out.stdin_len(),
+                            stdout_len = out.stdout_len(),
+                            stderr_len = out.stderr_len(),
+                            stderr = out.stderr(),
+                            truncated = out.truncated(),
                             "hook command completed with empty output (default outcome)"
                         );
                         S::Output::default()
                     }
-                    Ok(v) => match serde_json::from_value::<S::Output>(v.clone()) {
-                        Ok(out) => {
+                    Ok(out) => match serde_json::from_value::<S::Output>(out.value().clone()) {
+                        Ok(parsed) => {
                             tracing::debug!(
                                 slot,
                                 executable,
                                 command,
-                                elapsed_ms = start.elapsed().as_millis() as u64,
-                                outcome = ?out,
+                                exit_code = ?out.exit_code(),
+                                success = out.success(),
+                                elapsed_ms = out.elapsed_ms(),
+                                stdin_len = out.stdin_len(),
+                                stdout_len = out.stdout_len(),
+                                stderr_len = out.stderr_len(),
+                                stderr = out.stderr(),
+                                truncated = out.truncated(),
+                                outcome = ?parsed,
                                 "hook command completed"
                             );
-                            out
+                            parsed
                         }
                         Err(e) => {
                             let error = ExecutableError::InvalidOutput {
@@ -989,25 +1004,41 @@ impl HookRunner for RealHookRunner {
                                 executable,
                                 command,
                                 error = %error,
-                                stdout = %v,
+                                exit_code = ?out.exit_code(),
+                                success = out.success(),
+                                elapsed_ms = out.elapsed_ms(),
+                                stdin_len = out.stdin_len(),
+                                stdout_len = out.stdout_len(),
+                                stderr_len = out.stderr_len(),
+                                stdout_raw = out.stdout_raw(),
+                                stderr = out.stderr(),
+                                truncated = out.truncated(),
                                 fail_mode = ?exe.fail_mode(),
-                                elapsed_ms = start.elapsed().as_millis() as u64,
                                 "hook output not understood"
                             );
                             S::fallback(&error, exe.fail_mode())
                         }
                     },
-                    Err(error) => {
+                    Err(failure) => {
                         tracing::warn!(
                             slot,
                             executable,
                             command,
-                            error = %error,
+                            error = %failure.error(),
+                            exit_code = ?failure.exit_code(),
+                            success = failure.success(),
+                            timed_out = failure.timed_out(),
+                            elapsed_ms = failure.elapsed_ms(),
+                            stdin_len = failure.stdin_len(),
+                            stdout_len = failure.stdout_len(),
+                            stderr_len = failure.stderr_len(),
+                            stdout_raw = failure.stdout_raw(),
+                            stderr = failure.stderr(),
+                            truncated = failure.truncated(),
                             fail_mode = ?exe.fail_mode(),
-                            elapsed_ms = start.elapsed().as_millis() as u64,
                             "hook command failed"
                         );
-                        S::fallback(&error, exe.fail_mode())
+                        S::fallback(failure.error(), exe.fail_mode())
                     }
                 }
             }
