@@ -1047,6 +1047,7 @@ impl HookRunner for RealHookRunner {
     }
 }
 
+//TODO: not sure this is useful
 /// Built-in name check. Unknown names surface as
 /// [`ExecutableError::UnknownBuiltin`] so `fail_mode` decides fail-open vs
 /// fail-closed; validation catches typos at load time.

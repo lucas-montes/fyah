@@ -631,7 +631,7 @@ async fn execute_tools_abortable(
     None
 }
 
-pub(crate) async fn handle_tool_call(tool_call: &ToolCall, ctx: &ToolCtx) -> String {
+async fn handle_tool_call(tool_call: &ToolCall, ctx: &ToolCtx) -> String {
     match tool_call.name() {
         "read_file" | "read" => builtin_read(tool_call).await,
         "write_file" | "write" => builtin_write(tool_call, ctx).await,
@@ -675,7 +675,6 @@ async fn builtin_write(tool_call: &ToolCall, ctx: &ToolCtx) -> String {
         Ok(()) => {
             record_write_diff!(
                 ctx.session(),
-                tool_call.id(),
                 path,
                 old.as_deref(),
                 content,
