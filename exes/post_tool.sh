@@ -2,7 +2,6 @@
 # post_tool hook: after a single tool result.
 # in:  { agent, call_id, tool, output_len }
 # out: {"decision":"continue"} | {"decision":"drop_result"}
-# NOTE: accepted by config but not executed by the loop yet.
 # Empty stdout means approval (Continue). Diagnostics go to stderr only.
 set -euo pipefail
 INPUT=$(cat)

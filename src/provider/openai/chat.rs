@@ -98,6 +98,9 @@ impl<'c, 'a> From<&'c Conversation<'a>> for OpenAiRequest<'c> {
             messages.push(OpenAiMessage::System { content: sys });
         }
         messages.extend(conv.messages().iter().map(OpenAiMessage::from));
+        if let Some(extra) = conv.ephemeral() {
+            messages.push(OpenAiMessage::from(extra));
+        }
         OpenAiRequest {
             model: conv.model(),
             messages,
@@ -304,5 +307,20 @@ mod tests {
         assert_eq!(turn.tool_calls()[0].id(), "call_1");
         assert_eq!(turn.tool_calls()[0].name(), "Write");
         assert_eq!(turn.tool_calls()[0].arguments(), "alpha");
+    }
+
+    #[test]
+    fn ephemeral_is_appended_last_without_cloning_history() {
+        let messages = vec![Message::new_user("hello".to_string())];
+        let extra = Message::new_user("extra".to_string());
+        let tools: Vec<crate::model::Tool> = vec![];
+        let conv = Conversation::new("m", None, None, None, &messages, Some(&extra), &tools);
+        let req = OpenAiRequest::from(&conv);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(req.messages.len(), 2);
+        assert!(matches!(
+            &req.messages[1],
+            OpenAiMessage::User { content } if *content == "extra"
+        ));
     }
 }

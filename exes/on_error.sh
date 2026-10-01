@@ -2,7 +2,6 @@
 # on_error hook: on LLM/tool errors.
 # in:  { agent, phase, error }
 # out: {"decision":"continue"} | {"decision":"abort",...}
-# NOTE: accepted by config but not executed by the loop yet.
 # Empty stdout means approval (Continue). Diagnostics go to stderr only.
 set -euo pipefail
 INPUT=$(cat)

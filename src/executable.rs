@@ -9,7 +9,7 @@ use valuable::Valuable;
 /// Operational failures running an executable. Internal only (never emitted
 /// by scripts); the runner maps these into slot outcomes via
 /// [`crate::hooks::Slot::fallback`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ExecutableError {
     Spawn { command: String, detail: String },
     Encode { detail: String },
@@ -153,7 +153,7 @@ fn truncate_for_log(s: &str) -> (String, bool) {
 /// Successful `command` run: parsed stdout JSON plus full process telemetry.
 /// `stdout_raw`/`stderr` are truncated to [`MAX_LOG_CHARS`] for logging;
 /// `stdout_len`/`stderr_len` hold the full lengths.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CommandOutput {
     value: Value,
     stdout_raw: String,
@@ -206,7 +206,7 @@ impl CommandOutput {
 
 /// Failed `command` run: the [`ExecutableError`] plus whatever telemetry was
 /// captured (empty when the child never ran, e.g. spawn/encode/stdin).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CommandFailure {
     error: ExecutableError,
     stdout_raw: String,

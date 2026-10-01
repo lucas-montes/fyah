@@ -10,15 +10,11 @@ use crate::model::Message;
 #[derive(Debug)]
 pub struct ManagedContext<'a> {
     messages: &'a [Message],
-    queued_len: usize,
 }
 
 impl<'a> ManagedContext<'a> {
-    pub fn new(messages: &'a [Message], queued_len: usize) -> Self {
-        Self {
-            messages,
-            queued_len,
-        }
+    pub fn new(messages: &'a [Message]) -> Self {
+        Self { messages }
     }
 
     pub fn len(&self) -> usize {
@@ -27,10 +23,6 @@ impl<'a> ManagedContext<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
-    }
-
-    pub fn queued_len(&self) -> usize {
-        self.queued_len
     }
 
     /// Heuristic token estimate: ~4 chars per token + per-message overhead.
@@ -76,8 +68,9 @@ fn message_chars(msg: &Message) -> usize {
     }
 }
 
-/// Which built-in policy to apply. The user selects one in config or points
-/// a `context` hook at a custom [`crate::executable::Executable`].
+/// Which built-in policy to apply. `Custom` delegates to a user executable
+/// named in [`ContextConfig::executable`]; the request phase branches to the
+/// hook runner instead of [`ContextStrategy::policy_for`].
 #[derive(Debug, Deserialize, PartialEq, Eq, Default, Valuable)]
 #[serde(rename_all = "lowercase")]
 pub enum ContextStrategy {
@@ -85,20 +78,29 @@ pub enum ContextStrategy {
     Null,
     SlidingWindow,
     Budget,
+    Custom,
 }
 
 impl ContextStrategy {
-    /// Select the built-in policy for a strategy.
+    /// Select the built-in policy for a strategy. `Custom` has no pure
+    /// policy (it needs the async runner); it maps to a no-op here and the
+    /// caller must branch before calling this.
     pub fn policy_for(&self) -> Box<dyn ContextPolicy> {
         match self {
             Self::Null => Box::new(NullPolicy),
             Self::SlidingWindow => Box::new(SlidingWindowPolicy),
             Self::Budget => Box::new(BudgetPolicy),
+            Self::Custom => Box::new(NullPolicy),
         }
     }
 }
 
 /// User-facing knobs. All fields private; use accessors.
+///
+/// T02: `executable` selects the custom compaction program when
+/// `strategy = "custom"`. Missing/unknown executables fail validation.
+/// Runtime failures follow the executable's own `fail_mode` in
+/// `[executables.*]` (single source; no table-level copy).
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct ContextConfig {
     #[serde(default)]
@@ -106,6 +108,8 @@ pub struct ContextConfig {
     max_messages: Option<NonZeroUsize>,
     max_tokens: Option<NonZeroU64>,
     max_output_bytes: Option<usize>,
+    #[serde(default)]
+    executable: Option<String>,
 }
 
 impl ContextConfig {
@@ -123,6 +127,10 @@ impl ContextConfig {
 
     pub fn max_output_bytes(&self) -> Option<usize> {
         self.max_output_bytes
+    }
+
+    pub fn executable(&self) -> Option<&str> {
+        self.executable.as_deref()
     }
 }
 
@@ -229,9 +237,8 @@ mod tests {
     #[test]
     fn size_methods() {
         let m = msgs(3);
-        let ctx = ManagedContext::new(&m, 1);
+        let ctx = ManagedContext::new(&m);
         assert_eq!(ctx.len(), 3);
-        assert_eq!(ctx.queued_len(), 1);
         assert!(!ctx.is_empty());
         assert!(ctx.estimated_tokens() > 0);
         assert_eq!(ctx.tool_output_bytes(), 0);
@@ -240,7 +247,7 @@ mod tests {
     #[test]
     fn sliding_window_prunes() {
         let m = msgs(10);
-        let ctx = ManagedContext::new(&m, 0);
+        let ctx = ManagedContext::new(&m);
         let policy = SlidingWindowPolicy;
         let config: ContextConfig =
             toml::from_str("strategy = \"slidingwindow\"\nmax_messages = 4\n").expect("parse");

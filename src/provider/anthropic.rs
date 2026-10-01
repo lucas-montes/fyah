@@ -78,7 +78,7 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
         let mut messages: Vec<AnthropicMessage<'c>> = Vec::new();
         let mut pending: Vec<AnthropicBlock<'c>> = Vec::new();
 
-        for m in &*conv.messages() {
+        for m in conv.messages().iter().chain(conv.ephemeral()) {
             match m {
                 Message::User { content } => {
                     flush(&mut pending, &mut messages);
@@ -321,5 +321,18 @@ mod tests {
         assert_eq!(turn.tool_calls()[0].id(), "tool_1");
         assert_eq!(turn.tool_calls()[0].name(), "Write");
         assert_eq!(turn.tool_calls()[0].arguments(), "partial");
+    }
+
+    #[test]
+    fn ephemeral_is_appended_last() {
+        use crate::model::{Conversation, Message};
+        let messages = vec![Message::new_user("hello".to_string())];
+        let extra = Message::new_user("extra".to_string());
+        let tools: Vec<crate::model::Tool> = vec![];
+        let conv = Conversation::new("m", None, None, None, &messages, Some(&extra), &tools);
+        let req = AnthropicRequest::from(&conv);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(req.messages.len(), 2);
+        assert_eq!(req.messages[1].role, "user");
     }
 }

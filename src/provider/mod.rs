@@ -60,8 +60,12 @@ impl<'a> Provider<'a> {
         self.url
     }
 
-    pub fn format(&self) -> &WireFormat {
-        &self.format
+    pub fn transformation(&self) -> fn(&[u8]) -> Result<AssistantTurn, serde_json::Error> {
+        match self.format {
+        WireFormat::OpenAi => openai::chat::parse_response,
+        WireFormat::Anthropic => anthropic::parse_response,
+        WireFormat::OpenAiResponses => openai::responses::parse_response,
+    }
     }
 
     pub fn apply_auth(&self, req: RequestBuilder) -> RequestBuilder {
@@ -99,25 +103,8 @@ impl<'a> Provider<'a> {
             WireFormat::OpenAiResponses => openai::responses::attach_body_stream(req, conv),
         }
     }
-
-    pub fn parse_response(
-        &self,
-        bytes: &[u8],
-    ) -> Result<AssistantTurn, Box<dyn std::error::Error>> {
-        parse_response(self.format, bytes)
-    }
 }
 
-pub fn parse_response(
-    format: &WireFormat,
-    bytes: &[u8],
-) -> Result<AssistantTurn, Box<dyn std::error::Error>> {
-    match format {
-        WireFormat::OpenAi => Ok(openai::chat::parse_response(bytes)?),
-        WireFormat::Anthropic => Ok(anthropic::parse_response(bytes)?),
-        WireFormat::OpenAiResponses => Ok(openai::responses::parse_response(bytes)?),
-    }
-}
 
 pub fn new_reconstructor(format: WireFormat) -> Box<dyn StreamReconstructor> {
     match format {

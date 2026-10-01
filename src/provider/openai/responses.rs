@@ -64,8 +64,9 @@ pub enum ResponsesOutputContent {
 }
 
 fn build_input<'r>(conv: &'r Conversation<'_>, cursor: usize) -> Vec<ResponsesInputItem<'r>> {
-    (&*conv.messages())[cursor..]
+    conv.messages()[cursor..]
         .iter()
+        .chain(conv.ephemeral())
         .filter_map(|m| match m {
             Message::User { content } => Some(ResponsesInputItem::Message {
                 role: "user",
@@ -331,5 +332,22 @@ mod tests {
         assert_eq!(turn.tool_calls()[0].name(), "Write");
         assert_eq!(turn.tool_calls()[0].arguments(), "partial");
         assert_eq!(rec.response_id(), Some("resp_1".to_string()));
+    }
+
+    #[test]
+    fn ephemeral_is_appended_last() {
+        use crate::model::{Conversation, Message, Tool};
+        let messages = vec![Message::new_user("hello".to_string())];
+        let extra = Message::new_user("extra".to_string());
+        let tools: Vec<Tool> = vec![];
+        let conv = Conversation::new("m", None, None, None, &messages, Some(&extra), &tools);
+        let input = build_input(&conv, 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(input.len(), 2);
+        assert!(matches!(
+            &input[1],
+            ResponsesInputItem::Message { role, content }
+            if *role == "user" && *content == "extra"
+        ));
     }
 }

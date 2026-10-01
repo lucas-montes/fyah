@@ -232,5 +232,5 @@ async fn start_workflow(
 #[serde(untagged)]
 pub enum StepAction {
     Llm { agent: String },
-    Command { command: String },
+    Command { command: String }, //TODO: replace this with an executable
 }

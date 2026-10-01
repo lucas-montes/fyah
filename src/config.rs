@@ -7,11 +7,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use valuable::Valuable;
 
-use crate::context::ContextConfig;
+use crate::context::{ContextConfig, ContextStrategy};
 use crate::executable::Executable;
 use crate::hooks::{
     Hook, OnErrorSlot, PostToolSlot, PrePromptSlot, PreToolSlot, SessionEndSlot,
-    SessionStartSlot, StepSlot, TurnEndSlot, TurnStartSlot, VerifySlot,
+    SessionStartSlot, StepSlot, VerifySlot,
 };
 use crate::model::Tool;
 use crate::provider::ProviderConfig;
@@ -34,6 +34,18 @@ pub enum OnInput {
     Interrupt,
 }
 
+/// Controls how the agent executes a turn's tool calls: wait for all of
+/// them before the next LLM request (`sequential`, the default), or proceed
+/// after the first completion while the rest keep running in the background
+/// (`async`).
+#[derive(Debug, Default, Deserialize, PartialEq, Eq, Valuable)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolExecution {
+    #[default]
+    Sequential,
+    Async,
+}
+
 /// Controls what happens to partially completed tool results when a tool
 /// batch is interrupted via `tools_on_input = "interrupt"`.
 #[derive(Debug, Default, Deserialize, PartialEq, Valuable)]
@@ -46,7 +58,14 @@ pub enum ToolsInterruptStrategy {
 
 /// Per-agent hooks. Nested as `[agents.<name>.hooks]` in TOML; single hook
 /// per slot. All fields private.
+///
+/// T01: `turn_start`/`turn_end` were removed (use `[agents.<name>.context]`
+/// T02: `context` was removed from this table (use `executable` in
+/// `[agents.<name>.context]` with `strategy = "custom"`).
+/// Unknown keys are rejected so stale configs fail fast
+/// with the offending field name instead of being silently ignored.
 #[derive(Debug, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AgentHooks {
     #[serde(default)]
     pre_prompt: Option<Hook<PrePromptSlot>>,
@@ -56,10 +75,6 @@ pub struct AgentHooks {
     post_tool: Option<Hook<PostToolSlot>>,
     #[serde(default)]
     on_error: Option<Hook<OnErrorSlot>>,
-    #[serde(default)]
-    turn_start: Option<Hook<TurnStartSlot>>,
-    #[serde(default)]
-    turn_end: Option<Hook<TurnEndSlot>>,
     #[serde(default)]
     verify_done: Option<Hook<VerifySlot>>,
 }
@@ -77,21 +92,76 @@ impl AgentHooks {
     pub fn on_error(&self) -> Option<&Hook<OnErrorSlot>> {
         self.on_error.as_ref()
     }
-    pub fn turn_start(&self) -> Option<&Hook<TurnStartSlot>> {
-        self.turn_start.as_ref()
-    }
-    pub fn turn_end(&self) -> Option<&Hook<TurnEndSlot>> {
-        self.turn_end.as_ref()
-    }
     pub fn verify_done(&self) -> Option<&Hook<VerifySlot>> {
         self.verify_done.as_ref()
     }
 }
 
 //TODO: we should create another struct that would use this to create a better agent config which would have all the tools defined instead of string
+/// Loop continuation limits (`[agents.<name>.limits]`). All fields optional;
+/// absent means unlimited. `max_iterations` stays on the agent itself and
+/// must not be duplicated here. `max_cost_usd` is rejected until the cost
+/// meter exists (deferred). Unknown keys are rejected so typos fail fast.
+#[derive(Debug, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsConfig {
+    #[serde(default)]
+    max_total_tokens_est: Option<u64>,
+    #[serde(default)]
+    max_tool_calls_total: Option<usize>,
+    #[serde(default)]
+    max_wall_time_secs: Option<u64>,
+    #[serde(default)]
+    max_consecutive_errors: Option<usize>,
+    #[serde(default)]
+    max_rpm: Option<usize>,
+    #[serde(default)]
+    context_headroom_pct: Option<u8>,
+    #[serde(default)]
+    max_stall_turns: Option<usize>,
+    #[serde(default)]
+    max_output_tokens_per_turn: Option<u32>,
+    #[serde(default)]
+    executable: Option<String>,
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+}
+
+impl LimitsConfig {
+    pub fn max_total_tokens_est(&self) -> Option<u64> {
+        self.max_total_tokens_est
+    }
+    pub fn max_tool_calls_total(&self) -> Option<usize> {
+        self.max_tool_calls_total
+    }
+    pub fn max_wall_time_secs(&self) -> Option<u64> {
+        self.max_wall_time_secs
+    }
+    pub fn max_consecutive_errors(&self) -> Option<usize> {
+        self.max_consecutive_errors
+    }
+    pub fn max_rpm(&self) -> Option<usize> {
+        self.max_rpm
+    }
+    pub fn context_headroom_pct(&self) -> Option<u8> {
+        self.context_headroom_pct
+    }
+    pub fn max_stall_turns(&self) -> Option<usize> {
+        self.max_stall_turns
+    }
+    pub fn max_output_tokens_per_turn(&self) -> Option<u32> {
+        self.max_output_tokens_per_turn
+    }
+    pub fn executable(&self) -> Option<&str> {
+        self.executable.as_deref()
+    }
+    pub fn max_cost_usd(&self) -> Option<f64> {
+        self.max_cost_usd
+    }
+}
+
 #[derive(Debug, Deserialize, PartialEq)]
-pub struct AgentConfig {
-    provider: String,
+pub struct AgentConfig {    provider: String,
     model: String,
     #[serde(default)]
     system_prompt: Option<String>,
@@ -106,9 +176,13 @@ pub struct AgentConfig {
     #[serde(default)]
     tools_interrupt_strategy: ToolsInterruptStrategy,
     #[serde(default)]
+    tool_execution: ToolExecution,
+    #[serde(default)]
     context: ContextConfig,
     #[serde(default)]
     hooks: AgentHooks,
+    #[serde(default)]
+    limits: LimitsConfig,
 }
 
 impl AgentConfig {
@@ -130,17 +204,17 @@ impl AgentConfig {
     pub fn on_error(&self) -> Option<&Hook<OnErrorSlot>> {
         self.hooks.on_error()
     }
-    pub fn turn_start(&self) -> Option<&Hook<TurnStartSlot>> {
-        self.hooks.turn_start()
-    }
-    pub fn turn_end(&self) -> Option<&Hook<TurnEndSlot>> {
-        self.hooks.turn_end()
-    }
     pub fn verify_done(&self) -> Option<&Hook<VerifySlot>> {
         self.hooks.verify_done()
     }
     pub fn context_config(&self) -> &ContextConfig {
         &self.context
+    }
+    pub fn limits(&self) -> &LimitsConfig {
+        &self.limits
+    }
+    pub fn tool_execution(&self) -> &ToolExecution {
+        &self.tool_execution
     }
     pub fn hooks(&self) -> &AgentHooks {
         &self.hooks
@@ -378,51 +452,107 @@ fn validate_executables(
     executables: &HashMap<String, Executable>,
     errors: &mut Vec<ConfigError>,
 ) {
-    let mut check = |owner: &str, slot: &str, exe: &str| {
+    fn check(
+        executables: &HashMap<String, Executable>,
+        errors: &mut Vec<ConfigError>,
+        owner: &str,
+        slot: &str,
+        exe: &str,
+    ) {
         if !executables.contains_key(exe) {
             errors.push(ConfigError::executable(owner, slot, exe));
         }
-    };
+    }
     for (agent_name, agent) in agents {
         if let Some(h) = agent.pre_prompt() {
-            check(agent_name, "pre_prompt", h.executable());
+            check(executables, errors, agent_name, "pre_prompt", h.executable());
         }
         if let Some(h) = agent.pre_tool() {
-            check(agent_name, "pre_tool", h.executable());
+            check(executables, errors, agent_name, "pre_tool", h.executable());
         }
         if let Some(h) = agent.post_tool() {
-            check(agent_name, "post_tool", h.executable());
+            check(executables, errors, agent_name, "post_tool", h.executable());
         }
         if let Some(h) = agent.on_error() {
-            check(agent_name, "on_error", h.executable());
-        }
-        if let Some(h) = agent.turn_start() {
-            check(agent_name, "turn_start", h.executable());
-        }
-        if let Some(h) = agent.turn_end() {
-            check(agent_name, "turn_end", h.executable());
+            check(executables, errors, agent_name, "on_error", h.executable());
         }
         if let Some(h) = agent.verify_done() {
-            check(agent_name, "verify_done", h.executable());
+            check(executables, errors, agent_name, "verify_done", h.executable());
+        }
+        // T02: [agents.<name>.context] custom strategy validation.
+        // Missing executable with custom, unknown executable, or executable
+        // without custom are all config-time errors (no silent misconfig).
+        let ctx_cfg = agent.context_config();
+        match (ctx_cfg.strategy(), ctx_cfg.executable()) {
+            (ContextStrategy::Custom, None) => {
+                errors.push(ConfigError::context(
+                    agent_name,
+                    "strategy = \"custom\" requires executable = \"<executables key>\"",
+                ));
+            }
+            (ContextStrategy::Custom, Some(exe)) => {
+                check(executables, errors, agent_name, "context", exe);
+            }
+            (_, Some(_)) => {
+                errors.push(ConfigError::context(
+                    agent_name,
+                    "executable requires strategy = \"custom\"",
+                ));
+            }
+            _ => {}
+        }
+        // T05: [agents.<name>.limits] validation (thresholds only; no
+        // enforcement here). Cost key is rejected until the meter exists.
+        let limits = agent.limits();
+        if limits.max_cost_usd().is_some() {
+            errors.push(ConfigError::limits(
+                agent_name,
+                "max_cost_usd is deferred: cost meter not implemented yet",
+            ));
+        }
+        if let Some(pct) = limits.context_headroom_pct() {
+            if pct == 0 || pct > 100 {
+                errors.push(ConfigError::limits(
+                    agent_name,
+                    "context_headroom_pct must be 1..=100",
+                ));
+            }
+        }
+        if limits.max_rpm() == Some(0) {
+            errors.push(ConfigError::limits(
+                agent_name,
+                "max_rpm must be >= 1 (omit for unlimited)",
+            ));
+        }
+        if let Some(exe) = limits.executable() {
+            check(executables, errors, agent_name, "limits", exe);
         }
     }
     for (wf_name, wf) in workflows {
         if let Some(h) = wf.session_start() {
-            check(wf_name, "session_start", h.executable());
+            check(executables, errors, wf_name, "session_start", h.executable());
         }
         if let Some(h) = wf.session_end() {
-            check(wf_name, "session_end", h.executable());
+            check(executables, errors, wf_name, "session_end", h.executable());
         }
         for (step_name, step) in &wf.steps {
             if let Some(h) = step.before() {
                 check(
+                    executables,
+                    errors,
                     &format!("{wf_name}.{step_name}"),
                     "before",
                     h.executable(),
                 );
             }
             if let Some(h) = step.after() {
-                check(&format!("{wf_name}.{step_name}"), "after", h.executable());
+                check(
+                    executables,
+                    errors,
+                    &format!("{wf_name}.{step_name}"),
+                    "after",
+                    h.executable(),
+                );
             }
         }
     }
@@ -456,6 +586,8 @@ pub enum ConfigError {
     UnknownModel(String),
     UnknownAgent(String),
     UnknownExecutable(String),
+    InvalidContext(String),
+    InvalidLimits(String),
     Validation(Vec<ConfigError>),
 }
 
@@ -482,6 +614,14 @@ impl ConfigError {
 
     fn tool_executable(tool: &str, exe: &str) -> Self {
         Self::UnknownExecutable(format!("{exe} (referenced by tool {tool})"))
+    }
+
+    fn context(agent: &str, detail: &str) -> Self {
+        Self::InvalidContext(format!("{detail} (referenced by agent {agent}.context)"))
+    }
+
+    fn limits(agent: &str, detail: &str) -> Self {
+        Self::InvalidLimits(format!("{detail} (referenced by agent {agent}.limits)"))
     }
 }
 
@@ -530,6 +670,8 @@ impl std::fmt::Display for ConfigError {
             Self::UnknownModel(m) => write!(f, "unknown model: {m}"),
             Self::UnknownAgent(a) => write!(f, "unknown agent: {a}"),
             Self::UnknownExecutable(e) => write!(f, "unknown executable: {e}"),
+            Self::InvalidContext(c) => write!(f, "invalid context config: {c}"),
+            Self::InvalidLimits(l) => write!(f, "invalid limits config: {l}"),
         }
     }
 }
@@ -664,6 +806,10 @@ impl<'a> AgentView<'a> {
         &self.agent.tools_interrupt_strategy
     }
 
+    pub fn tool_execution(&self) -> &ToolExecution {
+        &self.agent.tool_execution
+    }
+
     pub fn streaming(&self) -> bool {
         self.model.streaming
     }
@@ -682,6 +828,20 @@ impl<'a> AgentView<'a> {
 
     pub fn model_config(&self) -> &ModelConfig {
         self.model
+    }
+
+    /// Per-request output cap: the lower of the model default and the
+    /// `[agents.<name>.limits]` per-turn cap (L10). `None` means uncapped.
+    pub fn request_max_tokens(&self) -> Option<u32> {
+        match (
+            self.model.max_tokens(),
+            self.agent.limits.max_output_tokens_per_turn(),
+        ) {
+            (Some(m), Some(l)) => Some(m.min(l)),
+            (Some(m), None) => Some(m),
+            (None, Some(l)) => Some(l),
+            (None, None) => None,
+        }
     }
 
     pub fn max_iterations(&self) -> usize {
@@ -800,13 +960,63 @@ on_failure = "done"
     }
 
     #[test]
+    fn tool_execution_defaults_to_sequential() {
+        let config: Config = toml::from_str(&minimal_toml("")).expect("parse");
+        let (workspace, _tools) = config.validate().expect("valid");
+        let agent = workspace.get_agent("coder").expect("agent exists");
+        assert_eq!(agent.tool_execution(), &ToolExecution::Sequential);
+        assert_eq!(
+            agent.agent_config().tool_execution(),
+            &ToolExecution::Sequential
+        );
+    }
+
+    #[test]
+    fn tool_execution_parses_async_and_rejects_unknown() {
+        // Inject into the existing [agents.coder] table (a second table
+        // header would be a duplicate-table TOML error).
+        let raw = minimal_toml("").replacen(
+            "max_concurrent_tools = 1",
+            "max_concurrent_tools = 1\ntool_execution = \"async\"",
+            1,
+        );
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let (workspace, _tools) = config.validate().expect("valid");
+        let agent = workspace.get_agent("coder").expect("agent exists");
+        assert_eq!(agent.tool_execution(), &ToolExecution::Async);
+
+        let bad = minimal_toml("").replacen(
+            "max_concurrent_tools = 1",
+            "max_concurrent_tools = 1\ntool_execution = \"bogus\"",
+            1,
+        );
+        toml::from_str::<Config>(&bad).expect_err("unknown mode must fail");
+    }
+
+    #[test]
     fn hook_executable_ref_must_exist() {
         let raw = minimal_toml(
-            "[agents.coder.hooks]\nturn_start = { executable = \"missing\" }\n",
+            "[agents.coder.hooks]\npre_prompt = { executable = \"missing\" }\n",
         );
         let config: Config = toml::from_str(&raw).expect("parse");
         let err = config.validate().expect_err("must fail");
         assert!(format!("{err}").contains("missing"));
+    }
+
+    #[test]
+    fn removed_turn_hooks_fail_parse_with_field_name() {
+        // T01: turn_start/turn_end were removed (use context custom strategy).
+        // deny_unknown_fields surfaces the stale key so configs fail fast.
+        for slot in ["turn_start", "turn_end"] {
+            let raw = minimal_toml(&format!(
+                "[agents.coder.hooks]\n{slot} = {{ executable = \"audit_sh\" }}\n"
+            ));
+            let err = toml::from_str::<Config>(&raw).expect_err("must fail parse");
+            assert!(
+                format!("{err}").contains(slot),
+                "error should name the removed slot"
+            );
+        }
     }
 
     #[test]
@@ -822,8 +1032,7 @@ session_start = { executable = "audit_sh" }
 session_end = { executable = "audit_sh" }
 
 [agents.coder.hooks]
-turn_start = { executable = "audit_sh" }
-turn_end = { executable = "audit_sh" }
+pre_prompt = { executable = "audit_sh" }
 verify_done = { executable = "audit_sh" }
 
 [agents.coder.context]
@@ -836,11 +1045,114 @@ max_messages = 20
         let agent = workspace
             .get_agent("coder")
             .expect("agent exists");
-        assert!(agent.agent_config().turn_start().is_some());
+        assert!(agent.agent_config().pre_prompt().is_some());
         assert!(agent.agent_config().verify_done().is_some());
         assert!(workspace
             .get_workflow("default")
             .session_start()
             .is_some());
+    }
+
+    #[test]
+    fn context_custom_table_parses_and_validates() {
+        let raw = minimal_toml(
+            r#"
+[executables.ctx_sh]
+type = "command"
+command = "./hooks/context.sh"
+
+[agents.coder.context]
+strategy = "custom"
+executable = "ctx_sh"
+"#,
+        );
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let (workspace, _tools) = config.validate().expect("valid");
+        let agent = workspace.get_agent("coder").expect("agent exists");
+        assert_eq!(
+            agent.agent_config().context_config().executable(),
+            Some("ctx_sh")
+        );
+
+        // Custom without executable fails.
+        let raw = minimal_toml("[agents.coder.context]\nstrategy = \"custom\"\n");
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let err = config.validate().expect_err("must fail");
+        assert!(format!("{err}").contains("requires executable"));
+
+        // Unknown executable fails.
+        let raw = minimal_toml(
+            "[agents.coder.context]\nstrategy = \"custom\"\nexecutable = \"missing\"\n",
+        );
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let err = config.validate().expect_err("must fail");
+        assert!(format!("{err}").contains("missing"));
+
+        // Executable without custom fails.
+        let raw = minimal_toml(
+            r#"
+[executables.ctx_sh]
+type = "command"
+command = "./hooks/context.sh"
+
+[agents.coder.context]
+strategy = "slidingwindow"
+executable = "ctx_sh"
+"#,
+        );
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let err = config.validate().expect_err("must fail");
+        assert!(format!("{err}").contains("requires strategy"));
+
+        // Old [agents.*.hooks] context key fails parse (no back-compat).
+        let raw =
+            minimal_toml("[agents.coder.hooks]\ncontext = { executable = \"ctx_sh\" }\n");
+        let err = toml::from_str::<Config>(&raw).expect_err("must fail parse");
+        assert!(format!("{err}").contains("context"));
+    }
+
+    #[test]
+    fn limits_table_parses_and_validates() {
+        let raw = minimal_toml(
+            r#"
+[executables.guard]
+type = "command"
+command = "./hooks/guard.sh"
+
+[agents.coder.limits]
+max_total_tokens_est = 200000
+max_tool_calls_total = 100
+max_wall_time_secs = 600
+max_consecutive_errors = 3
+max_rpm = 60
+context_headroom_pct = 85
+max_stall_turns = 3
+max_output_tokens_per_turn = 4096
+executable = "guard"
+"#,
+        );
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let (workspace, _tools) = config.validate().expect("valid");
+        let agent = workspace.get_agent("coder").expect("agent exists");
+        assert_eq!(agent.agent_config().limits().max_tool_calls_total(), Some(100));
+        assert_eq!(agent.agent_config().limits().executable(), Some("guard"));
+
+        // Cost key is rejected until the meter exists.
+        let raw = minimal_toml("[agents.coder.limits]\nmax_cost_usd = 5.0\n");
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let err = config.validate().expect_err("must fail");
+        assert!(format!("{err}").contains("deferred"));
+
+        // Unknown limits executable fails.
+        let raw = minimal_toml("[agents.coder.limits]\nexecutable = \"missing\"\n");
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let err = config.validate().expect_err("must fail");
+        assert!(format!("{err}").contains("missing"));
+
+        // Headroom out of range fails.
+        let raw = minimal_toml("[agents.coder.limits]\ncontext_headroom_pct = 0\n");
+        let config: Config = toml::from_str(&raw).expect("parse");
+        let err = config.validate().expect_err("must fail");
+        assert!(format!("{err}").contains("1..=100"));
     }
 }

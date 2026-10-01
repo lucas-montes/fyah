@@ -43,6 +43,7 @@ max_concurrent_tools = 10
 on_input = "queue"
 tools_on_input = "queue"
 tools_interrupt_strategy = "keep"
+# tool_execution = "async"  # sequential (default) | async
 
 
 [runtime]
@@ -81,16 +82,6 @@ type = "command"
 command = "./exes/step_after.sh"
 fail_mode = "message"
 
-[executables.turn_start]
-type = "command"
-command = "./exes/turn_start.sh"
-fail_mode = "message"
-
-[executables.turn_end]
-type = "command"
-command = "./exes/turn_end.sh"
-fail_mode = "message"
-
 [executables.verify_done]
 type = "command"
 command = "./exes/verify_done.sh"
@@ -114,6 +105,16 @@ fail_mode = "message"
 [executables.on_error]
 type = "command"
 command = "./exes/on_error.sh"
+fail_mode = "message"
+
+[executables.context]
+type = "command"
+command = "./exes/context.sh"
+fail_mode = "message"
+
+[executables.loop_guard]
+type = "command"
+command = "./exes/loop_guard.sh"
 fail_mode = "message"
 
 # ============================================================================
@@ -158,39 +159,62 @@ fail_mode = "message"
 #   error shape: {"code":"aborted","scope":"step"|"workflow","detail":"..."}
 #
 # --- Agent hooks: [agents.<name>.hooks] --------------------------------------
-# turn_start: every loop iteration, before the LLM request.
-#   in:  { agent, iteration, n_messages, queued_len, token_estimate }
-#   out: {"decision":"continue"} | {"decision":"prune_to","keep":N} | {"decision":"abort",...}
-# turn_end: after the model responds, before tool execution.
-#   in:  { agent, iteration, n_tool_calls, has_text }
-#   out: {"decision":"continue"} | {"decision":"drop_turn"}
+# Execution order per iteration: limits -> context policy -> context custom
+#   -> pre_prompt -> LLM -> verify_done. Tool calls wrap with
+#   pre_tool / post_tool; failures route via on_error (phase="request").
+# REMOVED (no back-compat): turn_start/turn_end deleted; use
+#   [agents.<name>.context] strategy="custom" for dynamic compaction.
+# context: custom compaction (strategy = "custom" + executable in context table).
+#   in:  { agent, iteration, n_messages, token_estimate, tool_output_bytes,
+#          max_tokens?, max_messages?, max_output_bytes? }
+#   out: {"decision":"continue"} | {"decision":"prune_to","keep":N}
+#      | {"decision":"truncate_outputs","max_bytes":N}
+#      | {"decision":"drop_tool_results","ids":[...]} | {"decision":"abort",...}
 # verify_done: when the model makes no tool calls (claims to be done).
 #   A NotDone verdict is injected as a user message and the loop continues.
 #   in:  { agent, iteration, last_text?, n_messages }
 #   out: {"decision":"done"} | {"decision":"not_done","error":{"code":"check_failed","check":"...","detail":"..."}}
-# pre_prompt: before the LLM request (context injection point).
-#   in:  { agent, n_messages }
-#   out: {"decision":"continue"} | {"decision":"abort",...}
-#   NOTE: accepted by config but not executed by the loop yet.
+# pre_prompt: before the LLM request.
+#   in:  { agent, iteration, n_messages }
+#   out: {"decision":"continue"}
+#      | {"decision":"inject","mode":"ephemeral"|"persistent","content":"..."}
+#      | {"decision":"abort",...}
 # pre_tool: before a single tool call.
 #   in:  { agent, call_id, tool, args }
 #   out: {"decision":"continue"} | {"decision":"deny","error":{"code":"denied","rule":"...","detail":"..."}}
-#   NOTE: accepted by config but not executed by the loop yet.
 # post_tool: after a single tool result.
 #   in:  { agent, call_id, tool, output_len }
 #   out: {"decision":"continue"} | {"decision":"drop_result"}
-#   NOTE: accepted by config but not executed by the loop yet.
 # on_error: on LLM/tool errors.
 #   in:  { agent, phase, error }
 #   out: {"decision":"continue"} | {"decision":"abort",...}
-#   NOTE: accepted by config but not executed by the loop yet.
 #
-# --- Context: [agents.<name>.context] ----------------------------------------
-# strategy = "null" | "slidingwindow" | "budget"   # default: "null"
+# --- Context: [agents.<name>.context] ------------------------------------------
+# strategy = "null" | "slidingwindow" | "budget" | "custom"   # default: "null"
 # max_messages = <int, optional>      # slidingwindow: keep newest N messages
 # max_tokens = <int, optional>        # budget: prune when estimate exceeds N
 # max_output_bytes = <int, optional>  # budget: truncate tool outputs past N bytes
-# Enforced every iteration before turn_start; deterministic, no extra LLM call.
+# executable = "<key>"                # required iff strategy = "custom"
+# Enforced every iteration after the limits gate; deterministic policies need
+# no extra LLM call. Runtime failures follow the executable's own fail_mode.
+# Full inventory: context/hooks.md.
+#
+# --- Limits: [agents.<name>.limits] --------------------------------------------
+# All optional; absent means unlimited. Checked first each iteration, before
+# verify_done ("can we keep going" wins over "are we done").
+# max_total_tokens_est = <int>   # cumulative heuristic estimate
+# max_tool_calls_total = <int>   # completed + in-flight tool calls
+# max_wall_time_secs = <int>     # wall-clock per agent loop
+# max_consecutive_errors = <int> # request/tool error streak
+# max_rpm = <int, >= 1>          # LLM requests per rolling 60s (throttled)
+# context_headroom_pct = <1-100> # stop when estimate breaches pct of
+#                                # max_tokens and strategy = "null" (unmanaged)
+# max_stall_turns = <int>        # turns without message growth
+# max_output_tokens_per_turn = <int>  # clamps the outgoing request cap
+# executable = "<key>"           # custom guard; in: full meter snapshot,
+#                                # out: continue | stop{reason}
+# NOTE: max_cost_usd is deferred (cost meter not implemented); setting it
+# fails validation. max_iterations stays on the agent itself.
 #
 # --- Worked example (uncomment to enable) ------------------------------------
 # [executables.audit_sh]
@@ -207,13 +231,25 @@ fail_mode = "message"
 # after = { executable = "audit_sh" }
 #
 # [agents.coder.hooks]
-# turn_start = { executable = "audit_sh" }
-# turn_end = { executable = "audit_sh" }
 # verify_done = { executable = "audit_sh" }
+# pre_prompt = { executable = "audit_sh" }
+# pre_tool = { executable = "audit_sh" }
+# post_tool = { executable = "audit_sh" }
+# on_error = { executable = "audit_sh" }
 #
 # [agents.coder.context]
 # strategy = "slidingwindow"
 # max_messages = 50
+#
+# [agents.coder.context]
+# strategy = "custom"
+# executable = "audit_sh"
+#
+# [agents.coder.limits]
+# max_total_tokens_est = 200000
+# max_tool_calls_total = 100
+# max_wall_time_secs = 600
+# executable = "audit_sh"
 
 
 [workflows.default]
@@ -256,8 +292,6 @@ pre_prompt = { executable = "pre_prompt" }
 pre_tool = { executable = "pre_tool" }
 post_tool = { executable = "post_tool" }
 on_error = { executable = "on_error" }
-turn_start = { executable = "turn_start" }
-turn_end = { executable = "turn_end" }
 verify_done = { executable = "verify_done" }
 
 [agents.default.hooks]
@@ -265,6 +299,4 @@ pre_prompt = { executable = "pre_prompt" }
 pre_tool = { executable = "pre_tool" }
 post_tool = { executable = "post_tool" }
 on_error = { executable = "on_error" }
-turn_start = { executable = "turn_start" }
-turn_end = { executable = "turn_end" }
 verify_done = { executable = "verify_done" }

@@ -26,7 +26,6 @@ pub struct Checkpoint {
     workflow: String,
     current: String,
     messages: Vec<Message>,
-    queued: Vec<String>,
     timestamp: String,
 }
 
@@ -40,11 +39,8 @@ impl Checkpoint {
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
-    pub fn queued(&self) -> &[String] {
-        &self.queued
-    }
-    pub fn into_parts(self) -> (String, String, Vec<Message>, Vec<String>) {
-        (self.workflow, self.current, self.messages, self.queued)
+    pub fn into_parts(self) -> (String, String, Vec<Message>) {
+        (self.workflow, self.current, self.messages)
     }
 }
 
@@ -147,7 +143,6 @@ impl Session {
         workflow: &str,
         current: &str,
         messages: &[Message],
-        queued: &[String],
     ) -> std::io::Result<()> {
         let dir = self.session_dir();
         std::fs::create_dir_all(&dir)?;
@@ -156,14 +151,12 @@ impl Session {
             workflow: &'a str,
             current: &'a str,
             messages: &'a [Message],
-            queued: &'a [String],
             timestamp: String,
         }
         let cp = CheckpointRef {
             workflow,
             current,
             messages,
-            queued,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         let json = serde_json::to_string_pretty(&cp).map_err(std::io::Error::other)?;
@@ -244,15 +237,13 @@ mod tests {
             None,
         );
         let messages = vec![Message::new_user("hello".to_string())];
-        let queued = vec!["queued msg".to_string()];
         session
-            .save_checkpoint("default", "plan", &messages, &queued)
+            .save_checkpoint("default", "plan", &messages)
             .unwrap();
         let loaded = session.load_checkpoint().expect("should load");
         assert_eq!(loaded.workflow(), "default");
         assert_eq!(loaded.current(), "plan");
         assert_eq!(loaded.messages().len(), 1);
-        assert_eq!(loaded.queued().len(), 1);
         let _ = std::fs::remove_dir_all(session.session_dir());
     }
 

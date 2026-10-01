@@ -2,7 +2,6 @@
 # pre_tool hook: before a single tool call.
 # in:  { agent, call_id, tool, args }
 # out: {"decision":"continue"} | {"decision":"deny","error":{"code":"denied","rule":"...","detail":"..."}}
-# NOTE: accepted by config but not executed by the loop yet.
 # Empty stdout means approval (Continue). Diagnostics go to stderr only.
 set -euo pipefail
 INPUT=$(cat)

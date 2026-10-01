@@ -109,6 +109,19 @@ pub struct Hook<T: Slot> {
 }
 
 impl<T: Slot> Hook<T> {
+    /// Build a hook reference programmatically (e.g. when the executable key
+    /// lives in a sibling config table rather than a `Hook` TOML table).
+    /// Options take their `Default`; TOML-supplied options still deserialize.
+    pub fn new(executable: String) -> Self
+    where
+        T::Options: Default,
+    {
+        Self {
+            executable,
+            options: T::Options::default(),
+        }
+    }
+
     pub fn executable(&self) -> &str {
         &self.executable
     }
@@ -131,19 +144,8 @@ pub struct SessionStartOptions;
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct SessionEndOptions;
 
-#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
-pub struct TurnStartOptions {
-    max_tokens: Option<usize>,
-}
-
-impl TurnStartOptions {
-    pub fn max_tokens(&self) -> Option<usize> {
-        self.max_tokens
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
-pub struct TurnEndOptions;
+// T01: turn_start/turn_end removed (use [agents.<name>.context] strategy="custom").
+// T03: TurnStartInput/TurnStartOutcome replaced by CustomInput/CustomOutcome.
 
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct VerifyOptions {
@@ -219,10 +221,7 @@ impl ContextHookOptions {
 pub struct SessionStartSlot;
 #[derive(Debug, PartialEq, Eq)]
 pub struct SessionEndSlot;
-#[derive(Debug, PartialEq, Eq)]
-pub struct TurnStartSlot;
-#[derive(Debug, PartialEq, Eq)]
-pub struct TurnEndSlot;
+// T01: TurnStartSlot/TurnEndSlot removed (use context custom strategy).
 #[derive(Debug, PartialEq, Eq)]
 pub struct VerifySlot;
 #[derive(Debug, PartialEq, Eq)]
@@ -235,6 +234,8 @@ pub struct PreToolSlot;
 pub struct PostToolSlot;
 #[derive(Debug, PartialEq, Eq)]
 pub struct OnErrorSlot;
+#[derive(Debug, PartialEq, Eq)]
+pub struct LoopGuardSlot;
 #[derive(Debug, PartialEq, Eq)]
 pub struct ContextSlot;
 
@@ -313,28 +314,40 @@ impl<'a> SessionEndInput<'a> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TurnStartInput<'a> {
+pub struct CustomInput<'a> {
     agent: &'a str,
     iteration: usize,
     n_messages: usize,
-    queued_len: usize,
     token_estimate: usize,
+    tool_output_bytes: usize,
+    max_tokens: Option<u64>,
+    max_messages: Option<usize>,
+    max_output_bytes: Option<usize>,
 }
 
-impl<'a> TurnStartInput<'a> {
+impl<'a> CustomInput<'a> {
+    // Nine fields mirror the meter snapshot; a struct literal at call sites
+    // would be noisier than the lint it silences.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent: &'a str,
         iteration: usize,
         n_messages: usize,
-        queued_len: usize,
         token_estimate: usize,
+        tool_output_bytes: usize,
+        max_tokens: Option<u64>,
+        max_messages: Option<usize>,
+        max_output_bytes: Option<usize>,
     ) -> Self {
         Self {
             agent,
             iteration,
             n_messages,
-            queued_len,
             token_estimate,
+            tool_output_bytes,
+            max_tokens,
+            max_messages,
+            max_output_bytes,
         }
     }
 
@@ -350,47 +363,12 @@ impl<'a> TurnStartInput<'a> {
         self.n_messages
     }
 
-    pub fn queued_len(&self) -> usize {
-        self.queued_len
-    }
-
     pub fn token_estimate(&self) -> usize {
         self.token_estimate
     }
-}
 
-#[derive(Debug, Serialize)]
-pub struct TurnEndInput<'a> {
-    agent: &'a str,
-    iteration: usize,
-    n_tool_calls: usize,
-    has_text: bool,
-}
-
-impl<'a> TurnEndInput<'a> {
-    pub fn new(agent: &'a str, iteration: usize, n_tool_calls: usize, has_text: bool) -> Self {
-        Self {
-            agent,
-            iteration,
-            n_tool_calls,
-            has_text,
-        }
-    }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn iteration(&self) -> usize {
-        self.iteration
-    }
-
-    pub fn n_tool_calls(&self) -> usize {
-        self.n_tool_calls
-    }
-
-    pub fn has_text(&self) -> bool {
-        self.has_text
+    pub fn tool_output_bytes(&self) -> usize {
+        self.tool_output_bytes
     }
 }
 
@@ -466,16 +444,25 @@ impl<'a> StepHookInput<'a> {
 #[derive(Debug, Serialize)]
 pub struct PrePromptInput<'a> {
     agent: &'a str,
+    iteration: usize,
     n_messages: usize,
 }
 
 impl<'a> PrePromptInput<'a> {
-    pub fn new(agent: &'a str, n_messages: usize) -> Self {
-        Self { agent, n_messages }
+    pub fn new(agent: &'a str, iteration: usize, n_messages: usize) -> Self {
+        Self {
+            agent,
+            iteration,
+            n_messages,
+        }
     }
 
     pub fn agent(&self) -> &str {
         self.agent
+    }
+
+    pub fn iteration(&self) -> usize {
+        self.iteration
     }
 
     pub fn n_messages(&self) -> usize {
@@ -578,6 +565,50 @@ impl<'a> OnErrorInput<'a> {
     }
 }
 
+/// Snapshot for the `[agents.<name>.limits]` guard executable: every meter
+/// the harness tracks, so custom logic can stop the loop on any condition.
+#[derive(Debug, Serialize)]
+pub struct LoopGuardInput<'a> {
+    agent: &'a str,
+    iteration: usize,
+    n_messages: usize,
+    token_estimate: usize,
+    total_tokens_est: u64,
+    tool_calls_total: usize,
+    elapsed_secs: u64,
+    consecutive_errors: u32,
+    stalled_turns: u32,
+}
+
+impl<'a> LoopGuardInput<'a> {
+    // Nine fields mirror the meter snapshot; a struct literal at call sites
+    // would be noisier than the lint it silences.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        agent: &'a str,
+        iteration: usize,
+        n_messages: usize,
+        token_estimate: usize,
+        total_tokens_est: u64,
+        tool_calls_total: usize,
+        elapsed_secs: u64,
+        consecutive_errors: u32,
+        stalled_turns: u32,
+    ) -> Self {
+        Self {
+            agent,
+            iteration,
+            n_messages,
+            token_estimate,
+            total_tokens_est,
+            tool_calls_total,
+            elapsed_secs,
+            consecutive_errors,
+            stalled_turns,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Outputs (concrete per slot, Deserialize from stdout JSON)
 // ---------------------------------------------------------------------------
@@ -597,30 +628,26 @@ pub enum SessionEndOutcome {
     Continue,
 }
 
+// T03: Custom compaction outcome. Shapes of continue/prune_to/abort match
+// the old TurnStartOutcome so existing scripts keep parsing.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
-pub enum TurnStartOutcome {
+pub enum CustomOutcome {
     #[default]
     Continue,
     PruneTo {
         keep: usize,
     },
+    TruncateOutputs {
+        max_bytes: usize,
+    },
+    DropToolResults {
+        ids: Vec<String>,
+    },
     Abort { error: HookError },
 }
 
-impl TurnStartOutcome {
-    pub fn is_continue(&self) -> bool {
-        matches!(self, Self::Continue)
-    }
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
-#[serde(tag = "decision", rename_all = "snake_case")]
-pub enum TurnEndOutcome {
-    #[default]
-    Continue,
-    DropTurn,
-}
+// T01: TurnEndOutcome removed with turn_end (no replacement; verify_done covers done-checks).
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
@@ -652,11 +679,22 @@ pub enum StepHookOutcome {
     AbortWorkflow { error: HookError },
 }
 
+/// Injection scope for [`PrePromptOutcome::Inject`].
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectMode {
+    /// Visible to this LLM call only; never persisted to history.
+    Ephemeral,
+    /// Appended as a `User` message; auditable and billed like any message.
+    Persistent,
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum PrePromptOutcome {
     #[default]
     Continue,
+    Inject { mode: InjectMode, content: String },
     Abort { error: HookError },
 }
 
@@ -684,6 +722,15 @@ pub enum OnErrorOutcome {
     Abort { error: HookError },
 }
 
+/// Decision of the `[agents.<name>.limits]` guard executable.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum LoopGuardOutcome {
+    #[default]
+    Continue,
+    Stop { reason: String },
+}
+
 // ---------------------------------------------------------------------------
 // Slot impls
 // ---------------------------------------------------------------------------
@@ -709,29 +756,6 @@ impl Slot for SessionEndSlot {
     type Options = SessionEndOptions;
     type Input<'a> = SessionEndInput<'a>;
     type Output = SessionEndOutcome;
-}
-
-impl Slot for TurnStartSlot {
-    const NAME: &'static str = "turn_start";
-    type Options = TurnStartOptions;
-    type Input<'a> = TurnStartInput<'a>;
-    type Output = TurnStartOutcome;
-
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => TurnStartOutcome::Abort {
-                error: HookError::aborted(AbortScope::Turn, &error.to_string()),
-            },
-        }
-    }
-}
-
-impl Slot for TurnEndSlot {
-    const NAME: &'static str = "turn_end";
-    type Options = TurnEndOptions;
-    type Input<'a> = TurnEndInput<'a>;
-    type Output = TurnEndOutcome;
 }
 
 impl Slot for VerifySlot {
@@ -824,14 +848,35 @@ impl Slot for OnErrorSlot {
     }
 }
 
+impl Slot for LoopGuardSlot {
+    const NAME: &'static str = "loop_guard";
+    type Options = EmptyOptions;
+    type Input<'a> = LoopGuardInput<'a>;
+    type Output = LoopGuardOutcome;
+
+    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => LoopGuardOutcome::Stop {
+                reason: error.to_string(),
+            },
+        }
+    }
+}
+
 impl Slot for ContextSlot {
     const NAME: &'static str = "context";
     type Options = ContextHookOptions;
-    type Input<'a> = TurnStartInput<'a>;
-    type Output = TurnStartOutcome;
+    type Input<'a> = CustomInput<'a>;
+    type Output = CustomOutcome;
 
     fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        TurnStartSlot::fallback(error, fail_mode)
+        match fail_mode {
+            FailMode::Message => Self::Output::default(),
+            FailMode::AbortStep | FailMode::AbortWorkflow => CustomOutcome::Abort {
+                error: HookError::aborted(AbortScope::Turn, &error.to_string()),
+            },
+        }
     }
 }
 
@@ -873,6 +918,34 @@ impl<'a> HookState<'a> {
         let remove = self.messages.len() - keep;
         self.messages.drain(..remove);
         remove
+    }
+
+    /// Truncate every `Tool` message longer than `max_bytes`, mirroring
+    /// [`crate::context::ContextOutcome::TruncateOutputs`]. Returns the
+    /// number of messages truncated.
+    pub fn truncate_outputs(&mut self, max_bytes: usize) -> usize {
+        let mut truncated = 0;
+        for msg in self.messages.iter_mut() {
+            if let Message::Tool { content, .. } = msg
+                && content.len() > max_bytes
+            {
+                content.truncate(max_bytes);
+                content.push_str("\n[truncated]");
+                truncated += 1;
+            }
+        }
+        truncated
+    }
+
+    /// Drop `Tool` messages whose `tool_call_id` is listed. Returns the
+    /// number of messages removed.
+    pub fn drop_tool_results(&mut self, ids: &[String]) -> usize {
+        let before = self.messages.len();
+        self.messages.retain(|msg| match msg {
+            Message::Tool { tool_call_id, .. } => !ids.contains(tool_call_id),
+            _ => true,
+        });
+        before - self.messages.len()
     }
 }
 
@@ -1089,5 +1162,48 @@ fn run_builtin_name(builtin: &str) -> Result<(), ExecutableError> {
         _ => Err(ExecutableError::UnknownBuiltin {
             name: builtin.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_outcome_shapes() {
+        // Legacy shapes keep parsing (scripts emitting prune_to/continue/abort).
+        let out: CustomOutcome =
+            serde_json::from_str(r#"{"decision":"continue"}"#).expect("parse");
+        assert_eq!(out, CustomOutcome::Continue);
+        let out: CustomOutcome =
+            serde_json::from_str(r#"{"decision":"prune_to","keep":5}"#).expect("parse");
+        assert_eq!(out, CustomOutcome::PruneTo { keep: 5 });
+        // New ops.
+        let out: CustomOutcome =
+            serde_json::from_str(r#"{"decision":"truncate_outputs","max_bytes":100}"#)
+                .expect("parse");
+        assert_eq!(out, CustomOutcome::TruncateOutputs { max_bytes: 100 });
+        let out: CustomOutcome =
+            serde_json::from_str(r#"{"decision":"drop_tool_results","ids":["a"]}"#)
+                .expect("parse");
+        assert_eq!(
+            out,
+            CustomOutcome::DropToolResults {
+                ids: vec!["a".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn hook_state_truncate_and_drop() {
+        let mut messages = vec![
+            Message::new_user("hello".to_string()),
+            Message::new_tool("a".to_string(), "0123456789".to_string()),
+            Message::new_tool("b".to_string(), "xy".to_string()),
+        ];
+        let mut state = HookState::new(&mut messages, "s");
+        assert_eq!(state.truncate_outputs(4), 1);
+        assert_eq!(state.drop_tool_results(&["b".to_string()]), 1);
+        assert_eq!(state.message_count(), 2);
     }
 }
