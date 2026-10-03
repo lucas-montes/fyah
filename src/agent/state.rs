@@ -39,14 +39,16 @@ pub struct LoopState<'m> {
     pub last_progress_len: usize,
 }
 
-pub struct LoopDeps<'a, C: LlmClient, R: HookRunner> {
+pub struct LoopDeps<'a> {
     pub agent_name: &'a str,
-    pub client: &'a C,
-    pub runner: &'a R,
+    pub client: &'a dyn LlmClient,
+    pub runner: &'a dyn HookRunner,
     pub view: ConfigView,
     pub session: Arc<Session>,
     pub out: OutboundChannel,
-    pub rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
+    /// Borrowed, not owned: consecutive agent steps in one workflow share the
+    /// same inbound channel, so no phase may consume it.
+    pub rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
 }
 
 /// Outcome of the request phase: a turn for the tool phase (`NewTurn`), another
@@ -62,26 +64,58 @@ pub enum RequestOutcome {
 
 /// Why the request phase stopped the loop. `RequestFailed` covers operational
 /// failures; every other variant is a policy, hook, or user decision.
+///
+/// `UserStop` ends the current step (the user interrupted it; a workflow step
+/// reports success and advances to `on_success`). `UserExit` ends the whole
+/// session. Splitting the two is what lets an interactive `on_input` agent
+/// live inside a multi-step workflow instead of aborting it.
 #[derive(Debug)]
 pub enum StopReason {
     RequestFailed(ClientError),
     AgentMissing,
+    ExecutorGone,
     MaxIterations { limit: usize },
     LimitReached { limit: String, detail: String },
     HookAborted { detail: String },
     UserStop,
+    UserExit,
 }
 
 /// Outcome of the tool phase: batch done, another loop lap, or loop exit.
+///
+/// A stop carries its reason: the agent disappearing mid-run (`AgentMissing`)
+/// is a failure to route to `on_failure`, exactly like the request phase's,
+/// while `UserStop`/`UserExit` inherit the user-command semantics of
+/// [`StopReason`]. The old three-causes-in-one `Stop` is gone — conflating a
+/// user interrupt with a lost agent made the session loop guess wrong.
+#[derive(Debug)]
 pub enum ToolOutcome {
     Done,
     Continue,
-    Stop,
+    Stopped(StopReason),
+}
+
+/// How one agent loop ended, for the session loop to route on.
+///
+/// `Finished` means the agent completed its work; `Stopped` carries why it
+/// did not. The session loop maps these to step success / failure.
+#[derive(Debug)]
+pub enum AgentOutcome {
+    Finished,
+    Stopped(StopReason),
 }
 
 /// Drain non-blocking inbound after a `Queue` batch finishes, appending
 /// user input directly to `messages`.
-/// Returns true when a Stop/Exit arrived and the caller must return.
+/// Distinguishes stop (end this step) from exit (end the whole session), so
+/// callers can map the two to different outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainOutcome {
+    Continue,
+    Stop,
+    Exit,
+}
+
 pub fn drain_queue(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     messages: &mut Vec<Message>,
@@ -89,10 +123,11 @@ pub fn drain_queue(
     n_messages: usize,
     wal: &ToolWal,
     pending: usize,
-) -> bool {
+) -> DrainOutcome {
     while let Ok(inbound) = rx.try_recv() {
         match inbound {
-            Inbound::Command(Command::Stop | Command::Exit) => return true,
+            Inbound::Command(Command::Stop) => return DrainOutcome::Stop,
+            Inbound::Command(Command::Exit) => return DrainOutcome::Exit,
             Inbound::Message(m) => messages.push(Message::new_user(m)),
             Inbound::Command(Command::Interrupt(text)) => {
                 messages.push(Message::new_user(text));
@@ -102,7 +137,7 @@ pub fn drain_queue(
             }
         }
     }
-    false
+    DrainOutcome::Continue
 }
 
 pub fn status_line(wal: &ToolWal, pending: usize, n_messages: usize) -> String {

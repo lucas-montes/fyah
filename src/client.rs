@@ -1,23 +1,20 @@
 use std::fmt::{Debug, Display};
-use std::time::{Duration, Instant};
 
-use futures::TryFutureExt;
 use reqwest::{Method, RequestBuilder};
-use tokio::select;
 
+use crate::agent::limits::LimitsGate;
+use crate::agent::request::{self, RequestStep};
 use crate::agent::state::{
-    LoopDeps, LoopState, RequestOutcome, StopReason, drain_queue, status_line,
+    LoopDeps, LoopState, RequestOutcome, StopReason, status_line,
 };
 use crate::communication::{Command, Inbound};
-use crate::config::OnInput;
-use crate::context::{ContextStrategy, ManagedContext};
+use crate::context::ManagedContext;
 use crate::hooks::{
-    ContextSlot, CustomInput, CustomOutcome, Hook, HookRunner, HookState, InjectMode,
-    LoopGuardInput, LoopGuardOutcome, LoopGuardSlot, OnErrorInput, OnErrorOutcome, PrePromptInput,
-    PrePromptOutcome, VerifyInput, VerifyOutcome,
+    BoxFuture,
+    ContextSlot, CustomInput, CustomOutcome, Hook, HookRunner, HookState, InjectMode, run_hook,
+    PrePromptInput, PrePromptOutcome, VerifyInput, VerifyOutcome,
 };
 use crate::model::{AssistantTurn, Conversation, Message, Tool};
-use crate::provider::Provider;
 
 #[derive(Debug)]
 pub enum Error {
@@ -43,68 +40,80 @@ impl Display for Error {
 }
 
 /// Abstraction over LLM chat completion providers.
-pub trait LlmClient: std::fmt::Debug {
+pub trait LlmClient: std::fmt::Debug + Sync {
     fn create_request(&self, method: reqwest::Method, url: &str) -> RequestBuilder;
 
-    fn request_turn(
-        &self,
-        view: &crate::config::AgentView<'_>,
-        messages: &Vec<Message>,
-        ephemeral: Option<&Message>,
-        tools: &[Tool],
-    ) -> impl Future<Output = Result<AssistantTurn, StopReason>> {
-        let model = view.model_config();
+    /// Boxed futures throughout, and no generic method, so `&dyn LlmClient`
+    /// is usable. See [`crate::hooks::BoxFuture`].
+    fn request_turn<'a>(
+        &'a self,
+        agent: &'a crate::config::AgentRuntime,
+        messages: &'a Vec<Message>,
+        ephemeral: Option<&'a Message>,
+        tools: &'a [Tool],
+    ) -> BoxFuture<'a, Result<AssistantTurn, StopReason>> {
+        // Built outside the async block on purpose: everything that borrows
+        // `agent` / `self` stays on this frame, so only owned, `Send` values
+        // are captured across the await.
+        let model = agent.model_config();
         let conversation = Conversation::new(
             model.name(),
-            view.system_prompt(),
+            agent.system_prompt(),
             model.temperature(),
-            view.request_max_tokens(),
+            agent.request_max_tokens(),
             messages,
             ephemeral,
             tools,
         );
         tracing::debug!(conversation = ?conversation, "sending request to provider");
-        let provider: Provider<'_> = view.provider_config().into();
+        let provider = agent.provider();
         let transformation = provider.transformation();
         let req = self.create_request(Method::POST, provider.endpoint());
         let req = provider.apply_auth(req);
         let req = provider.attach_body(req, &conversation);
-        self.send_request(req)
-            .and_then(move |bytes| {
-                futures::future::ready(transformation(bytes.as_ref()).map_err(Error::Parse))
-            })
-            .map_err(StopReason::RequestFailed)
+        Box::pin(async move {
+            match self.send_request(req).await {
+                Ok(bytes) => transformation(bytes.as_ref())
+                    .map_err(Error::Parse)
+                    .map_err(StopReason::RequestFailed),
+                Err(e) => Err(StopReason::RequestFailed(e)),
+            }
+        })
     }
 
-    fn send_request(
-        &self,
+    fn send_request<'a>(
+        &'a self,
         request: RequestBuilder,
-    ) -> impl futures::Future<Output = Result<impl AsRef<[u8]>, Error>> {
-        request
-            .send()
-            .map_err(|e| Error::RequestFailed(e.to_string()))
-            .and_then(|response| {
-                futures::future::ready(response.error_for_status().map_err(|e| Error::Api {
-                    code: e.status().unwrap().to_string(),
-                    message: e.to_string(),
-                }))
-                .and_then(|resp| resp.bytes().map_err(Error::ParseRaw))
-            })
+    ) -> BoxFuture<'a, Result<Vec<u8>, Error>> {
+        Box::pin(async move {
+            let response = request
+                .send()
+                .await
+                .map_err(|e| Error::RequestFailed(e.to_string()))?;
+            let response = response.error_for_status().map_err(|e| Error::Api {
+                code: e.status().unwrap_or_default().to_string(),
+                message: e.to_string(),
+            })?;
+            // Concrete `Vec<u8>`: an `impl AsRef<[u8]>` in a return position
+            // would make this method dyn-incompatible.
+            Ok(response.bytes().await.map_err(Error::ParseRaw)?.to_vec())
+        })
     }
 
-    fn stream_request(
-        &self,
+    fn stream_request<'a>(
+        &'a self,
         request: RequestBuilder,
-    ) -> impl std::future::Future<Output = Result<reqwest::Response, Error>> {
-        request
-            .send()
-            .map_err(|e| Error::RequestFailed(e.to_string()))
-            .and_then(|response| {
-                futures::future::ready(response.error_for_status().map_err(|e| Error::Api {
-                    code: e.status().unwrap().to_string(),
-                    message: e.to_string(),
-                }))
+    ) -> BoxFuture<'a, Result<reqwest::Response, Error>> {
+        Box::pin(async move {
+            let response = request
+                .send()
+                .await
+                .map_err(|e| Error::RequestFailed(e.to_string()))?;
+            response.error_for_status().map_err(|e| Error::Api {
+                code: e.status().unwrap_or_default().to_string(),
+                message: e.to_string(),
             })
+        })
     }
 }
 
@@ -126,17 +135,16 @@ impl LlmClient for Client {
 /// One request turn: agent lookup, iteration cap, context policy, turn-start
 /// hook, LLM request per `on_input`, turn-end hook, and the no-tool-call
 /// branch (verify hook + idle wait).
-pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
+pub async fn run_request_phase(
     state: &mut LoopState<'_>,
-    deps: &mut LoopDeps<'_, C, R>,
+    deps: &mut LoopDeps<'_>,
 ) -> RequestOutcome {
     let agent_name = deps.agent_name;
     let iteration = state.iteration;
 
-    let config = deps.view.config();
-    let registry = deps.view.tools();
-
-    let Some(view) = config.get_agent(agent_name) else {
+    // One snapshot for the whole phase: a reload that lands mid-phase cannot
+    // change half of what this phase sees.
+    let Some(agent) = deps.view.agent(agent_name) else {
         tracing::warn!(
             agent_name,
             "Agent not found in config you might have removed from the config while the agent was running"
@@ -144,194 +152,31 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
         return RequestOutcome::Stopped(StopReason::AgentMissing);
     };
 
-    tracing::debug!(agent_name, messages=?&*state.messages, view=?view, iteration, "Agent loop iteration");
+    tracing::debug!(agent_name, messages=?&*state.messages, agent=?agent, iteration, "Agent loop iteration");
 
-    if iteration > view.max_iterations() {
+    if iteration > agent.max_iterations() {
         tracing::warn!(agent_name, iteration, "max_iterations reached");
         return RequestOutcome::Stopped(StopReason::MaxIterations {
-            limit: view.max_iterations(),
+            limit: agent.max_iterations(),
         });
     }
 
-    // Loop continuation gate (T06): declarative `[agents.<name>.limits]`
+    // Loop continuation gate: declarative `[agents.<name>.limits]`
     // thresholds first, then the optional guard executable. Limits-first:
-    // "can we keep going" wins over verify_done ("are we done").
-    {
-        let limits = view.agent_config().limits();
-        let elapsed = state.started_at.elapsed();
-        if let Some(max) = limits.max_wall_time_secs()
-            && elapsed > Duration::from_secs(max)
-        {
-            tracing::warn!(agent_name, max, "max_wall_time_secs reached");
-            return RequestOutcome::Stopped(StopReason::LimitReached {
-                limit: "max_wall_time_secs".to_string(),
-                detail: format!("elapsed {}s exceeds {max}s", elapsed.as_secs()),
-            });
-        }
-        let probe = ManagedContext::new(&*state.messages);
-        let est = probe.estimated_tokens();
-        state.total_tokens_est += est as u64;
-        if let Some(max) = limits.max_total_tokens_est()
-            && state.total_tokens_est > max
-        {
-            tracing::warn!(agent_name, max, "max_total_tokens_est reached");
-            return RequestOutcome::Stopped(StopReason::LimitReached {
-                limit: "max_total_tokens_est".to_string(),
-                detail: format!("cumulative {} exceeds {max}", state.total_tokens_est),
-            });
-        }
-        let tool_calls_total = state.wal.entries.len() + state.launched.len();
-        if let Some(max) = limits.max_tool_calls_total()
-            && tool_calls_total > max
-        {
-            tracing::warn!(agent_name, max, "max_tool_calls_total reached");
-            return RequestOutcome::Stopped(StopReason::LimitReached {
-                limit: "max_tool_calls_total".to_string(),
-                detail: format!("{tool_calls_total} tool calls exceed {max}"),
-            });
-        }
-        if let Some(max) = limits.max_consecutive_errors()
-            && (state.consecutive_errors as usize) > max
-        {
-            tracing::warn!(agent_name, max, "max_consecutive_errors reached");
-            return RequestOutcome::Stopped(StopReason::LimitReached {
-                limit: "max_consecutive_errors".to_string(),
-                detail: format!("{} consecutive errors exceed {max}", state.consecutive_errors),
-            });
-        }
-        // Headroom guard only when unmanaged: a managing strategy owns the
-        // budget and prunes; with strategy=null nothing would stop overflow.
-        if let Some(pct) = limits.context_headroom_pct()
-            && matches!(
-                view.agent_config().context_config().strategy(),
-                ContextStrategy::Null
-            )
-            && let Some(max) = view.agent_config().context_config().max_tokens()
-            && (est as u64) * 100 > max * pct as u64
-        {
-            tracing::warn!(agent_name, pct, "context_headroom_pct breached");
-            return RequestOutcome::Stopped(StopReason::LimitReached {
-                limit: "context_headroom_pct".to_string(),
-                detail: format!("estimate {est} exceeds {pct}% of {max} with no managing strategy"),
-            });
-        }
-        if state.messages.len() == state.last_progress_len {
-            state.stalled_turns += 1;
-        } else {
-            state.stalled_turns = 0;
-            state.last_progress_len = state.messages.len();
-        }
-        if let Some(max) = limits.max_stall_turns()
-            && (state.stalled_turns as usize) > max
-        {
-            tracing::warn!(agent_name, max, "max_stall_turns reached");
-            return RequestOutcome::Stopped(StopReason::LimitReached {
-                limit: "max_stall_turns".to_string(),
-                detail: format!("{} turns without message growth exceed {max}", state.stalled_turns),
-            });
-        }
-        // RPM throttle: wait until the oldest request ages past 60s. Sleeps
-        // in 1s chunks so Stop/Exit still lands promptly; other input is
-        // stashed and processed by the normal paths below.
-        if let Some(max) = limits.max_rpm()
-            && max > 0
-        {
-            loop {
-                let now = Instant::now();
-                while let Some(front) = state.request_times.front() {
-                    if now.duration_since(*front) > Duration::from_secs(60) {
-                        state.request_times.pop_front();
-                    } else {
-                        break;
-                    }
-                }
-                if state.request_times.len() < max {
-                    break;
-                }
-                let oldest = *state.request_times.front().expect("len checked");
-                let wait =
-                    Duration::from_secs(60).saturating_sub(now.duration_since(oldest));
-                if wait.is_zero() {
-                    break;
-                }
-                tracing::info!(agent_name, max, "max_rpm throttle wait");
-                let mut remaining = wait;
-                while !remaining.is_zero() {
-                    let chunk = remaining.min(Duration::from_secs(1));
-                    tokio::select! {
-                        _ = tokio::time::sleep(chunk) => {
-                            remaining = remaining.saturating_sub(chunk);
-                        }
-                        inbound = deps.rx.recv() => match inbound {
-                            Some(Inbound::Command(Command::Stop | Command::Exit)) | None => {
-                                return RequestOutcome::Stopped(StopReason::UserStop);
-                            }
-                            Some(Inbound::Message(m)) => {
-                                state.messages.push(Message::new_user(m));
-                            }
-                            Some(Inbound::Command(Command::Interrupt(text))) => {
-                                state.messages.push(Message::new_user(text));
-                            }
-                            Some(Inbound::Command(Command::Status)) => {
-                                deps.out.notification(status_line(
-                                    &state.wal,
-                                    state.launched.len(),
-                                    state.messages.len(),
-                                ));
-                            }
-                        },
-                    }
-                }
-            }
-            state.request_times.push_back(Instant::now());
-        }
-        // Guard executable sees the full meter snapshot.
-        if let Some(exe_name) = limits.executable()
-            && let Some(exe) = config.get_executable(exe_name)
-        {
-            let hook = Hook::<LoopGuardSlot>::new(exe_name.to_string());
-            let input = LoopGuardInput::new(
-                agent_name,
-                iteration,
-                state.messages.len(),
-                est,
-                state.total_tokens_est,
-                tool_calls_total,
-                elapsed.as_secs(),
-                state.consecutive_errors,
-                state.stalled_turns,
-            );
-            let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-            match deps.runner.run_hook(exe, &hook, &input, &mut hook_state).await {
-                LoopGuardOutcome::Continue => {}
-                LoopGuardOutcome::Stop { reason } => {
-                    tracing::warn!(
-                        slot = "loop_guard",
-                        executable = exe_name,
-                        agent_name,
-                        iteration,
-                        reason = reason.as_str(),
-                        "loop guard stopped the loop"
-                    );
-                    return RequestOutcome::Stopped(StopReason::LimitReached {
-                        limit: "loop_guard".to_string(),
-                        detail: reason,
-                    });
-                }
-            }
-        }
+    // "can we keep going" wins over verify_done ("are we done"). The checks
+    // and their wording live in `agent::limits`.
+    if let Some(reason) = LimitsGate::for_agent(&agent).check(state, deps).await {
+        return RequestOutcome::Stopped(reason);
     }
 
     // Context management: enforce the agent's configured policy before the
     // turn starts. Policies only return declarative outcomes; applied here.
+    // The policy itself was chosen when the config was built.
     {
         let ctx = ManagedContext::new(&*state.messages);
-        let removed = view
-            .agent_config()
-            .context_config()
-            .strategy()
-            .policy_for()
-            .enforce(&ctx, view.agent_config().context_config())
+        let removed = agent
+            .context_policy()
+            .enforce(&ctx, agent.agent_config().context_config())
             .apply_outcome(&mut *state.messages);
         if removed > 0 {
             tracing::info!(agent_name, removed, "context policy pruned messages");
@@ -342,11 +187,9 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
     // deterministic policy and before pre_prompt. Validation guarantees
     // executable is set iff strategy is custom.
     {
-        let ctx_cfg = view.agent_config().context_config();
-        if let Some(exe_name) = ctx_cfg.executable()
-            && let Some(exe) = config.get_executable(exe_name)
-        {
-            let hook = Hook::<ContextSlot>::new(exe_name.to_string());
+        let ctx_cfg = agent.agent_config().context_config();
+        if let Some(slot) = agent.hooks().context() {
+            let hook = Hook::<ContextSlot>::new(slot.name().to_string());
             let ctx = ManagedContext::new(&*state.messages);
             let input = CustomInput::new(
                 agent_name,
@@ -360,17 +203,13 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
             );
             let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
 
-            match deps
-                .runner
-                .run_hook(exe, &hook, &input, &mut hook_state)
-                .await
-            {
+            match run_hook(deps.runner, slot.exe(), &hook, &input, &mut hook_state).await {
                 CustomOutcome::Continue => {}
                 CustomOutcome::PruneTo { keep } => {
                     let removed = hook_state.prune_to(keep);
                     tracing::info!(
                         slot = "context",
-                        executable = exe_name,
+                        executable = slot.name(),
                         agent_name,
                         iteration,
                         removed,
@@ -381,7 +220,7 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
                     let truncated = hook_state.truncate_outputs(max_bytes);
                     tracing::info!(
                         slot = "context",
-                        executable = exe_name,
+                        executable = slot.name(),
                         agent_name,
                         iteration,
                         truncated,
@@ -393,7 +232,7 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
                     let removed = hook_state.drop_tool_results(&ids);
                     tracing::info!(
                         slot = "context",
-                        executable = exe_name,
+                        executable = slot.name(),
                         agent_name,
                         iteration,
                         removed,
@@ -403,7 +242,7 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
                 CustomOutcome::Abort { error } => {
                     tracing::warn!(
                         slot = "context",
-                        executable = exe_name,
+                        executable = slot.name(),
                         agent_name,
                         iteration,
                         error = %error,
@@ -417,25 +256,22 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
         }
     }
 
-    // TODO: this should be done way before, when creating the toolRegistry and the Workspace, to avoid allocating at each iteration
-    let tools = registry.resolve_tools(view.tool_names());
+    // Tool definitions are resolved once, when the configuration is built —
+    // no allocation per iteration.
+    let tools = agent.tools();
 
     // Pre-prompt hook (single hook, fail-open). Runs after the context
     // hook, before the LLM request. `Inject` lets the user modify the
     // prompt: persistent appends a `User` message, ephemeral is visible to
     // this LLM call only and never persisted. Returns the ephemeral message.
-    let ephemeral: Option<Message> = match view.agent_config().pre_prompt() {
+    let ephemeral: Option<Message> = match agent.agent_config().pre_prompt() {
         None => None,
-        Some(hook) => match config.get_executable(hook.executable()) {
+        Some(hook) => match agent.hooks().pre_prompt() {
             None => None,
-            Some(exe) => {
+            Some(slot) => {
                 let input = PrePromptInput::new(agent_name, iteration, state.messages.len());
                 let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-                match deps
-                    .runner
-                    .run_hook(exe, hook, &input, &mut hook_state)
-                    .await
-                {
+                match run_hook(deps.runner, slot.exe(), hook, &input, &mut hook_state).await {
                     PrePromptOutcome::Continue => None,
                     PrePromptOutcome::Inject { mode, content } => match mode {
                         InjectMode::Persistent => {
@@ -482,102 +318,29 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
     // append it at serialization time, so history is never cloned.
     // (Persistent injections were already pushed above.)
 
-    // --- LLM request phase: None / Queue / Interrupt ---
-    // Note: plain `?` cannot propagate here (stable Rust only supports it
-    // for `Result`/`Option` returns), so send failures map explicitly.
-    let turn = match view.on_input() {
-        None => {
-            let result = deps
-                .client
-                .request_turn(&view, &*state.messages, ephemeral.as_ref(), &tools)
-                .await;
-            match result {
-                Ok(t) => t,
-                Err(reason) => {
-                    state.consecutive_errors = state.consecutive_errors.saturating_add(1);
-                    let err_str = format!("{reason:?}");
-                    if let Some(abort) =
-                        run_on_error_hook(state, deps, "request", &err_str).await
-                    {
-                        return RequestOutcome::Stopped(abort);
-                    }
-                    return RequestOutcome::Stopped(reason);
-                }
-            }
-        }
-        Some(&OnInput::Queue) => {
-            let result = deps
-                .client
-                .request_turn(&view, &*state.messages, ephemeral.as_ref(), &tools)
-                .await;
-            let turn = match result {
-                Ok(t) => t,
-                Err(reason) => {
-                    state.consecutive_errors = state.consecutive_errors.saturating_add(1);
-                    let err_str = format!("{reason:?}");
-                    if let Some(abort) =
-                        run_on_error_hook(state, deps, "request", &err_str).await
-                    {
-                        return RequestOutcome::Stopped(abort);
-                    }
-                    return RequestOutcome::Stopped(reason);
-                }
-            };
-            // Request finished; drain anything that arrived meanwhile.
-            let n_messages = state.messages.len();
-            if drain_queue(
-                &mut deps.rx,
-                &mut *state.messages,
-                &deps.out,
-                n_messages,
-                &state.wal,
-                state.launched.len(),
-            ) {
-                return RequestOutcome::Stopped(StopReason::UserStop);
-            }
-            turn
-        }
-        Some(&OnInput::Interrupt) => {
-            let send_fut =
-                deps.client
-                    .request_turn(&view, &*state.messages, ephemeral.as_ref(), &tools);
-            select! {
-                r = send_fut => match r {
-                    Ok(t) => t,
-                    Err(reason) => {
-                        state.consecutive_errors = state.consecutive_errors.saturating_add(1);
-                        let err_str = format!("{reason:?}");
-                        if let Some(abort) =
-                            run_on_error_hook(state, deps, "request", &err_str).await
-                        {
-                            return RequestOutcome::Stopped(abort);
-                        }
-                        return RequestOutcome::Stopped(reason);
-                    }
-                },
-                inbound = deps.rx.recv() => match inbound {
-                    Some(Inbound::Command(Command::Stop | Command::Exit)) | None => {
-                        return RequestOutcome::Stopped(StopReason::UserStop);
-                    }
-                    Some(Inbound::Message(m)) => {
-                        state.messages.push(Message::new_user(m));
-                        return RequestOutcome::Continue;
-                    }
-                    Some(Inbound::Command(Command::Interrupt(text))) => {
-                        state.messages.push(Message::new_user(text));
-                        return RequestOutcome::Continue;
-                    }
-                    Some(Inbound::Command(Command::Status)) => {
-                        let _ = deps.out.notification(status_line(
-                            &state.wal,
-                            state.launched.len(),
-                            state.messages.len(),
-                        ));
-                        return RequestOutcome::Continue;
-                    }
-                },
-            }
-        }
+    // --- LLM request phase: the driver comes from `on_input`, the dispatch
+    // and its failure path live in `agent::request` ---
+    let driver = request::driver_for(agent.request_policy());
+    let client: &dyn LlmClient = deps.client;
+    let runner: &dyn HookRunner = deps.runner;
+    let step = driver
+        .request(request::RequestCtx {
+            client,
+            runner,
+            agent_name: deps.agent_name,
+            session: &deps.session,
+            out: &deps.out,
+            agent: &agent,
+            state,
+            rx: &mut *deps.rx,
+            ephemeral: ephemeral.as_ref(),
+            tools,
+        })
+        .await;
+    let turn = match step {
+        RequestStep::Turn(turn) => turn,
+        RequestStep::Continue => return RequestOutcome::Continue,
+        RequestStep::Stopped(reason) => return RequestOutcome::Stopped(reason),
     };
 
     // A completed request (success or hook-routed) resets the error streak.
@@ -587,8 +350,8 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
         let last_text_owned = turn.content().map(str::to_string);
         // Verify hook: external checker decides if the agent is really done.
         // NotDone feedback is injected as a user message (notify the agent).
-        if let Some(hook) = view.agent_config().verify_done() {
-            if let Some(exe) = config.get_executable(hook.executable()) {
+        if let Some(hook) = agent.agent_config().verify_done() {
+            if let Some(slot) = agent.hooks().verify_done() {
                 let input = VerifyInput::new(
                     agent_name,
                     iteration,
@@ -596,11 +359,7 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
                     state.messages.len(),
                 );
                 let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-                match deps
-                    .runner
-                    .run_hook(&exe, hook, &input, &mut hook_state)
-                    .await
-                {
+                match run_hook(deps.runner, slot.exe(), hook, &input, &mut hook_state).await {
                     VerifyOutcome::Done => {}
                     VerifyOutcome::NotDone { error } => {
                         tracing::info!(
@@ -631,12 +390,19 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
                 .messages
                 .push(Message::new_assistant(Some(content), Vec::new()));
         }
-        match view.on_input() {
+        match agent.on_input() {
             None => return RequestOutcome::Finished,
+            // The agent is interactive: a stop ends this step so the workflow
+            // can advance; only an exit (or a dropped sender) ends the loop.
+            // This is what lets an `on_input` agent live inside a multi-step
+            // workflow instead of aborting it after the first turn.
             Some(_) => match deps.rx.recv().await {
                 Some(Inbound::Message(m)) => state.messages.push(Message::new_user(m)),
-                Some(Inbound::Command(Command::Stop | Command::Exit)) | None => {
+                Some(Inbound::Command(Command::Stop)) => {
                     return RequestOutcome::Stopped(StopReason::UserStop);
+                }
+                Some(Inbound::Command(Command::Exit)) | None => {
+                    return RequestOutcome::Stopped(StopReason::UserExit);
                 }
                 Some(Inbound::Command(Command::Interrupt(text))) => {
                     state.messages.push(Message::new_user(text));
@@ -657,46 +423,15 @@ pub async fn run_request_phase<C: LlmClient, R: HookRunner>(
     RequestOutcome::NewTurn(turn)
 }
 
-/// Invoke `on_error` hook for a request-phase failure.
-/// Returns `Some(HookAborted)` when the hook aborts, else `None` (continue legacy path).
-async fn run_on_error_hook<C: LlmClient, R: HookRunner>(
-    state: &mut LoopState<'_>,
-    deps: &mut LoopDeps<'_, C, R>,
-    phase: &str,
-    error_str: &str,
-) -> Option<StopReason> {
-    let config = deps.view.config();
-    let agent_name = deps.agent_name;
-    let Some(view) = config.get_agent(agent_name) else {
-        return None;
-    };
-    let Some(hook) = view.agent_config().on_error() else {
-        return None;
-    };
-    let Some(exe) = config.get_executable(hook.executable()) else {
-        return None;
-    };
-    let input = OnErrorInput::new(agent_name, phase, error_str);
-    let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-    match deps.runner.run_hook(exe, hook, &input, &mut hook_state).await {
-        OnErrorOutcome::Continue => None,
-        OnErrorOutcome::Abort { error } => {
-            tracing::warn!(
-                slot = "on_error",
-                executable = hook.executable(),
-                phase,
-                error = %error,
-                "on_error aborted loop"
-            );
-            Some(StopReason::HookAborted {
-                detail: error.to_string(),
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    // The three limit tests below (`wall_time_limit_stops_before_llm`,
+    // `cumulative_token_estimate_limit_stops`,
+    // `loop_guard_stop_maps_to_limit_reached`) exercise the checks that now
+    // live in `crate::agent::limits`. They stay here deliberately: each
+    // asserts a *phase* outcome (`RequestOutcome::Stopped(LimitReached)`)
+    // and needs the fakes defined in this module. `limits.rs` owns the
+    // thresholds and their wording; this module owns the wiring.
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -704,17 +439,23 @@ mod tests {
     use crate::agent::state::{LoopDeps, LoopState};
     use crate::agent::tools::{ToolExecutor, ToolWal};
     use crate::communication::{Inbound, Outbound, OutboundChannel};
-    use crate::config::{AgentView, Config, ConfigStore, ConfigView};
+    use crate::config::{AgentRuntime, Config, ConfigStore, ConfigView, RequestPolicy};
     use crate::executable::Executable;
-    use crate::hooks::{Hook, Slot};
+    use crate::executable::ExecutableError;
     use crate::model::Tool;
     use crate::session::{Session, VcsKind};
 
     /// Records how many messages each LLM call saw; answers with a tool-less
     /// turn so the request phase finishes without entering the tool phase.
+    ///
+    /// `hang` makes the request never complete, which is what makes the
+    /// `interrupt` driver's `select!` deterministic: only the inbound branch
+    /// can ever win. Without it, a test would race the request against the
+    /// channel and flake.
     #[derive(Debug, Default)]
     struct FakeClient {
         seen: Arc<Mutex<Vec<usize>>>,
+        hang: bool,
     }
 
     impl LlmClient for FakeClient {
@@ -722,103 +463,56 @@ mod tests {
             reqwest::Client::new().request(method, url)
         }
 
-        async fn request_turn(
-            &self,
-            _view: &AgentView<'_>,
-            messages: &Vec<Message>,
-            ephemeral: Option<&Message>,
-            _tools: &[Tool],
-        ) -> Result<AssistantTurn, StopReason> {
-            // Mirror the provider contract: ephemeral rides along without
-            // being persisted.
-            self.seen
-                .lock()
-                .expect("seen poisoned")
-                .push(messages.len() + usize::from(ephemeral.is_some()));
-            Ok(AssistantTurn::new(Some("done".to_string()), Vec::new()))
+        fn request_turn<'a>(
+            &'a self,
+            _agent: &'a AgentRuntime,
+            messages: &'a Vec<Message>,
+            ephemeral: Option<&'a Message>,
+            _tools: &'a [Tool],
+        ) -> crate::hooks::BoxFuture<'a, Result<AssistantTurn, StopReason>> {
+            Box::pin(async move {
+                if self.hang {
+                    return std::future::pending().await;
+                }
+                // Mirror the provider contract: ephemeral rides along without
+                // being persisted.
+                self.seen
+                    .lock()
+                    .expect("seen poisoned")
+                    .push(messages.len() + usize::from(ephemeral.is_some()));
+                Ok(AssistantTurn::new(Some("done".to_string()), Vec::new()))
+            })
         }
     }
 
-    /// Returns one canned outcome for every hook call, deserialized from JSON
-    /// so each slot type parses its own shape.
+    /// Returns one canned outcome for every hook call. The typed wrapper
+    /// deserializes it into the slot's own shape, exactly as the real runner's
+    /// parsed stdout would be.
     #[derive(Debug)]
     struct FakeRunner {
         out: serde_json::Value,
     }
 
     impl HookRunner for FakeRunner {
-        async fn run_hook<S: Slot>(
-            &self,
-            _exe: &Executable,
-            _hook: &Hook<S>,
-            _input: &S::Input<'_>,
-            _state: &mut HookState<'_>,
-        ) -> S::Output {
-            serde_json::from_value(self.out.clone()).expect("fixture parses")
+        fn run_json<'a, 'b>(
+            &'a self,
+            _exe: &'a Executable,
+            _slot: &'a str,
+            _executable: &'a str,
+            _input: &'a serde_json::Value,
+            _state: &'a mut HookState<'b>,
+        ) -> crate::hooks::BoxFuture<'a, Result<crate::hooks::HookDecision, ExecutableError>>
+        where
+            'b: 'a,
+        {
+            Box::pin(async move { Ok(crate::hooks::HookDecision::from_value(self.out.clone())) })
         }
     }
 
-    fn test_config() -> (ConfigView, Arc<Session>) {
-        let raw = r#"
-[providers.local]
-url = "http://127.0.0.1:9/v1/chat/completions"
-api_key = "test"
-format = "openai"
-models = { "m" = { name = "test-model" } }
-
-[agents.coder]
-provider = "local"
-model = "m"
-max_iterations = 5
-tools = []
-max_concurrent_tools = 1
-
-[executables.pp]
-type = "command"
-command = "true"
-
-[agents.coder.hooks]
-pre_prompt = { executable = "pp" }
-
-[workflows.default]
-initial = "plan"
-
-[workflows.default.steps.plan]
-agent = "coder"
-on_success = "done"
-on_failure = "done"
-"#;
-        test_config_with(raw)
-    }
-
-    fn test_config_with(raw: &str) -> (ConfigView, Arc<Session>) {
-        let config: Config = toml::from_str(raw).expect("parse");
-        let (workspace, tools) = config.validate().expect("valid");
-        let store = ConfigStore::new(workspace, tools);
-        let session = Arc::new(Session::new(
-            "test-session".to_string(),
-            "fyah",
-            "0.1.0",
-            VcsKind::Git,
-            None,
-        ));
-        (store.subscribe(), session)
-    }
-
-    async fn run_phase_with_inject(
-        inject: serde_json::Value,
-    ) -> (Vec<Message>, Vec<usize>, RequestOutcome) {
-        run_phase_with(inject, None).await
-    }
-
-    async fn run_phase_with(
-        runner_out: serde_json::Value,
-        extra_toml: Option<&str>,
-    ) -> (Vec<Message>, Vec<usize>, RequestOutcome) {
-        let (view, session) = match extra_toml {
-            None => test_config(),
-            Some(extra) => {
-                let base = r#"
+    /// An agent with no `on_input`: the phase must not read inbound during
+    /// the request.
+    fn base_config() -> &'static str {
+        r#"
 [providers.local]
 url = "http://127.0.0.1:9/v1/chat/completions"
 api_key = "test"
@@ -850,21 +544,126 @@ initial = "plan"
 agent = "coder"
 on_success = "done"
 on_failure = "done"
-"#;
+"#
+    }
+
+    /// The same config but with **no** `pre_prompt` hook, so a reload can add
+    /// one.
+    fn base_without_pre_prompt() -> &'static str {
+        r#"
+[providers.local]
+url = "http://127.0.0.1:9/v1/chat/completions"
+api_key = "test"
+format = "openai"
+models = { "m" = { name = "test-model" } }
+
+[agents.coder]
+provider = "local"
+model = "m"
+max_iterations = 5
+tools = []
+max_concurrent_tools = 1
+
+[executables.pp]
+type = "command"
+command = "true"
+
+[workflows.default]
+initial = "plan"
+
+[workflows.default.steps.plan]
+agent = "coder"
+on_success = "done"
+on_failure = "done"
+"#
+    }
+
+    fn test_config() -> (ConfigView, Arc<Session>) {
+        test_config_with(base_config())
+    }
+
+    /// A store plus a session, so a test can reload the store and run
+    /// another phase against the same session.
+    fn test_store_with(raw: &str) -> (ConfigStore, Arc<Session>) {
+        let resolved = resolved_from(raw);
+        let store = ConfigStore::new(resolved);
+        let session = Arc::new(Session::new(
+            "test-session".to_string(),
+            "fyah",
+            "0.1.0",
+            VcsKind::Git,
+            None,
+        ));
+        (store, session)
+    }
+
+    /// The resolved config *before* it reaches a store, so a reload test can
+    /// build a replacement generation.
+    fn resolved_from(raw: &str) -> crate::config::ResolvedConfig {
+        let config: Config = toml::from_str(raw).expect("parse");
+        config.validate().expect("valid")
+    }
+
+    fn test_config_with(raw: &str) -> (ConfigView, Arc<Session>) {
+        let (store, session) = test_store_with(raw);
+        (store.subscribe(), session)
+    }
+
+    async fn run_phase_with_inject(
+        inject: serde_json::Value,
+    ) -> (Vec<Message>, Vec<usize>, RequestOutcome) {
+        run_phase_with(inject, None).await
+    }
+
+    async fn run_phase_with(
+        runner_out: serde_json::Value,
+        extra_toml: Option<&str>,
+    ) -> (Vec<Message>, Vec<usize>, RequestOutcome) {
+        let (view, session) = match extra_toml {
+            None => test_config(),
+            Some(extra) => {
+                let base = base_config();
                 test_config_with(&format!("{base}\n{extra}"))
             }
         };
-        let client = FakeClient::default();
+        run_phase(view, &session, runner_out).await
+    }
+
+    /// Run one request phase against an existing view, with a single "hello"
+    /// in history. Returns the resulting messages, what the LLM saw, and the
+    /// phase outcome.
+    async fn run_phase(
+        view: ConfigView,
+        session: &Arc<Session>,
+        runner_out: serde_json::Value,
+    ) -> (Vec<Message>, Vec<usize>, RequestOutcome) {
+        run_phase_with_client(view, session, runner_out, FakeClient::default(), Vec::new()).await
+    }
+
+    /// The same, with a chosen client (possibly a hanging one) and inbound
+    /// items already queued on the channel. The sender is kept alive for the
+    /// duration: dropping it would close the channel, and a closed channel
+    /// reads as `Stop`.
+    async fn run_phase_with_client(
+        view: ConfigView,
+        session: &Arc<Session>,
+        runner_out: serde_json::Value,
+        client: FakeClient,
+        inbound: Vec<Inbound>,
+    ) -> (Vec<Message>, Vec<usize>, RequestOutcome) {
         let seen = Arc::clone(&client.seen);
         let runner = FakeRunner { out: runner_out };
         let (out_tx, _dropped) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
-        let (_in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
+        for item in inbound {
+            in_tx.send(item).expect("queue inbound");
+        }
         let mut messages = vec![Message::new_user("hello".to_string())];
         let mut state = LoopState {
             messages: &mut messages,
             wal: ToolWal::default(),
             iteration: 1,
-            executor: ToolExecutor::spawn(Arc::clone(&session)),
+            executor: ToolExecutor::spawn(Arc::clone(session)),
             launched: HashMap::new(),
             started_at: std::time::Instant::now(),
             request_times: std::collections::VecDeque::new(),
@@ -878,9 +677,9 @@ on_failure = "done"
             client: &client,
             runner: &runner,
             view,
-            session: Arc::clone(&session),
+            session: Arc::clone(session),
             out: OutboundChannel::from(out_tx),
-            rx: in_rx,
+            rx: &mut in_rx,
         };
         let outcome = run_request_phase(&mut state, &mut deps).await;
         let LoopState { executor, .. } = state;
@@ -888,7 +687,6 @@ on_failure = "done"
         let seen = seen.lock().expect("seen poisoned").clone();
         (messages, seen, outcome)
     }
-
     #[tokio::test]
     async fn persistent_inject_lands_in_history() {
         let (messages, seen, outcome) = run_phase_with_inject(serde_json::json!({
@@ -975,5 +773,283 @@ on_failure = "done"
         );
         assert!(seen.is_empty());
         assert_eq!(messages.len(), 1);
+    }
+
+    /// A reload test needs the resolved config *before* it reaches a store.
+    #[tokio::test]
+    async fn a_running_loop_uses_the_reloaded_configuration() {
+        // Before the reload the agent has no pre_prompt hook, so the phase
+        // sees "hello" and the assistant reply, nothing else.
+        let (store, session) = test_store_with(base_without_pre_prompt());
+        let (messages, seen, outcome) = run_phase(
+            store.subscribe(),
+            &session,
+            serde_json::json!({ "decision": "continue" }),
+        )
+        .await;
+        assert!(matches!(outcome, RequestOutcome::Finished));
+        assert_eq!(messages.len(), 2, "no hook was configured yet");
+        assert_eq!(seen, vec![1]);
+
+        // Reload with a pre_prompt hook that injects a persistent message.
+        // The session, and therefore the running loop, is unchanged.
+        let reloaded = format!(
+            "{}\n[agents.coder.hooks]\npre_prompt = {{ executable = \"pp\" }}\n",
+            base_without_pre_prompt()
+        );
+        store.replace(resolved_from(&reloaded));
+
+        let (messages, seen, outcome) = run_phase(
+            store.subscribe(),
+            &session,
+            serde_json::json!({
+                "decision": "inject",
+                "mode": "persistent",
+                "content": "from the new generation",
+            }),
+        )
+        .await;
+        assert!(matches!(outcome, RequestOutcome::Finished));
+        assert_eq!(
+            messages.len(),
+            3,
+            "the reloaded hook ran: hello + injected + reply"
+        );
+        assert_eq!(seen, vec![2], "the LLM saw the injected message too");
+        assert!(
+            matches!(&messages[1], Message::User { content } if content == "from the new generation"),
+            "unexpected injected message: {:?}",
+            messages[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reload_before_a_phase_is_visible_to_it_end_to_end() {
+        // The reload happens before the phase starts, so the phase must use
+        // the *new* generation end to end: the pre_prompt hook exists only in
+        // generation 1, and its ephemeral injection is what the LLM sees.
+        let (store, session) = test_store_with(base_without_pre_prompt());
+        let reloaded = format!(
+            "{}\n[agents.coder.hooks]\npre_prompt = {{ executable = \"pp\" }}\n",
+            base_without_pre_prompt()
+        );
+        store.replace(resolved_from(&reloaded));
+
+        let (messages, seen, outcome) = run_phase(
+            store.subscribe(),
+            &session,
+            serde_json::json!({
+                "decision": "inject",
+                "mode": "ephemeral",
+                "content": "call-scoped",
+            }),
+        )
+        .await;
+        assert!(matches!(outcome, RequestOutcome::Finished));
+        assert_eq!(seen, vec![2], "the LLM saw the injected message too");
+        // Ephemeral never persists, so history stays at two even though the
+        // newly loaded hook ran — the hook binding came from generation 1.
+        assert_eq!(messages.len(), 2);
+    }
+
+    // --- request driver: the `on_input` paths -------------------------------
+
+    /// Build the shared base config with an `on_input` value spliced into the
+    /// existing `[agents.coder]` table. A second `[agents.coder]` header
+    /// would be a duplicate-table TOML error, so the key has to be injected
+    /// into the table that is already there.
+    fn with_on_input(mode: &str) -> String {
+        base_config().replacen(
+            "max_concurrent_tools = 1",
+            &format!("max_concurrent_tools = 1\non_input = \"{mode}\""),
+            1,
+        )
+    }
+
+    fn driver_of(mode: Option<&str>) -> (ConfigView, Arc<Session>, RequestPolicy) {
+        let raw = match mode {
+            None => base_config().to_string(),
+            Some(mode) => with_on_input(mode),
+        };
+        let (view, session) = test_config_with(&raw);
+        let driver = view.agent("coder").expect("agent").request_policy();
+        (view, session, driver)
+    }
+
+    #[test]
+    fn on_input_selects_the_request_driver() {
+        assert_eq!(
+            driver_of(None).2,
+            RequestPolicy::FireAndForget,
+            "no on_input must not read inbound during a request"
+        );
+        assert_eq!(driver_of(Some("queue")).2, RequestPolicy::Queue);
+        assert_eq!(driver_of(Some("interrupt")).2, RequestPolicy::Interrupt);
+    }
+
+    #[tokio::test]
+    async fn without_on_input_an_inbound_message_is_not_read_during_the_request() {
+        // The contrast that makes the queue test meaningful: with no
+        // `on_input`, a queued message stays on the channel for the next lap.
+        let (view, session) = test_config();
+        let (messages, seen, outcome) = run_phase_with_client(
+            view,
+            &session,
+            serde_json::json!({ "decision": "continue" }),
+            FakeClient::default(),
+            vec![Inbound::Message("typed meanwhile".to_string())],
+        )
+        .await;
+
+        assert!(matches!(outcome, RequestOutcome::Finished));
+        assert_eq!(seen, vec![1], "the request still ran");
+        assert_eq!(
+            messages.len(),
+            2,
+            "hello + reply only: inbound was never polled"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::User { content } if content == "typed meanwhile")),
+            "the message must still be queued, not consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_drains_a_message_that_arrived_during_the_request() {
+        let (view, session, driver) = driver_of(Some("queue"));
+        assert_eq!(driver, RequestPolicy::Queue);
+        // The stop is needed to end the phase: with `on_input` set, a
+        // tool-less turn waits for the next user message. It is queued after
+        // the message, so the drain sees the message first.
+        let (messages, seen, outcome) = run_phase_with_client(
+            view,
+            &session,
+            serde_json::json!({ "decision": "continue" }),
+            FakeClient::default(),
+            vec![
+                Inbound::Message("typed meanwhile".to_string()),
+                Inbound::Command(Command::Stop),
+            ],
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RequestOutcome::Stopped(StopReason::UserStop)),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert_eq!(seen, vec![1], "the request ran");
+        assert_eq!(
+            messages.len(),
+            2,
+            "the drained message landed: without the drain it would be 1"
+        );
+        assert!(matches!(
+            &messages[1],
+            Message::User { content } if content == "typed meanwhile"
+        ));
+    }
+
+    #[tokio::test]
+    async fn queue_stops_when_the_user_stops_while_the_request_runs() {
+        let (view, session, _) = driver_of(Some("queue"));
+        let (messages, _seen, outcome) = run_phase_with_client(
+            view,
+            &session,
+            serde_json::json!({ "decision": "continue" }),
+            FakeClient::default(),
+            vec![Inbound::Command(Command::Stop)],
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RequestOutcome::Stopped(StopReason::UserStop)),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert_eq!(messages.len(), 1, "the reply never landed");
+    }
+
+    #[tokio::test]
+    async fn interrupt_preempts_an_in_flight_request() {
+        let (view, session, driver) = driver_of(Some("interrupt"));
+        assert_eq!(driver, RequestPolicy::Interrupt);
+        let (messages, seen, outcome) = run_phase_with_client(
+            view,
+            &session,
+            serde_json::json!({ "decision": "continue" }),
+            FakeClient { hang: true, ..FakeClient::default() },
+            vec![Inbound::Message("cut it short".to_string())],
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, RequestOutcome::Continue),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert!(seen.is_empty(), "the abandoned request never completed");
+        assert_eq!(messages.len(), 2, "hello + the interrupting message");
+        assert!(matches!(
+            &messages[1],
+            Message::User { content } if content == "cut it short"
+        ));
+    }
+
+    #[tokio::test]
+    async fn interrupt_stops_when_the_user_stops() {
+        let (view, session, _) = driver_of(Some("interrupt"));
+        let (_messages, seen, outcome) = run_phase_with_client(
+            view,
+            &session,
+            serde_json::json!({ "decision": "continue" }),
+            FakeClient { hang: true, ..FakeClient::default() },
+            vec![Inbound::Command(Command::Stop)],
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RequestOutcome::Stopped(StopReason::UserStop)),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert!(seen.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupt_exits_when_the_user_exits() {
+        // Stop ends the step; exit must end the whole session instead. One
+        // command apart today, two different reasons in the outcome.
+        let (view, session, _) = driver_of(Some("interrupt"));
+        let (_messages, seen, outcome) = run_phase_with_client(
+            view,
+            &session,
+            serde_json::json!({ "decision": "continue" }),
+            FakeClient { hang: true, ..FakeClient::default() },
+            vec![Inbound::Command(Command::Exit)],
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RequestOutcome::Stopped(StopReason::UserExit)),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert!(seen.is_empty());
+    }
+}
+
+/// Compile-time proof that the two traits the driver work depends on can be
+/// used behind `&dyn` / `Box<dyn>`. If a future signature change reintroduces
+/// a generic method or an `impl Future` return, this stops compiling instead
+/// of silently pushing T07/T09 back to enums.
+#[cfg(test)]
+mod object_safety {
+    use super::*;
+    use crate::hooks::HookRunner;
+
+    fn assert_object_safe<T: ?Sized>() {}
+
+    #[test]
+    fn both_traits_are_usable_as_trait_objects() {
+        assert_object_safe::<dyn LlmClient>();
+        assert_object_safe::<dyn HookRunner>();
     }
 }

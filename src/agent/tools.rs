@@ -11,7 +11,7 @@ use crate::model::{AssistantTurn, Message, ToolCall};
 use crate::record_write_diff;
 use crate::session::Session;
 
-use super::state::{LoopState, ToolOutcome, record_completion, status_line};
+use super::state::{LoopState, StopReason, ToolOutcome, record_completion, status_line};
 /// Execution context for builtin tools. `session` is shared via `Arc` (never
 /// mutated — no `Mutex`), so it can cross `JoinSet::spawn` (`'static`) bounds
 /// with a refcount bump per task instead of a deep clone.
@@ -439,7 +439,8 @@ pub async fn run_interruptible_batch(
 
     let turn_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id().to_string()).collect();
     let Some(mut batch_ids) = submit_batch(&mut *state, out, limit, model, pending) else {
-        return ToolOutcome::Stop;
+        // The executor refused the batch: a failure, not a user command.
+        return ToolOutcome::Stopped(StopReason::ExecutorGone);
     };
 
     loop {
@@ -462,17 +463,25 @@ pub async fn run_interruptible_batch(
                 }
                 None => {
                     out.notification("tool executor stopped unexpectedly".to_string());
-                    return ToolOutcome::Stop;
+                    return ToolOutcome::Stopped(StopReason::ExecutorGone);
                 }
             },
             inbound = rx.recv() => match inbound {
-                Some(Inbound::Command(Command::Stop | Command::Exit)) | None => {
+                Some(Inbound::Command(Command::Stop)) => {
                     // Stop: kill this batch, drop its partials, exit loop.
                     // Anything already drained into `messages` stays (audit).
                     let ids: Vec<String> = batch_ids.into_iter().collect();
                     state.executor.abort_turn(ids);
                     state.wal.remove_for_ids(&turn_ids);
-                    return ToolOutcome::Stop;
+                    return ToolOutcome::Stopped(StopReason::UserStop);
+                }
+                // Exit or a dropped sender: the session is over, not just
+                // this batch.
+                Some(Inbound::Command(Command::Exit)) | None => {
+                    let ids: Vec<String> = batch_ids.into_iter().collect();
+                    state.executor.abort_turn(ids);
+                    state.wal.remove_for_ids(&turn_ids);
+                    return ToolOutcome::Stopped(StopReason::UserExit);
                 }
                 Some(Inbound::Message(m)) | Some(Inbound::Command(Command::Interrupt(m))) => {
                     let ids: Vec<String> = batch_ids.into_iter().collect();
