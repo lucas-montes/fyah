@@ -11,7 +11,6 @@ use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use valuable::Valuable;
 
 pub mod agent;
 pub mod client;
@@ -35,7 +34,7 @@ use crate::runtime::start_session;
 use {
     client::Client,
     communication::{Command, Inbound},
-    config::{Config, ConfigStore},
+    config::ConfigStore,
     fs_watcher::FsWatcher,
 };
 
@@ -104,17 +103,18 @@ async fn main() {
     );
 
     let config_path = cli.config;
-    let (config, tools) = match Config::load(&config_path).map(Config::validate) {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) | Err(e) => {
+    let config = match config::load_validated(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
             eprintln!("Config error: {e}");
             std::process::exit(1);
         }
     };
 
     tracing::info!(
-        config = config.as_value(),
-        tools = tools.as_value(),
+        generation = config.generation(),
+        agents = config.agent_names().count(),
+        workflows = config.workflow_names().count(),
         "loaded config"
     );
 
@@ -124,7 +124,7 @@ async fn main() {
 
     tracing::debug!("Channels spawned for shutdown, user input, and user output");
 
-    let store = ConfigStore::new(config, tools);
+    let store = ConfigStore::new(config);
     let view = store.subscribe();
     let _fs_watcher = FsWatcher::spawn(
         store,

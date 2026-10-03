@@ -6,11 +6,10 @@ use std::time::Duration;
 use notify::{EventKindMask, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
 use tracing::{debug, error, info, warn};
-use valuable::Valuable;
 
 use crate::{
     communication::OutboundChannel,
-    config::{Config, ConfigStore},
+    config::{self, ConfigError, ConfigStore},
 };
 
 /// Events emitted by the filesystem watcher.
@@ -146,35 +145,39 @@ fn watcher_loop(
 /// Exits when the channel is closed (the watcher thread dropped its sender).
 fn processor_loop(
     event_rx: mpsc::Receiver<FsEvent>,
-    mut store: ConfigStore,
+    store: ConfigStore,
     config_path: PathBuf,
     user_output_tx: OutboundChannel,
 ) {
     loop {
         match event_rx.recv() {
             Ok(FsEvent::ConfigChanged) => {
-                if let Ok(config) = Config::load(&config_path) {
-                    match config.validate() {
-                        Ok((config, tools)) => {
-                            tracing::debug!(
-                                config = config.as_value(),
-                                tools = tools.as_value(),
-                                "store updated"
-                            );
-                            store.update(config, tools);
-                        }
-                        Err(e) => {
-                            error!(error = %e, "failed to reload config");
-                            let _ = user_output_tx
-                                .notification(format!("Failed to reload config: {e}"));
-                        }
+                match config::load_validated(&config_path) {
+                    Ok(config) => {
+                        // Read the counts before the move; the generation only
+                        // exists after the store assigns it, so it is logged
+                        // after the replace (logging first always read 0).
+                        let agents = config.agent_names().count();
+                        let workflows = config.workflow_names().count();
+                        let generation = store.replace(config);
+                        tracing::debug!(generation, agents, workflows, "store updated");
                     }
-                } else {
-                    error!(path=%config_path.display(), "failed to load config");
-                    let _ = user_output_tx.notification(format!(
-                        "Failed to load config from {}",
-                        config_path.display()
-                    ));
+                    // Validation failure: the file parsed, so the user needs
+                    // the collected problems, not the path.
+                    Err(e @ ConfigError::Validation(_)) => {
+                        error!(error = %e, "failed to reload config");
+                        let _ = user_output_tx
+                            .notification(format!("Failed to reload config: {e}"));
+                    }
+                    // Read or TOML parse failure: the file itself is the
+                    // problem, so name it.
+                    Err(_) => {
+                        error!(path=%config_path.display(), "failed to load config");
+                        let _ = user_output_tx.notification(format!(
+                            "Failed to load config from {}",
+                            config_path.display()
+                        ));
+                    }
                 }
             }
             Err(_) => {
