@@ -225,6 +225,16 @@ impl CommandFailure {
     pub fn error(&self) -> &ExecutableError {
         &self.error
     }
+
+    /// Consume the failure and keep only the error, discarding the captured
+    /// telemetry.
+    ///
+    /// `ExecutableError` is deliberately not `Clone` (it is the failure
+    /// contract, not a value), so a caller that wants to *return* the error
+    /// after logging the telemetry has to give up the telemetry to get it.
+    pub fn into_error(self) -> ExecutableError {
+        self.error
+    }
     pub fn stdout_raw(&self) -> &str {
         &self.stdout_raw
     }
@@ -572,5 +582,32 @@ mod tests {
         assert_eq!(err.error(), &ExecutableError::Timeout { secs: 1 });
         assert!(err.timed_out());
         assert!(!err.success());
+    }
+}
+
+#[cfg(test)]
+mod fail_mode_doc_tests {
+    use super::*;
+
+    /// The HOOKS REFERENCE in `fyah.toml` documents `fail_mode` values; if the
+    /// documented spelling is rejected, uncommenting the example fails.
+    #[test]
+    fn documented_fail_mode_values_are_the_accepted_ones() {
+        for (documented, accepted) in [
+            ("message", true),
+            ("abortstep", true),
+            ("abortworkflow", true),
+            ("abort_step", false),
+            ("abort_workflow", false),
+        ] {
+            let raw =
+                format!("type = \"command\"\ncommand = \"true\"\nfail_mode = \"{documented}\"\n");
+            let parsed = toml::from_str::<Executable>(&raw).is_ok();
+            assert_eq!(
+                parsed, accepted,
+                "fail_mode = \"{documented}\" should be {}",
+                if accepted { "accepted" } else { "rejected" }
+            );
+        }
     }
 }

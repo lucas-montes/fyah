@@ -1,9 +1,63 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use valuable::Valuable;
 
 use crate::executable::{Executable, ExecutableError, ExecutableParams, FailMode, run_command};
 use crate::model::Message;
+
+/// A heap-boxed future, so a trait that returns one can still be used behind
+/// `&dyn` / `Box<dyn>`.
+///
+/// The crate uses this because a trait with a generic method — or with an
+/// `impl Future` return — is never dyn-compatible. Anything intended to be a
+/// trait object must return this instead.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// A hook's decision plus the captured streams.
+///
+/// The typed wrapper needs the raw streams when the decision turns out not to
+/// match the slot's shape: that is the one case where `stdout` is the most
+/// useful thing to log, and the erased runner is the only place they survive.
+pub struct HookDecision {
+    value: Value,
+    stdout_raw: String,
+    stderr: String,
+}
+
+impl std::fmt::Debug for HookDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookDecision")
+            .field("value", &self.value)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HookDecision {
+    /// No decision: the slot should use its default.
+    pub fn none() -> Self {
+        Self {
+            value: Value::Null,
+            stdout_raw: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    /// A decision with no captured streams (tests, builtins).
+    pub fn from_value(value: Value) -> Self {
+        Self {
+            value,
+            stdout_raw: String::new(),
+            stderr: String::new(),
+        }
+    }
+}
 
 /// Structured hook failure. Replaces every `reason: String` payload; pure
 /// enum (breaking wire format by design — scripts emit the new shape).
@@ -956,30 +1010,90 @@ impl<'a> HookState<'a> {
 /// Mockable execution seam. Production wires [`RealHookRunner`] driven purely
 /// by `fyah.toml`; tests inject a fake returning canned `Output`s.
 pub trait HookRunner: std::fmt::Debug {
-    fn run_hook<S: Slot>(
-        &self,
-        exe: &Executable,
-        hook: &Hook<S>,
-        input: &S::Input<'_>,
-        state: &mut HookState<'_>,
-    ) -> impl std::future::Future<Output = S::Output>;
+    /// Run a hook, type-erased: slot and decision are plain JSON.
+    ///
+    /// Deliberately **non-generic**, because a trait with any generic method
+    /// is never dyn-compatible — which is what would let a driver hold
+    /// `&dyn HookRunner`. The typed entry point is the free [`run_hook`]
+    /// below, which wraps this and applies [`Slot::fallback`].
+    ///
+    /// `Ok` decision with a `Null` value means "no decision", which every slot reads as its
+    /// `Default`. `Err` is a transport or parse failure; applying the slot's
+    /// `fail_mode` needs `S`, so that happens in the wrapper.
+    fn run_json<'a, 'b>(
+        &'a self,
+        exe: &'a Executable,
+        slot: &'a str,
+        executable: &'a str,
+        input: &'a Value,
+        state: &'a mut HookState<'b>,
+    ) -> BoxFuture<'a, Result<HookDecision, ExecutableError>>
+    where
+        'b: 'a;
+}
+
+/// Typed hook execution: serialise the input, call [`HookRunner::run_json`],
+/// parse the decision back, and apply [`Slot::fallback`] on either failure.
+///
+/// A free function rather than a trait method so `HookRunner` stays
+/// dyn-compatible. `R: ?Sized` is what lets it take a `&dyn HookRunner`.
+pub async fn run_hook<S: Slot, R: HookRunner + ?Sized>(
+    runner: &R,
+    exe: &Executable,
+    hook: &Hook<S>,
+    input: &S::Input<'_>,
+    state: &mut HookState<'_>,
+) -> S::Output {
+    let json = serde_json::to_value(input).unwrap_or(Value::Null);
+    let decision = match runner.run_json(exe, S::NAME, hook.executable(), &json, state).await {
+        Ok(decision) => decision,
+        Err(error) => return S::fallback(&error, exe.fail_mode()),
+    };
+    // Empty stdout means "no decision": every slot's Default.
+    if decision.value().is_null() {
+        return S::Output::default();
+    }
+    match serde_json::from_value::<S::Output>(decision.value().clone()) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            // The slot rejected a well-formed JSON decision. `run_json`
+            // cannot do this check (it has no `S`), so the warning lives here.
+            tracing::warn!(
+                slot = S::NAME,
+                executable = hook.executable(),
+                error = %error,
+                stdout_raw = decision.stdout_raw,
+                stderr = decision.stderr,
+                fail_mode = ?exe.fail_mode(),
+                "hook output not understood"
+            );
+            S::fallback(
+                &ExecutableError::InvalidOutput {
+                    detail: error.to_string(),
+                },
+                exe.fail_mode(),
+            )
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct RealHookRunner;
 
 impl HookRunner for RealHookRunner {
-    async fn run_hook<S: Slot>(
-        &self,
-        exe: &Executable,
-        hook: &Hook<S>,
-        input: &S::Input<'_>,
+    fn run_json<'a, 'b>(
+        &'a self,
+        exe: &'a Executable,
+        slot: &'a str,
+        executable: &'a str,
+        input: &'a Value,
         // Reserved for builtin handlers that mutate state directly;
         // external executables receive IDs + JSON and return patches.
-        _state: &mut HookState<'_>,
-    ) -> S::Output {
-        let slot = S::NAME;
-        let executable = hook.executable();
+        _state: &'a mut HookState<'b>,
+    ) -> BoxFuture<'a, Result<HookDecision, ExecutableError>>
+    where
+        'b: 'a,
+    {
         let kind = exe.params().kind();
         let start = std::time::Instant::now();
         tracing::debug!(
@@ -990,12 +1104,11 @@ impl HookRunner for RealHookRunner {
             "hook start"
         );
         if tracing::enabled!(tracing::Level::TRACE) {
-            let input_json = serde_json::to_value(input).unwrap_or(Value::Null);
-            tracing::trace!(slot, executable, input = %input_json, "hook input");
+            tracing::trace!(slot, executable, input = %input, "hook input");
         }
-        match exe.params() {
-            ExecutableParams::Builtin { builtin } => {
-                match run_builtin_name(builtin) {
+        Box::pin(async move {
+            match exe.params() {
+                ExecutableParams::Builtin { builtin } => match run_builtin_name(builtin) {
                     Ok(()) => {
                         tracing::debug!(
                             slot,
@@ -1004,7 +1117,8 @@ impl HookRunner for RealHookRunner {
                             elapsed_ms = start.elapsed().as_millis() as u64,
                             "builtin hook executed"
                         );
-                        S::Output::default()
+                        // No decision: the wrapper turns this into the slot default.
+                        Ok(HookDecision::none())
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -1016,41 +1130,21 @@ impl HookRunner for RealHookRunner {
                             elapsed_ms = start.elapsed().as_millis() as u64,
                             "unknown builtin"
                         );
-                        S::fallback(&error, exe.fail_mode())
+                        Err(error)
                     }
-                }
-            }
-            ExecutableParams::Command { command, args } => {
-                let stdin = serde_json::to_value(input).unwrap_or(Value::Null);
-                let static_args: &[String] = args.as_deref().unwrap_or(&[]);
-                tracing::debug!(
-                    slot,
-                    executable,
-                    command,
-                    args = ?static_args,
-                    stdin_len = stdin.to_string().len(),
-                    "spawning hook command"
-                );
-                match run_command(exe, command, static_args, &stdin).await {
-                    Ok(out) if *out.value() == Value::Null => {
-                        tracing::debug!(
-                            slot,
-                            executable,
-                            command,
-                            exit_code = ?out.exit_code(),
-                            success = out.success(),
-                            elapsed_ms = out.elapsed_ms(),
-                            stdin_len = out.stdin_len(),
-                            stdout_len = out.stdout_len(),
-                            stderr_len = out.stderr_len(),
-                            stderr = out.stderr(),
-                            truncated = out.truncated(),
-                            "hook command completed with empty output (default outcome)"
-                        );
-                        S::Output::default()
-                    }
-                    Ok(out) => match serde_json::from_value::<S::Output>(out.value().clone()) {
-                        Ok(parsed) => {
+                },
+                ExecutableParams::Command { command, args } => {
+                    let static_args: &[String] = args.as_deref().unwrap_or(&[]);
+                    tracing::debug!(
+                        slot,
+                        executable,
+                        command,
+                        args = ?static_args,
+                        stdin_len = input.to_string().len(),
+                        "spawning hook command"
+                    );
+                    match run_command(exe, command, static_args, input).await {
+                        Ok(out) if *out.value() == Value::Null => {
                             tracing::debug!(
                                 slot,
                                 executable,
@@ -1063,91 +1157,92 @@ impl HookRunner for RealHookRunner {
                                 stderr_len = out.stderr_len(),
                                 stderr = out.stderr(),
                                 truncated = out.truncated(),
-                                outcome = ?parsed,
-                                "hook command completed"
+                                "hook command completed with empty output (default outcome)"
                             );
-                            parsed
+                            Ok(HookDecision::none())
                         }
-                        Err(e) => {
-                            let error = ExecutableError::InvalidOutput {
-                                detail: e.to_string(),
+                        Ok(out) => {
+                            let decision = HookDecision {
+                                value: out.value().clone(),
+                                stdout_raw: out.stdout_raw().to_string(),
+                                stderr: out.stderr().to_string(),
                             };
-                            tracing::warn!(
+                            tracing::debug!(
                                 slot,
                                 executable,
                                 command,
-                                error = %error,
                                 exit_code = ?out.exit_code(),
                                 success = out.success(),
                                 elapsed_ms = out.elapsed_ms(),
                                 stdin_len = out.stdin_len(),
                                 stdout_len = out.stdout_len(),
                                 stderr_len = out.stderr_len(),
-                                stdout_raw = out.stdout_raw(),
                                 stderr = out.stderr(),
                                 truncated = out.truncated(),
-                                fail_mode = ?exe.fail_mode(),
-                                "hook output not understood"
+                                outcome = %decision.value,
+                                "hook command completed"
                             );
-                            S::fallback(&error, exe.fail_mode())
+                            Ok(decision)
                         }
-                    },
-                    Err(failure) => {
-                        tracing::warn!(
-                            slot,
-                            executable,
-                            command,
-                            error = %failure.error(),
-                            exit_code = ?failure.exit_code(),
-                            success = failure.success(),
-                            timed_out = failure.timed_out(),
-                            elapsed_ms = failure.elapsed_ms(),
-                            stdin_len = failure.stdin_len(),
-                            stdout_len = failure.stdout_len(),
-                            stderr_len = failure.stderr_len(),
-                            stdout_raw = failure.stdout_raw(),
-                            stderr = failure.stderr(),
-                            truncated = failure.truncated(),
-                            fail_mode = ?exe.fail_mode(),
-                            "hook command failed"
-                        );
-                        S::fallback(failure.error(), exe.fail_mode())
+                        Err(failure) => {
+                            tracing::warn!(
+                                slot,
+                                executable,
+                                command,
+                                error = %failure.error(),
+                                exit_code = ?failure.exit_code(),
+                                success = failure.success(),
+                                timed_out = failure.timed_out(),
+                                elapsed_ms = failure.elapsed_ms(),
+                                stdin_len = failure.stdin_len(),
+                                stdout_len = failure.stdout_len(),
+                                stderr_len = failure.stderr_len(),
+                                stdout_raw = failure.stdout_raw(),
+                                stderr = failure.stderr(),
+                                truncated = failure.truncated(),
+                                fail_mode = ?exe.fail_mode(),
+                                "hook command failed"
+                            );
+                            // `ExecutableError` is not `Clone`, so give up the
+                            // telemetry we just logged to return the error.
+                            Err(failure.into_error())
+                        }
                     }
                 }
+                ExecutableParams::Wasm { path, function } => {
+                    let error = ExecutableError::NotImplemented {
+                        kind: exe.params().kind().to_string(),
+                    };
+                    tracing::warn!(
+                        slot,
+                        executable,
+                        path,
+                        function = ?function,
+                        error = %error,
+                        fail_mode = ?exe.fail_mode(),
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "executable kind not implemented"
+                    );
+                    Err(error)
+                }
+                ExecutableParams::Plugin { name, function } => {
+                    let error = ExecutableError::NotImplemented {
+                        kind: exe.params().kind().to_string(),
+                    };
+                    tracing::warn!(
+                        slot,
+                        executable,
+                        name,
+                        function = ?function,
+                        error = %error,
+                        fail_mode = ?exe.fail_mode(),
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        "executable kind not implemented"
+                    );
+                    Err(error)
+                }
             }
-            ExecutableParams::Wasm { path, function } => {
-                let error = ExecutableError::NotImplemented {
-                    kind: exe.params().kind().to_string(),
-                };
-                tracing::warn!(
-                    slot,
-                    executable,
-                    path,
-                    function = ?function,
-                    error = %error,
-                    fail_mode = ?exe.fail_mode(),
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    "executable kind not implemented"
-                );
-                S::fallback(&error, exe.fail_mode())
-            }
-            ExecutableParams::Plugin { name, function } => {
-                let error = ExecutableError::NotImplemented {
-                    kind: exe.params().kind().to_string(),
-                };
-                tracing::warn!(
-                    slot,
-                    executable,
-                    plugin = name,
-                    function = ?function,
-                    error = %error,
-                    fail_mode = ?exe.fail_mode(),
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    "executable kind not implemented"
-                );
-                S::fallback(&error, exe.fail_mode())
-            }
-        }
+        })
     }
 }
 
@@ -1205,5 +1300,120 @@ mod tests {
         assert_eq!(state.truncate_outputs(4), 1);
         assert_eq!(state.drop_tool_results(&["b".to_string()]), 1);
         assert_eq!(state.message_count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    /// A runner that answers with a fixed result, so the *wrapper's* split —
+    /// erased call, then `S::fallback` — is what is under test.
+    struct Stub {
+        result: Result<Value, ExecutableError>,
+    }
+
+    impl std::fmt::Debug for Stub {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Stub")
+        }
+    }
+
+    impl HookRunner for Stub {
+        fn run_json<'a, 'b>(
+            &'a self,
+            _exe: &'a Executable,
+            _slot: &'a str,
+            _executable: &'a str,
+            _input: &'a Value,
+            _state: &'a mut HookState<'b>,
+        ) -> BoxFuture<'a, Result<HookDecision, ExecutableError>>
+        where
+            'b: 'a,
+        {
+            let result = match &self.result {
+                Ok(v) => Ok(HookDecision::from_value(v.clone())),
+                Err(_) => Err(ExecutableError::NotImplemented {
+                    kind: "stub".to_string(),
+                }),
+            };
+            Box::pin(async move { result })
+        }
+    }
+
+    fn command_exe(fail_mode: &str) -> Executable {
+        toml::from_str(&format!(
+            "type = \"command\"\ncommand = \"true\"\nfail_mode = \"{fail_mode}\"\n"
+        ))
+        .expect("parse executable")
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_obeys_fail_mode() {
+        let mut messages = vec![Message::new_user("hello".to_string())];
+        let mut state = HookState::new(&mut messages, "s");
+        let hook = Hook::<PrePromptSlot>::new("pp".to_string());
+        let input = PrePromptInput::new("coder", 1, 1);
+
+        // fail-open: the default outcome, i.e. Continue.
+        let open = command_exe("message");
+        let stub = Stub {
+            result: Err(ExecutableError::NotImplemented {
+                kind: "stub".to_string(),
+            }),
+        };
+        let out = run_hook(&stub, &open, &hook, &input, &mut state).await;
+        assert_eq!(out, PrePromptOutcome::Continue);
+
+        // fail-closed: Abort, mapped through the hook's own fail_mode.
+        let closed = command_exe("abortworkflow");
+        let out = run_hook(&stub, &closed, &hook, &input, &mut state).await;
+        assert!(
+            matches!(out, PrePromptOutcome::Abort { .. }),
+            "expected Abort, got {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unparseable_output_obeys_fail_mode() {
+        let mut messages = vec![Message::new_user("hello".to_string())];
+        let mut state = HookState::new(&mut messages, "s");
+        let hook = Hook::<PrePromptSlot>::new("pp".to_string());
+        let input = PrePromptInput::new("coder", 1, 1);
+        // Well-formed JSON the slot does not understand: same shape as a
+        // script printing garbage, so it takes the InvalidOutput path.
+        let stub = Stub {
+            result: Ok(serde_json::json!({ "decision": "not_a_decision" })),
+        };
+
+        let open = command_exe("message");
+        assert_eq!(
+            run_hook(&stub, &open, &hook, &input, &mut state).await,
+            PrePromptOutcome::Continue,
+            "fail-open turns an unreadable decision into the default"
+        );
+
+        let closed = command_exe("abortworkflow");
+        assert!(
+            matches!(
+                run_hook(&stub, &closed, &hook, &input, &mut state).await,
+                PrePromptOutcome::Abort { .. }
+            ),
+            "fail-closed turns an unreadable decision into an abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_decision_is_the_slot_default() {
+        let mut messages = vec![Message::new_user("hello".to_string())];
+        let mut state = HookState::new(&mut messages, "s");
+        let hook = Hook::<PrePromptSlot>::new("pp".to_string());
+        let input = PrePromptInput::new("coder", 1, 1);
+        let exe = command_exe("abortworkflow");
+        let stub = Stub {
+            result: Ok(Value::Null),
+        };
+
+        assert_eq!(run_hook(&stub, &exe, &hook, &input, &mut state).await, PrePromptOutcome::Continue);
     }
 }

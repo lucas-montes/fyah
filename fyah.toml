@@ -126,13 +126,15 @@ fail_mode = "message"
 # (`Continue` / `Done`). A hook whose executable is missing from
 # `[executables.*]` is skipped; a hook whose executable fails is mapped to an
 # outcome via its `fail_mode` (fail-open `message` vs fail-closed
-# `abort_step` / `abort_workflow`).
+# `abortstep` / `abortworkflow`).
 #
 # --- Executables -----------------------------------------------------------
 # [executables.<key>]
 # type = "builtin" | "command" | "wasm" | "plugin"
 # timeout_secs = <int, optional>         # command: kill + fail after N s
-# fail_mode = "message" | "abort_step" | "abort_workflow"   # default: message
+# fail_mode = "message" | "abortstep" | "abortworkflow"   # default: message
+#   Values are lowercase, no underscore (FailMode is rename_all="lowercase"):
+#   "abort_step" / "abort_workflow" are hook *outcomes*, not fail_mode values.
 # # type = "builtin": builtin = "noop" | "read_file" | "write_file"
 # #                             | "prune_outputs" | "audit_append" | "budget_guard"
 # #   Tool builtins are read_file + write_file only; there is no shell tool.
