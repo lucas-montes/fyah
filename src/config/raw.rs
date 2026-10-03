@@ -1,23 +1,89 @@
+//! Raw, serde-facing configuration: exactly what `fyah.toml` deserializes into.
+//!
+//! Everything here is plain data plus cross-reference validation. It is the
+//! *input* side of the pipeline: [`Config::validate`] checks it and then hands
+//! the maps to [`ResolvedConfig::build`], which owns the conversion into the
+//! runtime structures the loops execute against. Those structures — and every
+//! trait object they hold — live in [`super::resolved`], never here.
+
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
 use valuable::Valuable;
 
+use super::error::ConfigError;
+use super::resolved::ResolvedConfig;
 use crate::context::{ContextConfig, ContextStrategy};
 use crate::executable::Executable;
 use crate::hooks::{
-    Hook, OnErrorSlot, PostToolSlot, PrePromptSlot, PreToolSlot, SessionEndSlot,
-    SessionStartSlot, StepSlot, VerifySlot,
+    Hook, OnErrorSlot, PostToolSlot, PrePromptSlot, PreToolSlot, SessionEndSlot, SessionStartSlot,
+    StepSlot, VerifySlot,
 };
 use crate::model::Tool;
-use crate::provider::ProviderConfig;
-use crate::runtime::StepAction;
 
+/// What a workflow step does, as written in TOML.
+///
+/// Lives here — not in `runtime.rs` — because it is config data: the resolved
+/// layer converts it into an owned [`StepKind`](super::resolved::StepKind),
+/// and the runtime dispatches on that.
 #[derive(Debug, Deserialize, PartialEq, Valuable)]
+#[serde(untagged)]
+pub enum StepAction {
+    Llm { agent: String },
+    Command { command: String },
+}
+
+/// Which wire format a provider speaks. Deserialized from the `format` key
+/// in `[providers.*]`; the match that turns this into a
+/// [`ProviderLogic`](super::resolved::ProviderLogic) lives in
+/// [`crate::provider::logic_for`], next to the format-specific code.
+#[derive(Debug, Deserialize, PartialEq, Eq, Default, Valuable)]
+#[serde(rename_all = "lowercase")]
+pub enum WireFormat {
+    #[default]
+    OpenAi,
+    OpenAiResponses,
+    Anthropic,
+}
+
+/// Raw connection config (deserialized from TOML). Fields are private;
+/// accessors only. The runnable form of this is
+/// [`ProviderLogic`](super::resolved::ProviderLogic), built once per provider
+/// during validation.
+#[derive(Debug, Deserialize, PartialEq, Valuable)]
+pub struct ProviderConfig {
+    url: String,
+    api_key: String,
+    #[serde(default)]
+    format: WireFormat,
+    #[serde(default)]
+    models: HashMap<String, ModelConfig>,
+}
+
+impl ProviderConfig {
+    pub fn get_model(&self, key: &str) -> Option<&ModelConfig> {
+        self.models.get(key)
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Required in TOML — there is no "no auth" provider — so implementations
+    /// apply it unconditionally.
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
+    pub fn format(&self) -> &WireFormat {
+        &self.format
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Valuable)]
 pub struct ModelConfig {
     name: String,
     temperature: Option<f32>,
@@ -38,7 +104,7 @@ pub enum OnInput {
 /// them before the next LLM request (`sequential`, the default), or proceed
 /// after the first completion while the rest keep running in the background
 /// (`async`).
-#[derive(Debug, Default, Deserialize, PartialEq, Eq, Valuable)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Valuable)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolExecution {
     #[default]
@@ -161,7 +227,8 @@ impl LimitsConfig {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-pub struct AgentConfig {    provider: String,
+pub struct AgentConfig {
+    provider: String,
     model: String,
     #[serde(default)]
     system_prompt: Option<String>,
@@ -191,6 +258,30 @@ impl AgentConfig {
     }
     pub fn model(&self) -> &str {
         &self.model
+    }
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+    pub fn max_iterations(&self) -> usize {
+        self.max_iterations.get()
+    }
+    pub fn max_concurrent_tools(&self) -> usize {
+        self.max_concurrent_tools.get()
+    }
+    /// Tool names as configured. The resolved definitions live on
+    /// [`AgentRuntime::tools`](super::resolved::AgentRuntime::tools); this is
+    /// the raw list, for validation and diagnostics.
+    pub fn tools(&self) -> &[String] {
+        &self.tools
+    }
+    pub fn on_input(&self) -> Option<&OnInput> {
+        self.on_input.as_ref()
+    }
+    pub fn tools_on_input(&self) -> Option<&OnInput> {
+        self.tools_on_input.as_ref()
+    }
+    pub fn tools_interrupt_strategy(&self) -> &ToolsInterruptStrategy {
+        &self.tools_interrupt_strategy
     }
     pub fn pre_prompt(&self) -> Option<&Hook<PrePromptSlot>> {
         self.hooks.pre_prompt()
@@ -273,15 +364,10 @@ pub struct WorkflowConfig {
 }
 
 impl WorkflowConfig {
-    pub fn get_step(&self, name: &str) -> &StepConfig {
-        //TODO: return option, it could change mid run?
-        self.steps
-            .get(name)
-            .expect("We validated this before, step should exist")
-    }
-
-    pub fn initial_step(&self) -> &StepConfig {
-        self.get_step(&self.initial)
+    /// Split into the entry step and the step map. The resolved layer consumes
+    /// this; nothing else needs the raw steps by name again.
+    pub(crate) fn into_parts(self) -> (String, HashMap<String, StepConfig>) {
+        (self.initial, self.steps)
     }
 
     pub fn initial(&self) -> &str {
@@ -327,6 +413,21 @@ impl StepConfig {
     pub fn after(&self) -> Option<&Hook<StepSlot>> {
         self.after.as_ref()
     }
+
+    /// Next step on success; `"done"` terminates the workflow.
+    pub fn on_success(&self) -> &str {
+        &self.on_success
+    }
+
+    /// Next step on failure; `"done"` terminates the workflow.
+    pub fn on_failure(&self) -> &str {
+        &self.on_failure
+    }
+
+    /// Optional execution timeout in seconds. Data only for now.
+    pub fn timeout_secs(&self) -> Option<std::num::NonZeroU64> {
+        self.timeout_secs
+    }
 }
 
 fn default_step() -> String {
@@ -360,22 +461,37 @@ impl Config {
         })
     }
 
-    pub fn validate(self) -> Result<(Workspace, ToolRegistry), ConfigError> {
+    pub fn validate(self) -> Result<ResolvedConfig, ConfigError> {
         let mut errors = Vec::new();
         let tools = ToolRegistry::from(self.tools);
 
-        validate_agents(&self.agents, &self.providers, &tools, &self.executables, &mut errors);
+        validate_agents(
+            &self.agents,
+            &self.providers,
+            &tools,
+            &self.executables,
+            &mut errors,
+        );
 
         validate_workflows(&self.workflows, &self.agents, &mut errors);
 
-        validate_executables(&self.agents, &self.workflows, &tools, &self.executables, &mut errors);
+        validate_executables(
+            &self.agents,
+            &self.workflows,
+            &tools,
+            &self.executables,
+            &mut errors,
+        );
 
         errors
             .is_empty()
             .then(|| {
-                (
-                    Workspace::new(self.providers, self.agents, self.workflows, self.executables),
-                    tools,
+                ResolvedConfig::build(
+                    self.providers,
+                    self.agents,
+                    self.workflows,
+                    self.executables,
+                    &tools,
                 )
             })
             .ok_or(ConfigError::Validation(errors))
@@ -465,7 +581,13 @@ fn validate_executables(
     }
     for (agent_name, agent) in agents {
         if let Some(h) = agent.pre_prompt() {
-            check(executables, errors, agent_name, "pre_prompt", h.executable());
+            check(
+                executables,
+                errors,
+                agent_name,
+                "pre_prompt",
+                h.executable(),
+            );
         }
         if let Some(h) = agent.pre_tool() {
             check(executables, errors, agent_name, "pre_tool", h.executable());
@@ -477,7 +599,13 @@ fn validate_executables(
             check(executables, errors, agent_name, "on_error", h.executable());
         }
         if let Some(h) = agent.verify_done() {
-            check(executables, errors, agent_name, "verify_done", h.executable());
+            check(
+                executables,
+                errors,
+                agent_name,
+                "verify_done",
+                h.executable(),
+            );
         }
         // T02: [agents.<name>.context] custom strategy validation.
         // Missing executable with custom, unknown executable, or executable
@@ -530,7 +658,13 @@ fn validate_executables(
     }
     for (wf_name, wf) in workflows {
         if let Some(h) = wf.session_start() {
-            check(executables, errors, wf_name, "session_start", h.executable());
+            check(
+                executables,
+                errors,
+                wf_name,
+                "session_start",
+                h.executable(),
+            );
         }
         if let Some(h) = wf.session_end() {
             check(executables, errors, wf_name, "session_end", h.executable());
@@ -561,8 +695,7 @@ fn validate_executables(
     if !executables.is_empty() {
         for name in tools.0.keys() {
             if let Some(def) = tools.get(name) {
-                if !executables.contains_key(def.executable())
-                {
+                if !executables.contains_key(def.executable()) {
                     errors.push(ConfigError::tool_executable(name, def.executable()));
                 }
             }
@@ -570,124 +703,8 @@ fn validate_executables(
     }
 }
 
-#[derive(Debug)]
-pub enum ConfigError {
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    Parse {
-        path: PathBuf,
-        source: toml::de::Error,
-    },
-    UnknownStep(String),
-    UnknownTool(String),
-    UnknownProvider(String),
-    UnknownModel(String),
-    UnknownAgent(String),
-    UnknownExecutable(String),
-    InvalidContext(String),
-    InvalidLimits(String),
-    Validation(Vec<ConfigError>),
-}
-
-impl ConfigError {
-    fn step(workflow: &str, step: &str) -> Self {
-        Self::UnknownStep(format!("{step} (referenced by workflow {workflow})"))
-    }
-
-    fn tool(agent: &str, tool: &str) -> Self {
-        Self::UnknownTool(format!("{tool} (referenced by agent {agent})"))
-    }
-
-    fn provider(agent: &str, provider: &str) -> Self {
-        Self::UnknownProvider(format!("{provider} (referenced by agent {agent})"))
-    }
-
-    fn model(agent: &str, model: &str) -> Self {
-        Self::UnknownModel(format!("{model} (referenced by agent {agent})"))
-    }
-
-    fn executable(owner: &str, slot: &str, exe: &str) -> Self {
-        Self::UnknownExecutable(format!("{exe} (referenced by {owner}.{slot})"))
-    }
-
-    fn tool_executable(tool: &str, exe: &str) -> Self {
-        Self::UnknownExecutable(format!("{exe} (referenced by tool {tool})"))
-    }
-
-    fn context(agent: &str, detail: &str) -> Self {
-        Self::InvalidContext(format!("{detail} (referenced by agent {agent}.context)"))
-    }
-
-    fn limits(agent: &str, detail: &str) -> Self {
-        Self::InvalidLimits(format!("{detail} (referenced by agent {agent}.limits)"))
-    }
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, source } => {
-                write!(f, "I/O error reading {}: {}", path.display(), source)
-            }
-            Self::Parse { path, source } => {
-                let msg = source.message();
-                if let Some(span) = source.span() {
-                    write!(
-                        f,
-                        "TOML parse error in {} at bytes {}..{}: {}",
-                        path.display(),
-                        span.start,
-                        span.end,
-                        msg
-                    )?;
-                    if msg.contains("duplicate field") {
-                        write!(
-                            f,
-                            " (hint: use [providers.*] and [agents.*] only, plural form)"
-                        )?;
-                    }
-                    Ok(())
-                } else {
-                    write!(f, "TOML parse error in {}: {}", path.display(), msg)
-                }
-            }
-            Self::Validation(errors) => {
-                write!(
-                    f,
-                    "configuration validation failed with {} error(s):",
-                    errors.len()
-                )?;
-                for error in errors {
-                    write!(f, "\n  - {error}")?;
-                }
-                Ok(())
-            }
-            Self::UnknownTool(t) => write!(f, "unknown tool: {t}"),
-            Self::UnknownStep(s) => write!(f, "unknown step: {s}"),
-            Self::UnknownProvider(p) => write!(f, "unknown provider: {p}"),
-            Self::UnknownModel(m) => write!(f, "unknown model: {m}"),
-            Self::UnknownAgent(a) => write!(f, "unknown agent: {a}"),
-            Self::UnknownExecutable(e) => write!(f, "unknown executable: {e}"),
-            Self::InvalidContext(c) => write!(f, "invalid context config: {c}"),
-            Self::InvalidLimits(l) => write!(f, "invalid limits config: {l}"),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::Parse { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Valuable)]
-pub struct ToolRegistry(HashMap<String, CustomToolDef>);
+pub(crate) struct ToolRegistry(HashMap<String, CustomToolDef>);
 
 impl From<Vec<CustomToolDef>> for ToolRegistry {
     fn from(custom_tools: Vec<CustomToolDef>) -> Self {
@@ -721,146 +738,6 @@ impl ToolRegistry {
     }
 }
 
-#[derive(Debug, Valuable)]
-pub struct Workspace {
-    providers: HashMap<String, ProviderConfig>,
-    #[valuable(skip)]
-    agents: HashMap<String, AgentConfig>,
-    #[valuable(skip)]
-    workflows: HashMap<String, WorkflowConfig>,
-    #[valuable(skip)]
-    executables: HashMap<String, Executable>,
-}
-
-impl Workspace {
-    pub fn new(
-        providers: HashMap<String, ProviderConfig>,
-        agents: HashMap<String, AgentConfig>,
-        workflows: HashMap<String, WorkflowConfig>,
-        executables: HashMap<String, Executable>,
-    ) -> Self {
-        Self {
-            providers,
-            agents,
-            workflows,
-            executables,
-        }
-    }
-
-    pub fn get_workflow(&self, name: &str) -> &WorkflowConfig {
-        self.workflows.get(name).expect(
-            "We have already validated that the workflow exists so we should be able to find it",
-        )
-    }
-
-    pub fn get_executable(&self, name: &str) -> Option<&Executable> {
-        self.executables.get(name)
-    }
-
-    pub fn get_agent(&self, name: &str) -> Option<AgentView<'_>> {
-        let Some(agent) = self.agents.get(name) else {
-            tracing::error!(name, "Agent not found in workspace");
-            return None;
-        };
-        let Some(provider) = self.providers.get(agent.provider()) else {
-            tracing::error!(name = agent.provider(), "Provider not found in workspace");
-            return None;
-        };
-        let Some(model) = provider.get_model(agent.model()) else {
-            tracing::error!(name = agent.model(), "Model not found in workspace");
-            return None;
-        };
-        Some(AgentView::new(agent, provider, model))
-    }
-}
-
-#[derive(Debug)]
-pub struct AgentView<'a> {
-    agent: &'a AgentConfig,
-    provider: &'a ProviderConfig,
-    model: &'a ModelConfig,
-}
-
-impl<'a> AgentView<'a> {
-    pub fn new(
-        agent: &'a AgentConfig,
-        provider: &'a ProviderConfig,
-        model: &'a ModelConfig,
-    ) -> Self {
-        Self {
-            agent,
-            provider,
-            model,
-        }
-    }
-
-    pub fn on_input(&self) -> Option<&OnInput> {
-        self.agent.on_input.as_ref()
-    }
-
-    pub fn tools_on_input(&self) -> Option<&OnInput> {
-        self.agent.tools_on_input.as_ref()
-    }
-
-    pub fn tools_interrupt_strategy(&self) -> &ToolsInterruptStrategy {
-        &self.agent.tools_interrupt_strategy
-    }
-
-    pub fn tool_execution(&self) -> &ToolExecution {
-        &self.agent.tool_execution
-    }
-
-    pub fn streaming(&self) -> bool {
-        self.model.streaming
-    }
-
-    pub fn system_prompt(&self) -> Option<&str> {
-        self.agent.system_prompt.as_deref()
-    }
-
-    pub fn provider_config(&self) -> &ProviderConfig {
-        self.provider
-    }
-
-    pub fn model_name(&self) -> &str {
-        &self.agent.model
-    }
-
-    pub fn model_config(&self) -> &ModelConfig {
-        self.model
-    }
-
-    /// Per-request output cap: the lower of the model default and the
-    /// `[agents.<name>.limits]` per-turn cap (L10). `None` means uncapped.
-    pub fn request_max_tokens(&self) -> Option<u32> {
-        match (
-            self.model.max_tokens(),
-            self.agent.limits.max_output_tokens_per_turn(),
-        ) {
-            (Some(m), Some(l)) => Some(m.min(l)),
-            (Some(m), None) => Some(m),
-            (None, Some(l)) => Some(l),
-            (None, None) => None,
-        }
-    }
-
-    pub fn max_iterations(&self) -> usize {
-        self.agent.max_iterations.get()
-    }
-
-    pub fn max_concurrent_tools(&self) -> usize {
-        self.agent.max_concurrent_tools.get()
-    }
-
-    pub fn tool_names(&self) -> &[String] {
-        &self.agent.tools
-    }
-
-    pub fn agent_config(&self) -> &'a AgentConfig {
-        self.agent
-    }
-}
-
 impl ModelConfig {
     pub fn streaming(&self) -> bool {
         self.streaming
@@ -873,51 +750,6 @@ impl ModelConfig {
     }
     pub fn max_tokens(&self) -> Option<u32> {
         self.max_tokens
-    }
-}
-
-#[derive(Debug)]
-pub struct ConfigStore {
-    generation: u64,
-    config: Arc<arc_swap::ArcSwap<Workspace>>,
-    tools: Arc<arc_swap::ArcSwap<ToolRegistry>>,
-}
-
-impl ConfigStore {
-    pub fn new(config: Workspace, tools: ToolRegistry) -> Self {
-        Self {
-            generation: 0,
-            config: Arc::new(arc_swap::ArcSwap::from_pointee(config)),
-            tools: Arc::new(arc_swap::ArcSwap::from_pointee(tools)),
-        }
-    }
-
-    pub fn update(&mut self, config: Workspace, tools: ToolRegistry) {
-        self.generation += 1;
-        self.config.store(Arc::new(config));
-        self.tools.store(Arc::new(tools));
-    }
-
-    pub fn subscribe(&self) -> ConfigView {
-        ConfigView {
-            config: Arc::clone(&self.config),
-            tools: Arc::clone(&self.tools),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfigView {
-    config: Arc<arc_swap::ArcSwap<Workspace>>,
-    tools: Arc<arc_swap::ArcSwap<ToolRegistry>>,
-}
-
-impl ConfigView {
-    pub fn config(&self) -> Arc<Workspace> {
-        self.config.load_full()
-    }
-    pub fn tools(&self) -> Arc<ToolRegistry> {
-        self.tools.load_full()
     }
 }
 
@@ -962,8 +794,8 @@ on_failure = "done"
     #[test]
     fn tool_execution_defaults_to_sequential() {
         let config: Config = toml::from_str(&minimal_toml("")).expect("parse");
-        let (workspace, _tools) = config.validate().expect("valid");
-        let agent = workspace.get_agent("coder").expect("agent exists");
+        let resolved = config.validate().expect("valid");
+        let agent = resolved.agent("coder").expect("agent exists");
         assert_eq!(agent.tool_execution(), &ToolExecution::Sequential);
         assert_eq!(
             agent.agent_config().tool_execution(),
@@ -981,8 +813,8 @@ on_failure = "done"
             1,
         );
         let config: Config = toml::from_str(&raw).expect("parse");
-        let (workspace, _tools) = config.validate().expect("valid");
-        let agent = workspace.get_agent("coder").expect("agent exists");
+        let resolved = config.validate().expect("valid");
+        let agent = resolved.agent("coder").expect("agent exists");
         assert_eq!(agent.tool_execution(), &ToolExecution::Async);
 
         let bad = minimal_toml("").replacen(
@@ -995,9 +827,7 @@ on_failure = "done"
 
     #[test]
     fn hook_executable_ref_must_exist() {
-        let raw = minimal_toml(
-            "[agents.coder.hooks]\npre_prompt = { executable = \"missing\" }\n",
-        );
+        let raw = minimal_toml("[agents.coder.hooks]\npre_prompt = { executable = \"missing\" }\n");
         let config: Config = toml::from_str(&raw).expect("parse");
         let err = config.validate().expect_err("must fail");
         assert!(format!("{err}").contains("missing"));
@@ -1041,16 +871,18 @@ max_messages = 20
 "#,
         );
         let config: Config = toml::from_str(&raw).expect("parse");
-        let (workspace, _tools) = config.validate().expect("valid");
-        let agent = workspace
-            .get_agent("coder")
-            .expect("agent exists");
+        let resolved = config.validate().expect("valid");
+        let agent = resolved.agent("coder").expect("agent exists");
         assert!(agent.agent_config().pre_prompt().is_some());
         assert!(agent.agent_config().verify_done().is_some());
-        assert!(workspace
-            .get_workflow("default")
-            .session_start()
-            .is_some());
+        assert!(
+            resolved
+                .workflow("default")
+                .expect("workflow exists")
+                .hooks()
+                .session_start()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1067,8 +899,8 @@ executable = "ctx_sh"
 "#,
         );
         let config: Config = toml::from_str(&raw).expect("parse");
-        let (workspace, _tools) = config.validate().expect("valid");
-        let agent = workspace.get_agent("coder").expect("agent exists");
+        let resolved = config.validate().expect("valid");
+        let agent = resolved.agent("coder").expect("agent exists");
         assert_eq!(
             agent.agent_config().context_config().executable(),
             Some("ctx_sh")
@@ -1105,8 +937,7 @@ executable = "ctx_sh"
         assert!(format!("{err}").contains("requires strategy"));
 
         // Old [agents.*.hooks] context key fails parse (no back-compat).
-        let raw =
-            minimal_toml("[agents.coder.hooks]\ncontext = { executable = \"ctx_sh\" }\n");
+        let raw = minimal_toml("[agents.coder.hooks]\ncontext = { executable = \"ctx_sh\" }\n");
         let err = toml::from_str::<Config>(&raw).expect_err("must fail parse");
         assert!(format!("{err}").contains("context"));
     }
@@ -1132,9 +963,12 @@ executable = "guard"
 "#,
         );
         let config: Config = toml::from_str(&raw).expect("parse");
-        let (workspace, _tools) = config.validate().expect("valid");
-        let agent = workspace.get_agent("coder").expect("agent exists");
-        assert_eq!(agent.agent_config().limits().max_tool_calls_total(), Some(100));
+        let resolved = config.validate().expect("valid");
+        let agent = resolved.agent("coder").expect("agent exists");
+        assert_eq!(
+            agent.agent_config().limits().max_tool_calls_total(),
+            Some(100)
+        );
         assert_eq!(agent.agent_config().limits().executable(), Some("guard"));
 
         // Cost key is rejected until the meter exists.
