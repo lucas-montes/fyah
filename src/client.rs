@@ -321,21 +321,21 @@ pub async fn run_request_phase(
     // --- LLM request phase: the driver comes from `on_input`, the dispatch
     // and its failure path live in `agent::request` ---
     let driver = request::driver_for(agent.request_policy());
-    let client: &dyn LlmClient = deps.client;
-    let runner: &dyn HookRunner = deps.runner;
     let step = driver
-        .request(request::RequestCtx {
-            client,
-            runner,
-            agent_name: deps.agent_name,
-            session: &deps.session,
-            out: &deps.out,
-            agent: &agent,
-            state,
-            rx: &mut *deps.rx,
-            ephemeral: ephemeral.as_ref(),
-            tools,
-        })
+        .request(
+            request::RequestCtx {
+                agent_name: deps.agent_name,
+                session: &deps.session,
+                out: &deps.out,
+                agent: &agent,
+                state,
+                rx: &mut *deps.rx,
+                ephemeral: ephemeral.as_ref(),
+                tools,
+            },
+            deps.client,
+            deps.runner,
+        )
         .await;
     let turn = match step {
         RequestStep::Turn(turn) => turn,
@@ -441,7 +441,7 @@ mod tests {
     use crate::communication::{Inbound, Outbound, OutboundChannel};
     use crate::config::{AgentRuntime, Config, ConfigStore, ConfigView, RequestPolicy};
     use crate::executable::Executable;
-    use crate::executable::ExecutableError;
+    use crate::executable::Error as ExecutableError;
     use crate::model::Tool;
     use crate::session::{Session, VcsKind};
 

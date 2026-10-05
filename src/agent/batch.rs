@@ -1,19 +1,18 @@
 //! Tool-batch execution policy.
 //!
 //! `[agents.<name>.tool_execution]` and `tools_on_input` together decide what
-//! one turn's tool batch does — and they collapse to exactly **two** objects,
-//! not four: the sequential driver and the async driver, each told whether
-//! inbound input is ignored, drained, or interrupts the batch.
+//! one turn's tool batch does — and they collapse to exactly **two** enum
+//! variants, not four: sequential and async, each told whether inbound input
+//! is ignored, drained, or interrupts the batch.
 //!
 //! The driver owns everything that does not need the hook runner: which
 //! executor call to make, where the `pre_tool` denials land, and whether the
 //! caller should drain inbound afterwards. It deliberately does **not** own
-//! `post_tool` hooks or the final append, because both need `HookRunner`, and
-//! a non-generic method cannot take one — see
-//! [`crate::client::LlmClient`] for the same constraint on the request side.
-
-use std::future::Future;
-use std::pin::Pin;
+//! `post_tool` hooks or the final append, because both need `HookRunner`.
+//!
+//! The driver is an enum, not a trait object: dispatch is a plain `async fn`
+//! with no heap allocation, and the compiler forces every new mode through
+//! the one `match` in [`for_agent`] plus this one method.
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -24,11 +23,6 @@ use crate::agent::tools::{
 use crate::communication::{Inbound, OutboundChannel};
 use crate::config::{AgentRuntime, OnInput, ToolExecution, ToolsInterruptStrategy};
 use crate::model::{AssistantTurn, Message};
-
-/// A heap-boxed future, so [`ToolBatchDriver`] can be a trait object.
-///
-/// The returned future must be `Send`: the tool executor's tasks are.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What one tool batch produced.
 #[derive(Debug)]
@@ -57,20 +51,22 @@ pub enum ToolBatch {
 
 /// Runs one turn's tool batch under a config-chosen policy.
 ///
-/// Object-safe on purpose: the method is non-generic and returns a boxed
-/// future, which is the only shape that survives `Box<dyn …>` (a generic
-/// method or an `impl Future` return would make the trait dyn-incompatible).
-pub trait ToolBatchDriver: std::fmt::Debug {
-    fn run<'a, 'b>(
-        &'a self,
-        state: &'a mut LoopState<'b>,
-        rx: &'a mut UnboundedReceiver<Inbound>,
-        out: &'a OutboundChannel,
-        turn: AssistantTurn,
-        denied: Vec<Message>,
-    ) -> BoxFuture<'a, ToolBatch>
-    where
-        'b: 'a;
+/// An enum, not a trait object: dispatch is one `async fn` with no heap
+/// allocation, and the compiler forces every new mode through [`for_agent`]
+/// plus this one method.
+#[derive(Debug)]
+pub enum ToolBatchDriver {
+    Sequential {
+        limit: usize,
+        model: String,
+        inbound: BatchInbound,
+        discard: bool,
+    },
+    Async {
+        limit: usize,
+        model: String,
+        inbound: BatchInbound,
+    },
 }
 
 /// What the driver does with user input arriving around the batch.
@@ -117,133 +113,115 @@ pub(crate) fn batch_policy(agent: &AgentRuntime) -> BatchPolicy {
 /// Called once per tool phase, from the phase's own agent snapshot, so the
 /// limit and model baked into the driver always match everything else that
 /// phase reads.
-pub fn for_agent(agent: &AgentRuntime) -> Box<dyn ToolBatchDriver> {
+pub fn for_agent(agent: &AgentRuntime) -> ToolBatchDriver {
     let policy = batch_policy(agent);
     let limit = agent.max_concurrent_tools();
     let model = agent.model_config().name().to_string();
     match policy.mode {
-        ToolExecution::Sequential => Box::new(SequentialDriver {
+        ToolExecution::Sequential => ToolBatchDriver::Sequential {
             limit,
             model,
             inbound: policy.inbound,
             discard: policy.discard,
-        }),
-        ToolExecution::Async => Box::new(AsyncDriver {
+        },
+        ToolExecution::Async => ToolBatchDriver::Async {
             limit,
             model,
             inbound: policy.inbound,
-        }),
+        },
     }
 }
 
-#[derive(Debug)]
-struct SequentialDriver {
-    limit: usize,
-    model: String,
-    inbound: BatchInbound,
-    discard: bool,
-}
-
-impl ToolBatchDriver for SequentialDriver {
-    fn run<'a, 'b>(
+impl ToolBatchDriver {
+    /// Run one batch under this policy.
+    pub async fn run<'a, 'b>(
         &'a self,
         state: &'a mut LoopState<'b>,
         rx: &'a mut UnboundedReceiver<Inbound>,
         out: &'a OutboundChannel,
         turn: AssistantTurn,
         mut denied: Vec<Message>,
-    ) -> BoxFuture<'a, ToolBatch>
+    ) -> ToolBatch
     where
         'b: 'a,
     {
-        Box::pin(async move {
-            if self.inbound == BatchInbound::Interrupt {
-                // Denials go in first: the interruptible batch owns its own
-                // pushes, so anything appended here would land after them.
-                state.messages.append(&mut denied);
-                let strategy = if self.discard {
-                    ToolsInterruptStrategy::Discard
-                } else {
-                    ToolsInterruptStrategy::Keep
+        match self {
+            ToolBatchDriver::Sequential {
+                limit,
+                model,
+                inbound,
+                discard,
+            } => {
+                if *inbound == BatchInbound::Interrupt {
+                    // Denials go in first: the interruptible batch owns its own
+                    // pushes, so anything appended here would land after them.
+                    state.messages.append(&mut denied);
+                    let strategy = if *discard {
+                        ToolsInterruptStrategy::Discard
+                    } else {
+                        ToolsInterruptStrategy::Keep
+                    };
+                    let outcome = run_interruptible_batch(
+                        state,
+                        rx,
+                        out,
+                        *limit,
+                        model,
+                        turn,
+                        WaitFor::All,
+                        InterruptPolicy::Configured(&strategy),
+                    )
+                    .await;
+                    return ToolBatch::Handled(outcome);
+                }
+                let Some((assistant, tools)) =
+                    collect_batch(state, out, *limit, model, turn).await
+                else {
+                    return ToolBatch::Stopped;
                 };
-                let outcome = run_interruptible_batch(
-                    state,
-                    rx,
-                    out,
-                    self.limit,
-                    &self.model,
-                    turn,
-                    WaitFor::All,
-                    InterruptPolicy::Configured(&strategy),
-                )
-                .await;
-                return ToolBatch::Handled(outcome);
+                ToolBatch::Collected {
+                    assistant,
+                    denied,
+                    tools,
+                    drain: *inbound == BatchInbound::Drain,
+                }
             }
-            let Some((assistant, tools)) =
-                collect_batch(state, out, self.limit, &self.model, turn).await
-            else {
-                return ToolBatch::Stopped;
-            };
-            ToolBatch::Collected {
-                assistant,
-                denied,
-                tools,
-                drain: self.inbound == BatchInbound::Drain,
+            ToolBatchDriver::Async {
+                limit,
+                model,
+                inbound,
+            } => {
+                if *inbound == BatchInbound::Interrupt {
+                    state.messages.append(&mut denied);
+                    // Async interrupts always keep: results already pushed to
+                    // `messages` cannot be retracted, so discarding would leave the
+                    // assistant message referencing missing tool results.
+                    let outcome = run_interruptible_batch(
+                        state,
+                        rx,
+                        out,
+                        *limit,
+                        model,
+                        turn,
+                        WaitFor::First,
+                        InterruptPolicy::ForceKeep,
+                    )
+                    .await;
+                    return ToolBatch::Handled(outcome);
+                }
+                let Some((assistant, tools)) =
+                    take_first(state, out, *limit, model, turn).await
+                else {
+                    return ToolBatch::Stopped;
+                };
+                ToolBatch::Collected {
+                    assistant,
+                    denied,
+                    tools,
+                    drain: *inbound == BatchInbound::Drain,
+                }
             }
-        })
-    }
-}
-
-#[derive(Debug)]
-struct AsyncDriver {
-    limit: usize,
-    model: String,
-    inbound: BatchInbound,
-}
-
-impl ToolBatchDriver for AsyncDriver {
-    fn run<'a, 'b>(
-        &'a self,
-        state: &'a mut LoopState<'b>,
-        rx: &'a mut UnboundedReceiver<Inbound>,
-        out: &'a OutboundChannel,
-        turn: AssistantTurn,
-        mut denied: Vec<Message>,
-    ) -> BoxFuture<'a, ToolBatch>
-    where
-        'b: 'a,
-    {
-        Box::pin(async move {
-            if self.inbound == BatchInbound::Interrupt {
-                state.messages.append(&mut denied);
-                // Async interrupts always keep: results already pushed to
-                // `messages` cannot be retracted, so discarding would leave the
-                // assistant message referencing missing tool results.
-                let outcome = run_interruptible_batch(
-                    state,
-                    rx,
-                    out,
-                    self.limit,
-                    &self.model,
-                    turn,
-                    WaitFor::First,
-                    InterruptPolicy::ForceKeep,
-                )
-                .await;
-                return ToolBatch::Handled(outcome);
-            }
-            let Some((assistant, tools)) =
-                take_first(state, out, self.limit, &self.model, turn).await
-            else {
-                return ToolBatch::Stopped;
-            };
-            ToolBatch::Collected {
-                assistant,
-                denied,
-                tools,
-                drain: self.inbound == BatchInbound::Drain,
-            }
-        })
+        }
     }
 }
 
@@ -323,19 +301,19 @@ mod tests {
         mode: ToolExecution,
         inbound: BatchInbound,
         discard: bool,
-    ) -> Box<dyn ToolBatchDriver> {
+    ) -> ToolBatchDriver {
         match mode {
-            ToolExecution::Sequential => Box::new(SequentialDriver {
+            ToolExecution::Sequential => ToolBatchDriver::Sequential {
                 limit: 2,
                 model: "m".to_string(),
                 inbound,
                 discard,
-            }),
-            ToolExecution::Async => Box::new(AsyncDriver {
+            },
+            ToolExecution::Async => ToolBatchDriver::Async {
                 limit: 2,
                 model: "m".to_string(),
                 inbound,
-            }),
+            },
         }
     }
 
