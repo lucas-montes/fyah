@@ -1074,9 +1074,9 @@ session_end = {{ executable = "audit" }}
         // so the audit hook still runs — the mid-session reload cannot skip
         // it, and the session still ends cleanly.
         //
-        // `current_thread` + `spawn_local`: the session future borrows
-        // `&dyn HookRunner` (not `Sync`), so it is not `Send` and cannot go
-        // through a regular `spawn`.
+        // `current_thread` + `spawn_local`: the session future's opaque
+        // `impl Future` captures are not `Send`, so it cannot go through a
+        // regular `spawn`.
         let dir = scratch("vanish");
         let audit_log = dir.join("audit.log");
         let config: crate::config::Config =
