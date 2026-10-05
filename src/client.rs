@@ -10,8 +10,7 @@ use crate::agent::state::{
 use crate::communication::{Command, Inbound};
 use crate::context::ManagedContext;
 use crate::hooks::{
-    BoxFuture,
-    ContextSlot, CustomInput, CustomOutcome, Hook, HookRunner, HookState, InjectMode, run_hook,
+    ContextSlot, CustomInput, CustomOutcome, Hook, HookRunner, HookState, InjectMode,
     PrePromptInput, PrePromptOutcome, VerifyInput, VerifyOutcome,
 };
 use crate::model::{AssistantTurn, Conversation, Message, Tool};
@@ -40,21 +39,23 @@ impl Display for Error {
 }
 
 /// Abstraction over LLM chat completion providers.
-pub trait LlmClient: std::fmt::Debug + Sync {
+///
+/// Futures are returned directly — `impl Future`, no heap boxing — now that
+/// nothing uses this trait as a trait object.
+pub trait LlmClient: std::fmt::Debug {
     fn create_request(&self, method: reqwest::Method, url: &str) -> RequestBuilder;
 
-    /// Boxed futures throughout, and no generic method, so `&dyn LlmClient`
-    /// is usable. See [`crate::hooks::BoxFuture`].
     fn request_turn<'a>(
         &'a self,
         agent: &'a crate::config::AgentRuntime,
         messages: &'a Vec<Message>,
         ephemeral: Option<&'a Message>,
         tools: &'a [Tool],
-    ) -> BoxFuture<'a, Result<AssistantTurn, StopReason>> {
+    ) -> impl Future<Output = Result<AssistantTurn, StopReason>> + 'a
+    {
         // Built outside the async block on purpose: everything that borrows
-        // `agent` / `self` stays on this frame, so only owned, `Send` values
-        // are captured across the await.
+        // `agent` / `self` stays on this frame, so only owned values are
+        // captured across the await.
         let model = agent.model_config();
         let conversation = Conversation::new(
             model.name(),
@@ -71,21 +72,21 @@ pub trait LlmClient: std::fmt::Debug + Sync {
         let req = self.create_request(Method::POST, provider.endpoint());
         let req = provider.apply_auth(req);
         let req = provider.attach_body(req, &conversation);
-        Box::pin(async move {
+        async move {
             match self.send_request(req).await {
                 Ok(bytes) => transformation(bytes.as_ref())
                     .map_err(Error::Parse)
                     .map_err(StopReason::RequestFailed),
                 Err(e) => Err(StopReason::RequestFailed(e)),
             }
-        })
+        }
     }
 
-    fn send_request<'a>(
-        &'a self,
+    fn send_request(
+        &self,
         request: RequestBuilder,
-    ) -> BoxFuture<'a, Result<Vec<u8>, Error>> {
-        Box::pin(async move {
+    ) -> impl Future<Output = Result<Vec<u8>, Error>> {
+        async move {
             let response = request
                 .send()
                 .await
@@ -94,17 +95,15 @@ pub trait LlmClient: std::fmt::Debug + Sync {
                 code: e.status().unwrap_or_default().to_string(),
                 message: e.to_string(),
             })?;
-            // Concrete `Vec<u8>`: an `impl AsRef<[u8]>` in a return position
-            // would make this method dyn-incompatible.
             Ok(response.bytes().await.map_err(Error::ParseRaw)?.to_vec())
-        })
+        }
     }
 
-    fn stream_request<'a>(
-        &'a self,
+    fn stream_request(
+        &self,
         request: RequestBuilder,
-    ) -> BoxFuture<'a, Result<reqwest::Response, Error>> {
-        Box::pin(async move {
+    ) -> impl Future<Output = Result<reqwest::Response, Error>> {
+        async move {
             let response = request
                 .send()
                 .await
@@ -113,7 +112,7 @@ pub trait LlmClient: std::fmt::Debug + Sync {
                 code: e.status().unwrap_or_default().to_string(),
                 message: e.to_string(),
             })
-        })
+        }
     }
 }
 
@@ -135,10 +134,16 @@ impl LlmClient for Client {
 /// One request turn: agent lookup, iteration cap, context policy, turn-start
 /// hook, LLM request per `on_input`, turn-end hook, and the no-tool-call
 /// branch (verify hook + idle wait).
-pub async fn run_request_phase(
+pub async fn run_request_phase<C, R>(
     state: &mut LoopState<'_>,
     deps: &mut LoopDeps<'_>,
-) -> RequestOutcome {
+    client: &C,
+    runner: &R,
+) -> RequestOutcome
+where
+    C: LlmClient,
+    R: HookRunner,
+{
     let agent_name = deps.agent_name;
     let iteration = state.iteration;
 
@@ -165,7 +170,7 @@ pub async fn run_request_phase(
     // thresholds first, then the optional guard executable. Limits-first:
     // "can we keep going" wins over verify_done ("are we done"). The checks
     // and their wording live in `agent::limits`.
-    if let Some(reason) = LimitsGate::for_agent(&agent).check(state, deps).await {
+    if let Some(reason) = LimitsGate::for_agent(&agent).check(state, deps, runner).await {
         return RequestOutcome::Stopped(reason);
     }
 
@@ -203,7 +208,10 @@ pub async fn run_request_phase(
             );
             let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
 
-            match run_hook(deps.runner, slot.exe(), &hook, &input, &mut hook_state).await {
+            // Bind first: the future borrows `hook_state`, so matching on it
+            // directly would hold the borrow through the arms that reuse it.
+            let outcome = runner.run_hook( slot.exe(), &hook, &input, &mut hook_state).await;
+            match outcome {
                 CustomOutcome::Continue => {}
                 CustomOutcome::PruneTo { keep } => {
                     let removed = hook_state.prune_to(keep);
@@ -271,7 +279,11 @@ pub async fn run_request_phase(
             Some(slot) => {
                 let input = PrePromptInput::new(agent_name, iteration, state.messages.len());
                 let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-                match run_hook(deps.runner, slot.exe(), hook, &input, &mut hook_state).await {
+                // Bind first: the future borrows `hook_state`, so matching on
+                // it directly would hold the borrow through the arms that
+                // reuse it.
+                let outcome = runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await;
+                match outcome {
                     PrePromptOutcome::Continue => None,
                     PrePromptOutcome::Inject { mode, content } => match mode {
                         InjectMode::Persistent => {
@@ -333,8 +345,8 @@ pub async fn run_request_phase(
                 ephemeral: ephemeral.as_ref(),
                 tools,
             },
-            deps.client,
-            deps.runner,
+            client,
+            runner,
         )
         .await;
     let turn = match step {
@@ -359,7 +371,7 @@ pub async fn run_request_phase(
                     state.messages.len(),
                 );
                 let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-                match run_hook(deps.runner, slot.exe(), hook, &input, &mut hook_state).await {
+                match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
                     VerifyOutcome::Done => {}
                     VerifyOutcome::NotDone { error } => {
                         tracing::info!(
@@ -441,7 +453,7 @@ mod tests {
     use crate::communication::{Inbound, Outbound, OutboundChannel};
     use crate::config::{AgentRuntime, Config, ConfigStore, ConfigView, RequestPolicy};
     use crate::executable::Executable;
-    use crate::executable::Error as ExecutableError;
+    use crate::executable::ExecutableError;
     use crate::model::Tool;
     use crate::session::{Session, VcsKind};
 
@@ -463,25 +475,23 @@ mod tests {
             reqwest::Client::new().request(method, url)
         }
 
-        fn request_turn<'a>(
+        async fn request_turn<'a>(
             &'a self,
             _agent: &'a AgentRuntime,
             messages: &'a Vec<Message>,
             ephemeral: Option<&'a Message>,
             _tools: &'a [Tool],
-        ) -> crate::hooks::BoxFuture<'a, Result<AssistantTurn, StopReason>> {
-            Box::pin(async move {
-                if self.hang {
-                    return std::future::pending().await;
-                }
-                // Mirror the provider contract: ephemeral rides along without
-                // being persisted.
-                self.seen
-                    .lock()
-                    .expect("seen poisoned")
-                    .push(messages.len() + usize::from(ephemeral.is_some()));
-                Ok(AssistantTurn::new(Some("done".to_string()), Vec::new()))
-            })
+        ) -> Result<AssistantTurn, StopReason> {
+            if self.hang {
+                return std::future::pending().await;
+            }
+            // Mirror the provider contract: ephemeral rides along without
+            // being persisted.
+            self.seen
+                .lock()
+                .expect("seen poisoned")
+                .push(messages.len() + usize::from(ephemeral.is_some()));
+            Ok(AssistantTurn::new(Some("done".to_string()), Vec::new()))
         }
     }
 
@@ -494,18 +504,18 @@ mod tests {
     }
 
     impl HookRunner for FakeRunner {
-        fn run_json<'a, 'b>(
+        async fn run_json<'a, 'b>(
             &'a self,
             _exe: &'a Executable,
             _slot: &'a str,
             _executable: &'a str,
             _input: &'a serde_json::Value,
             _state: &'a mut HookState<'b>,
-        ) -> crate::hooks::BoxFuture<'a, Result<crate::hooks::HookDecision, ExecutableError>>
+        ) -> Result<crate::hooks::HookDecision, ExecutableError>
         where
             'b: 'a,
         {
-            Box::pin(async move { Ok(crate::hooks::HookDecision::from_value(self.out.clone())) })
+            Ok(crate::hooks::HookDecision::from_value(self.out.clone()))
         }
     }
 
@@ -674,14 +684,12 @@ on_failure = "done"
         };
         let mut deps = LoopDeps {
             agent_name: "coder",
-            client: &client,
-            runner: &runner,
             view,
             session: Arc::clone(session),
             out: OutboundChannel::from(out_tx),
             rx: &mut in_rx,
         };
-        let outcome = run_request_phase(&mut state, &mut deps).await;
+        let outcome = run_request_phase(&mut state, &mut deps, &client, &runner).await;
         let LoopState { executor, .. } = state;
         executor.shutdown().await;
         let seen = seen.lock().expect("seen poisoned").clone();
@@ -1036,20 +1044,27 @@ on_failure = "done"
     }
 }
 
-/// Compile-time proof that the two traits the driver work depends on can be
-/// used behind `&dyn` / `Box<dyn>`. If a future signature change reintroduces
-/// a generic method or an `impl Future` return, this stops compiling instead
-/// of silently pushing T07/T09 back to enums.
+/// Compile-time proof that dispatch stays total: every [`RequestPolicy`]
+/// the config can name must map to a driver. Adding a policy variant without
+/// extending [`driver_for`] stops compiling here.
 #[cfg(test)]
-mod object_safety {
-    use super::*;
-    use crate::hooks::HookRunner;
-
-    fn assert_object_safe<T: ?Sized>() {}
+mod dispatch_coverage {
+    use crate::agent::request::{RequestDriver, driver_for};
+    use crate::config::RequestPolicy;
 
     #[test]
-    fn both_traits_are_usable_as_trait_objects() {
-        assert_object_safe::<dyn LlmClient>();
-        assert_object_safe::<dyn HookRunner>();
+    fn every_request_policy_maps_to_a_driver() {
+        assert_eq!(
+            driver_for(RequestPolicy::FireAndForget),
+            RequestDriver::FireAndForget
+        );
+        assert_eq!(
+            driver_for(RequestPolicy::Queue),
+            RequestDriver::Queue
+        );
+        assert_eq!(
+            driver_for(RequestPolicy::Interrupt),
+            RequestDriver::Interrupt
+        );
     }
 }

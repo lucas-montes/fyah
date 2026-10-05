@@ -1,6 +1,4 @@
 use std::fmt::Display;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -12,7 +10,7 @@ use crate::{
     communication::{Inbound, OutboundChannel},
     config::{ConfigView, StepKind},
     hooks::{
-        run_hook, Hook, HookRunner, HookState, SessionEndInput, SessionEndOutcome,
+        Hook, HookRunner, HookState, SessionEndInput, SessionEndOutcome,
         SessionEndSlot, SessionStartInput, SessionStartOutcome, SessionStartSlot,
         StepHookInput, StepHookOutcome, StepSlot,
     },
@@ -186,7 +184,7 @@ pub async fn start_session(
                 SessionStartInput::new(session.id(), workflow.as_str(), session.vcs_revision());
             let mut messages: Vec<Message> = Vec::new();
             let mut state = HookState::new(&mut messages, session.id());
-            match run_hook(&runner, slot.exe(), &hook, &input, &mut state).await {
+            match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
                 SessionStartOutcome::Continue => {}
                 SessionStartOutcome::Abort { error } => {
                     tracing::warn!(
@@ -238,7 +236,7 @@ pub async fn start_session(
         let mut hook_messages: Vec<Message> = Vec::new();
         let mut state = HookState::new(&mut hook_messages, session.id());
         let _outcome: SessionEndOutcome =
-            run_hook(&runner, slot.exe(), &hook, &input, &mut state).await;
+            runner.run_hook( slot.exe(), &hook, &input, &mut state).await;
     }
 
     Ok(())
@@ -326,7 +324,7 @@ async fn start_workflow(
             let input = StepHookInput::new(workflow.as_str(), step_name.as_str(), session.id());
             let mut state = HookState::new(&mut *messages, session.id());
 
-            match run_hook(runner, slot.exe(), &hook, &input, &mut state).await {
+            match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
                 StepHookOutcome::Continue => {}
                 StepHookOutcome::AbortStep { error } => {
                     tracing::warn!(
@@ -379,7 +377,7 @@ async fn start_workflow(
             let input = StepHookInput::new(&workflow, &step_name, session.id());
             let mut state = HookState::new(&mut *messages, session.id());
 
-            match run_hook(runner, slot.exe(), &hook, &input, &mut state).await {
+            match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
                 StepHookOutcome::Continue => {}
                 StepHookOutcome::AbortStep { error } => {
                     tracing::warn!(
@@ -558,20 +556,18 @@ on_failure = "done"
             reqwest::Client::new().request(reqwest::Method::GET, "http://127.0.0.1:9/")
         }
 
-        fn request_turn<'a>(
+        async fn request_turn<'a>(
             &'a self,
             _agent: &'a crate::config::AgentRuntime,
             _messages: &'a Vec<Message>,
             _ephemeral: Option<&'a Message>,
             _tools: &'a [crate::model::Tool],
-        ) -> crate::hooks::BoxFuture<'a, Result<AssistantTurn, StopReason>> {
+        ) -> Result<AssistantTurn, StopReason> {
             let entered = self.entered.clone();
             let release = Arc::clone(&self.release);
-            Box::pin(async move {
-                let _ = entered.send(());
-                release.notified().await;
-                Ok(AssistantTurn::new(None, Vec::new()))
-            })
+            let _ = entered.send(());
+            release.notified().await;
+            Ok(AssistantTurn::new(None, Vec::new()))
         }
     }
 
@@ -584,20 +580,18 @@ on_failure = "done"
             reqwest::Client::new().request(reqwest::Method::GET, "http://127.0.0.1:9/")
         }
 
-        fn request_turn<'a>(
+        async fn request_turn<'a>(
             &'a self,
             _agent: &'a crate::config::AgentRuntime,
             _messages: &'a Vec<Message>,
             _ephemeral: Option<&'a Message>,
             _tools: &'a [crate::model::Tool],
-        ) -> crate::hooks::BoxFuture<'a, Result<AssistantTurn, StopReason>> {
-            let result = self
-                .results
+        ) -> Result<AssistantTurn, StopReason> {
+            self.results
                 .lock()
                 .expect("stub results")
                 .pop()
-                .expect("stub exhausted");
-            Box::pin(async move { result })
+                .expect("stub exhausted")
         }
     }
 

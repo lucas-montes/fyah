@@ -6,7 +6,7 @@ use crate::client::{LlmClient, run_request_phase};
 use crate::communication::{Inbound, OutboundChannel};
 use crate::config::ConfigView;
 use crate::hooks::{
-    HookRunner, HookState, PostToolInput, PostToolOutcome, PreToolInput, PreToolOutcome, run_hook,
+    HookRunner, HookState, PostToolInput, PostToolOutcome, PreToolInput, PreToolOutcome,
 };
 use crate::model::{AssistantTurn, Message, ToolCall};
 use crate::session::Session;
@@ -22,16 +22,20 @@ use super::tools::{ToolExecutor, ToolWal, drain_pending_tools};
 // runs the requested tools. Both report back outcomes; the loop only routes
 // on them. Phase state and shared outcomes live in [`super::state`].
 
-pub async fn run_agent_loop<'a>(
+pub async fn run_agent_loop<'a, C, R>(
     agent_name: &'a str,
-    client: &'a dyn LlmClient,
-    runner: &'a dyn HookRunner,
+    client: &'a C,
+    runner: &'a R,
     view: ConfigView,
     session: Arc<Session>,
     messages: &'a mut Vec<Message>,
     user_input_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
-) -> AgentOutcome {
+) -> AgentOutcome
+where
+    C: LlmClient,
+    R: HookRunner,
+{
     let executor = ToolExecutor::spawn(Arc::clone(&session));
     let mut state = LoopState {
         messages,
@@ -48,8 +52,6 @@ pub async fn run_agent_loop<'a>(
     };
     let mut deps = LoopDeps {
         agent_name,
-        client,
-        runner,
         view,
         session,
         out: user_output_tx,
@@ -62,7 +64,7 @@ pub async fn run_agent_loop<'a>(
         // the context policy and the next LLM request see `messages`.
         drain_pending_tools(&mut state);
 
-        let turn = match run_request_phase(&mut state, &mut deps).await {
+        let turn = match run_request_phase(&mut state, &mut deps, client, runner).await {
             RequestOutcome::NewTurn(t) => t,
             RequestOutcome::Continue => continue,
             RequestOutcome::Finished => break AgentOutcome::Finished,
@@ -76,7 +78,7 @@ pub async fn run_agent_loop<'a>(
                 break AgentOutcome::Stopped(reason);
             }
         };
-        match run_tool_phase(&mut state, &mut deps, turn).await {
+        match run_tool_phase(&mut state, &mut deps, turn, runner).await {
             ToolOutcome::Done => {}
             ToolOutcome::Continue => continue,
             ToolOutcome::Stopped(reason) => {
@@ -120,11 +122,15 @@ fn stop_message(agent_name: &str, reason: &StopReason) -> Option<String> {
 
 /// One tool batch: filter denied calls, run the batch under the agent's
 /// configured driver, then attach results.
-async fn run_tool_phase(
+async fn run_tool_phase<R>(
     state: &mut LoopState<'_>,
     deps: &mut LoopDeps<'_>,
     turn: AssistantTurn,
-) -> ToolOutcome {
+    runner: &R,
+) -> ToolOutcome
+where
+    R: HookRunner,
+{
     let agent_name = deps.agent_name;
     let Some(agent) = deps.view.agent(agent_name) else {
         tracing::warn!(
@@ -138,7 +144,7 @@ async fn run_tool_phase(
 
     // Pre-tool hooks: filter denied calls before dispatch. Denied calls
     // produce a visible Tool message so the LLM can adapt.
-    let (turn, denied_messages) = apply_pre_tool_hooks(state, deps, &agent, turn).await;
+    let (turn, denied_messages) = apply_pre_tool_hooks(state, deps, &agent, turn, runner).await;
 
     // The driver owns batch execution, denial placement and the queue drain;
     // `post_tool` hooks stay here because they need the hook runner.
@@ -158,7 +164,7 @@ async fn run_tool_phase(
         ToolBatch::Stopped => return ToolOutcome::Stopped(StopReason::ExecutorGone),
     };
 
-    let tools = apply_post_tool_hooks(state, deps, &agent, &assistant, tools).await;
+    let tools = apply_post_tool_hooks(state, deps, &agent, &assistant, tools, runner).await;
     // Order is load-bearing: assistant, then denials, then results.
     state.messages.push(assistant);
     state.messages.extend(denied);
@@ -184,12 +190,16 @@ async fn run_tool_phase(
 
 /// Pre-tool filter: run `pre_tool` per call. `Deny` produces a visible
 /// `Tool` denial message; `Continue`/missing-exe allows execution.
-async fn apply_pre_tool_hooks(
+async fn apply_pre_tool_hooks<R>(
     state: &mut LoopState<'_>,
     deps: &mut LoopDeps<'_>,
     agent: &crate::config::AgentRuntime,
     turn: AssistantTurn,
-) -> (AssistantTurn, Vec<Message>) {
+    runner: &R,
+) -> (AssistantTurn, Vec<Message>)
+where
+    R: HookRunner,
+{
     let Some(hook) = agent.agent_config().pre_tool() else {
         return (turn, Vec::new());
     };
@@ -204,7 +214,7 @@ async fn apply_pre_tool_hooks(
             .unwrap_or_else(|_| serde_json::Value::String(tc.arguments().to_string()));
         let input = PreToolInput::new(deps.agent_name, tc.id(), tc.name(), &args_val);
         let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-        match run_hook(deps.runner, slot.exe(), hook, &input, &mut hook_state).await {
+        match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
             PreToolOutcome::Continue => allowed.push(tc),
             PreToolOutcome::Deny { error } => {
                 tracing::info!(
@@ -227,13 +237,17 @@ async fn apply_pre_tool_hooks(
 
 /// Post-tool filter: run `post_tool` per result. `DropResult` discards that
 /// tool's output; `Continue`/missing-exe keeps it.
-async fn apply_post_tool_hooks(
+async fn apply_post_tool_hooks<R>(
     state: &mut LoopState<'_>,
     deps: &mut LoopDeps<'_>,
     agent: &crate::config::AgentRuntime,
     assistant_msg: &Message,
     tool_messages: Vec<Message>,
-) -> Vec<Message> {
+    runner: &R,
+) -> Vec<Message>
+where
+    R: HookRunner,
+{
     let Some(hook) = agent.agent_config().post_tool() else {
         return tool_messages;
     };
@@ -261,7 +275,7 @@ async fn apply_post_tool_hooks(
         let tool_name = names.get(&call_id).map(|s| s.as_str()).unwrap_or("unknown");
         let input = PostToolInput::new(deps.agent_name, &call_id, tool_name, output_len);
         let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-        match run_hook(deps.runner, slot.exe(), hook, &input, &mut hook_state).await {
+        match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
             PostToolOutcome::Continue => kept.push(msg),
             PostToolOutcome::DropResult => {
                 tracing::info!(
@@ -371,8 +385,6 @@ models = { "m" = { name = "test-model" } }
         };
         let mut deps = LoopDeps {
             agent_name: "coder",
-            client: &crate::client::Client::default(),
-            runner: &runner,
             view: store.subscribe(),
             session,
             out: OutboundChannel::from(out_tx),
@@ -386,7 +398,7 @@ models = { "m" = { name = "test-model" } }
                 "{}".to_string(),
             )],
         );
-        let outcome = run_tool_phase(&mut state, &mut deps, turn).await;
+        let outcome = run_tool_phase(&mut state, &mut deps, turn, &runner).await;
         let LoopState { executor, .. } = state;
         executor.shutdown().await;
         assert!(

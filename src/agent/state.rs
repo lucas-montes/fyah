@@ -10,10 +10,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::client::{Error as ClientError, LlmClient};
+use crate::client::Error as ClientError;
 use crate::communication::{Command, Inbound, OutboundChannel};
 use crate::config::ConfigView;
-use crate::hooks::HookRunner;
 use crate::model::{AssistantTurn, Message};
 use crate::session::Session;
 
@@ -41,8 +40,6 @@ pub struct LoopState<'m> {
 
 pub struct LoopDeps<'a> {
     pub agent_name: &'a str,
-    pub client: &'a dyn LlmClient,
-    pub runner: &'a dyn HookRunner,
     pub view: ConfigView,
     pub session: Arc<Session>,
     pub out: OutboundChannel,

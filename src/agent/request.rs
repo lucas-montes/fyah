@@ -28,7 +28,7 @@ use crate::agent::state::{DrainOutcome, LoopState, StopReason, drain_queue, stat
 use crate::client::LlmClient;
 use crate::communication::{Command, Inbound, OutboundChannel};
 use crate::config::{AgentRuntime, RequestPolicy};
-use crate::hooks::{HookRunner, HookState, OnErrorInput, OnErrorOutcome, run_hook};
+use crate::hooks::{HookRunner, HookState, OnErrorInput, OnErrorOutcome};
 use crate::model::{AssistantTurn, Message, Tool};
 use crate::session::Session;
 
@@ -250,7 +250,7 @@ where
     let slot = agent.hooks().on_error()?;
     let input = OnErrorInput::new(agent_name, "request", error_str);
     let mut hook_state = HookState::new(&mut *state.messages, session.id());
-    match run_hook(runner, slot.exe(), hook, &input, &mut hook_state).await {
+    match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
         OnErrorOutcome::Continue => None,
         OnErrorOutcome::Abort { error } => {
             tracing::warn!(

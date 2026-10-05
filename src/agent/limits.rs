@@ -20,7 +20,7 @@ use crate::agent::state::{LoopDeps, LoopState, StopReason, status_line};
 use crate::communication::{Command, Inbound};
 use crate::config::{AgentRuntime, LimitsConfig, ResolvedHook};
 use crate::context::{ContextConfig, ContextStrategy, ManagedContext};
-use crate::hooks::{Hook, HookState, LoopGuardInput, LoopGuardOutcome, LoopGuardSlot, run_hook};
+use crate::hooks::{Hook, HookRunner, HookState, LoopGuardInput, LoopGuardOutcome, LoopGuardSlot};
 use crate::model::Message;
 
 /// The gate for one agent: thresholds, the headroom context, and the optional
@@ -45,11 +45,15 @@ impl<'a> LimitsGate<'a> {
     /// Meters are updated on the way through, whether or not a threshold is
     /// configured: `total_tokens_est`, `stalled_turns`, `last_progress_len`
     /// and the rpm window are state the guard hook also reports.
-    pub(crate) async fn check(
+    pub(crate) async fn check<R>(
         &self,
         state: &mut LoopState<'_>,
         deps: &mut LoopDeps<'_>,
-    ) -> Option<StopReason> {
+        runner: &R,
+    ) -> Option<StopReason>
+    where
+        R: HookRunner,
+    {
         // Both of these are already on `state` / `deps`; taking them here
         // keeps the caller's argument list to `state` and `deps`.
         let agent_name = deps.agent_name;
@@ -203,7 +207,7 @@ impl<'a> LimitsGate<'a> {
                 state.stalled_turns,
             );
             let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
-            match run_hook(deps.runner, slot.exe(), &hook, &input, &mut hook_state).await {
+            match runner.run_hook( slot.exe(), &hook, &input, &mut hook_state).await {
                 LoopGuardOutcome::Continue => {}
                 LoopGuardOutcome::Stop { reason } => {
                     tracing::warn!(

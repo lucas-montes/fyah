@@ -1,20 +1,9 @@
-use std::future::Future;
-use std::pin::Pin;
-
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use valuable::Valuable;
 
 use crate::executable::{Executable, ExecutableError, ExecutableParams, FailMode, run_command};
 use crate::model::Message;
-
-/// A heap-boxed future, so a trait that returns one can still be used behind
-/// `&dyn` / `Box<dyn>`.
-///
-/// The crate uses this because a trait with a generic method — or with an
-/// `impl Future` return — is never dyn-compatible. Anything intended to be a
-/// trait object must return this instead.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A hook's decision plus the captured streams.
 ///
@@ -1009,17 +998,17 @@ impl<'a> HookState<'a> {
 
 /// Mockable execution seam. Production wires [`RealHookRunner`] driven purely
 /// by `fyah.toml`; tests inject a fake returning canned `Output`s.
+///
+/// Futures are returned directly — `impl Future`, no heap boxing — now that
+/// nothing uses this trait as a trait object. The typed entry point is the
+/// provided [`HookRunner::run_hook`] method, which wraps [`HookRunner::run_json`]
+/// and applies [`Slot::fallback`].
 pub trait HookRunner: std::fmt::Debug {
     /// Run a hook, type-erased: slot and decision are plain JSON.
     ///
-    /// Deliberately **non-generic**, because a trait with any generic method
-    /// is never dyn-compatible — which is what would let a driver hold
-    /// `&dyn HookRunner`. The typed entry point is the free [`run_hook`]
-    /// below, which wraps this and applies [`Slot::fallback`].
-    ///
     /// `Ok` decision with a `Null` value means "no decision", which every slot reads as its
     /// `Default`. `Err` is a transport or parse failure; applying the slot's
-    /// `fail_mode` needs `S`, so that happens in the wrapper.
+    /// `fail_mode` needs `S`, so that happens in [`HookRunner::run_hook`].
     fn run_json<'a, 'b>(
         &'a self,
         exe: &'a Executable,
@@ -1027,52 +1016,62 @@ pub trait HookRunner: std::fmt::Debug {
         executable: &'a str,
         input: &'a Value,
         state: &'a mut HookState<'b>,
-    ) -> BoxFuture<'a, Result<HookDecision, ExecutableError>>
+    ) -> impl Future<Output = Result<HookDecision, ExecutableError>> + 'a
     where
         'b: 'a;
-}
 
-/// Typed hook execution: serialise the input, call [`HookRunner::run_json`],
-/// parse the decision back, and apply [`Slot::fallback`] on either failure.
-///
-/// A free function rather than a trait method so `HookRunner` stays
-/// dyn-compatible. `R: ?Sized` is what lets it take a `&dyn HookRunner`.
-pub async fn run_hook<S: Slot, R: HookRunner + ?Sized>(
-    runner: &R,
-    exe: &Executable,
-    hook: &Hook<S>,
-    input: &S::Input<'_>,
-    state: &mut HookState<'_>,
-) -> S::Output {
-    let json = serde_json::to_value(input).unwrap_or(Value::Null);
-    let decision = match runner.run_json(exe, S::NAME, hook.executable(), &json, state).await {
-        Ok(decision) => decision,
-        Err(error) => return S::fallback(&error, exe.fail_mode()),
-    };
-    // Empty stdout means "no decision": every slot's Default.
-    if decision.value().is_null() {
-        return S::Output::default();
-    }
-    match serde_json::from_value::<S::Output>(decision.value().clone()) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            // The slot rejected a well-formed JSON decision. `run_json`
-            // cannot do this check (it has no `S`), so the warning lives here.
-            tracing::warn!(
-                slot = S::NAME,
-                executable = hook.executable(),
-                error = %error,
-                stdout_raw = decision.stdout_raw,
-                stderr = decision.stderr,
-                fail_mode = ?exe.fail_mode(),
-                "hook output not understood"
-            );
-            S::fallback(
-                &ExecutableError::InvalidOutput {
-                    detail: error.to_string(),
-                },
-                exe.fail_mode(),
-            )
+    /// Typed hook execution: serialise the input, call [`HookRunner::run_json`],
+    /// parse the decision back, and apply [`Slot::fallback`] on either failure.
+    ///
+    /// A provided generic method — possible because the trait is never used
+    /// behind `dyn`, where any generic method would be forbidden.
+    ///
+    /// All call borrows share one region: the future cannot outlive the
+    /// shortest of them, so callers simply lend everything for the call.
+    fn run_hook<'a, 't, S: Slot>(
+        &'a self,
+        exe: &'a Executable,
+        hook: &'a Hook<S>,
+        input: &'a S::Input<'a>,
+        state: &'a mut HookState<'t>,
+    ) -> impl Future<Output = S::Output> + 'a
+    where
+        // The state cannot be lent for longer than the messages it borrows.
+        't: 'a,
+    {
+        async move {
+            let json = serde_json::to_value(input).unwrap_or(Value::Null);
+            let decision =
+                match self.run_json(exe, S::NAME, hook.executable(), &json, state).await {
+                    Ok(decision) => decision,
+                    Err(error) => return S::fallback(&error, exe.fail_mode()),
+                };
+            // Empty stdout means "no decision": every slot's Default.
+            if decision.value().is_null() {
+                return S::Output::default();
+            }
+            match serde_json::from_value::<S::Output>(decision.value().clone()) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    // The slot rejected a well-formed JSON decision. `run_json`
+                    // cannot do this check (it has no `S`), so the warning lives here.
+                    tracing::warn!(
+                        slot = S::NAME,
+                        executable = hook.executable(),
+                        error = %error,
+                        stdout_raw = decision.stdout_raw,
+                        stderr = decision.stderr,
+                        fail_mode = ?exe.fail_mode(),
+                        "hook output not understood"
+                    );
+                    S::fallback(
+                        &ExecutableError::InvalidOutput {
+                            detail: error.to_string(),
+                        },
+                        exe.fail_mode(),
+                    )
+                }
+            }
         }
     }
 }
@@ -1081,7 +1080,7 @@ pub async fn run_hook<S: Slot, R: HookRunner + ?Sized>(
 pub struct RealHookRunner;
 
 impl HookRunner for RealHookRunner {
-    fn run_json<'a, 'b>(
+    async fn run_json<'a, 'b>(
         &'a self,
         exe: &'a Executable,
         slot: &'a str,
@@ -1090,7 +1089,7 @@ impl HookRunner for RealHookRunner {
         // Reserved for builtin handlers that mutate state directly;
         // external executables receive IDs + JSON and return patches.
         _state: &'a mut HookState<'b>,
-    ) -> BoxFuture<'a, Result<HookDecision, ExecutableError>>
+    ) -> Result<HookDecision, ExecutableError>
     where
         'b: 'a,
     {
@@ -1106,7 +1105,7 @@ impl HookRunner for RealHookRunner {
         if tracing::enabled!(tracing::Level::TRACE) {
             tracing::trace!(slot, executable, input = %input, "hook input");
         }
-        Box::pin(async move {
+        {
             match exe.params() {
                 ExecutableParams::Builtin { builtin } => match run_builtin_name(builtin) {
                     Ok(()) => {
@@ -1242,7 +1241,7 @@ impl HookRunner for RealHookRunner {
                     Err(error)
                 }
             }
-        })
+        }
     }
 }
 
@@ -1320,24 +1319,23 @@ mod fallback_tests {
     }
 
     impl HookRunner for Stub {
-        fn run_json<'a, 'b>(
+        async fn run_json<'a, 'b>(
             &'a self,
             _exe: &'a Executable,
             _slot: &'a str,
             _executable: &'a str,
             _input: &'a Value,
             _state: &'a mut HookState<'b>,
-        ) -> BoxFuture<'a, Result<HookDecision, ExecutableError>>
+        ) -> Result<HookDecision, ExecutableError>
         where
             'b: 'a,
         {
-            let result = match &self.result {
+            match &self.result {
                 Ok(v) => Ok(HookDecision::from_value(v.clone())),
                 Err(_) => Err(ExecutableError::NotImplemented {
                     kind: "stub".to_string(),
                 }),
-            };
-            Box::pin(async move { result })
+            }
         }
     }
 
@@ -1362,12 +1360,12 @@ mod fallback_tests {
                 kind: "stub".to_string(),
             }),
         };
-        let out = run_hook(&stub, &open, &hook, &input, &mut state).await;
+        let out = stub.run_hook( &open, &hook, &input, &mut state).await;
         assert_eq!(out, PrePromptOutcome::Continue);
 
         // fail-closed: Abort, mapped through the hook's own fail_mode.
         let closed = command_exe("abortworkflow");
-        let out = run_hook(&stub, &closed, &hook, &input, &mut state).await;
+        let out = stub.run_hook( &closed, &hook, &input, &mut state).await;
         assert!(
             matches!(out, PrePromptOutcome::Abort { .. }),
             "expected Abort, got {out:?}"
@@ -1388,7 +1386,7 @@ mod fallback_tests {
 
         let open = command_exe("message");
         assert_eq!(
-            run_hook(&stub, &open, &hook, &input, &mut state).await,
+            stub.run_hook( &open, &hook, &input, &mut state).await,
             PrePromptOutcome::Continue,
             "fail-open turns an unreadable decision into the default"
         );
@@ -1396,7 +1394,7 @@ mod fallback_tests {
         let closed = command_exe("abortworkflow");
         assert!(
             matches!(
-                run_hook(&stub, &closed, &hook, &input, &mut state).await,
+                stub.run_hook( &closed, &hook, &input, &mut state).await,
                 PrePromptOutcome::Abort { .. }
             ),
             "fail-closed turns an unreadable decision into an abort"
@@ -1414,6 +1412,6 @@ mod fallback_tests {
             result: Ok(Value::Null),
         };
 
-        assert_eq!(run_hook(&stub, &exe, &hook, &input, &mut state).await, PrePromptOutcome::Continue);
+        assert_eq!(stub.run_hook( &exe, &hook, &input, &mut state).await, PrePromptOutcome::Continue);
     }
 }
