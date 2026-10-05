@@ -1,6 +1,6 @@
 # Config Pipeline — raw TOML → runtime structures
 
-> Current-state reference for `src/config/`. Verified against code on 2026-10-02 (after `config-resolution-main-loop` T11); stop/exit semantics, cycle guard, and snapshot coherence re-confirmed 2026-10-03.
+> Current-state reference for `src/config/`. Verified against code on 2026-10-02 (after `config-resolution-main-loop` T11); stop/exit semantics, cycle guard, and snapshot coherence re-confirmed 2026-10-03; enum dispatch and `impl Future` returns re-confirmed 2026-10-05 (T14).
 > Hook-specific detail (slots, wire formats) lives in [hooks.md](hooks.md).
 
 ## Module map
@@ -44,7 +44,7 @@ Everything the loop needs, owned, with no name lookups and no per-iteration allo
 | `provider: Arc<dyn ProviderLogic>` | Per **provider**, shared by all its agents. Owns `url` + `api_key`. |
 | `tools: Arc<[Tool]>` | LLM tool definitions, resolved **once**. Tool *names* are not consulted again. |
 | `context_policy: Arc<dyn ContextPolicy>` | The strategy named by `[agents.<name>.context] strategy`, chosen once. Stateless — it still takes `&ContextConfig` per call. |
-| `request: RequestPolicy` | The inbound policy named by `[agents.<name>.on_input`: `FireAndForget` \| `Queue` \| `Interrupt`. Config data; `agent::request::driver_for` turns it into a `Box<dyn RequestDriver>` once per request phase — see [Request drivers](#request-drivers). |
+| `request: RequestPolicy` | The inbound policy named by `[agents.<name>.on_input`: `FireAndForget` \| `Queue` \| `Interrupt`. Config data; `agent::request::driver_for` turns it into a `RequestDriver` enum once per request phase — see [Request drivers](#request-drivers). |
 | `request_max_tokens` | Pre-computed `min(model.max_tokens, limits.max_output_tokens_per_turn)`. |
 | `max_iterations`, `max_concurrent_tools` | Copied out of the config. |
 
@@ -52,39 +52,11 @@ Everything the loop needs, owned, with no name lookups and no per-iteration allo
 
 ## Request drivers
 
-`RequestPolicy` (`src/config/resolved.rs`) is the config-selected inbound policy; `RequestDriver` (`src/agent/request.rs`) is the object-safe trait, built from the policy once per request phase by `driver_for`. The trait is possible because T07b made `LlmClient` and `HookRunner` object-safe.
+`RequestPolicy` (`src/config/resolved.rs`) is the config-selected inbound policy; `RequestDriver` (`src/agent/request.rs`) is the enum it maps to, built from the policy once per request phase by `driver_for` and dispatched through one `async fn` — no heap allocation, no trait object.
 
-The rule that made this necessary, verified by compile probe on rustc 1.96:
+Dispatch used to be `Box<dyn …>` (plan T07b/T07c). T14 reversed that deliberately: `impl Future` in a trait return is never dyn-compatible on stable (verified by compile probe on rustc 1.96 — every `Box<dyn>` shape requires a boxed future *and* zero generic methods, E0038 otherwise), so keeping trait objects meant keeping `Pin<Box<dyn Future>>` at all 19 async sites. The enum keeps the one property that mattered — the phase never matches on the policy itself — while every future is returned directly.
 
-| Trait method shape | `Box<dyn Trait>`? |
-|---|---|
-| generic params + `impl Future` | no — E0038 |
-| non-generic + `impl Future` | no — E0038 |
-| generic params + boxed future | no — E0038 |
-| generic method present + a non-generic method added | no — E0038 |
-| non-generic + boxed future | **yes** |
-
-A driver needs the client (`LlmClient`) and the runner (`HookRunner`), so its
-method must be non-generic → it can only be a trait object if those two traits
-are object-safe. They are (T07b), so `Box<dyn RequestDriver>` (`src/agent/request.rs`,
-built per request phase by `driver_for`) and `Box<dyn StepRunner>`
-(`src/runtime.rs`, built per step by `step_runner_for`) both exist.
-
-The full rule, verified by compile probe on rustc 1.96:
-
-| Trait method shape | `Box<dyn Trait>`? |
-|---|---|
-| generic params + `impl Future` | no — E0038 |
-| non-generic + `impl Future` | no — E0038 |
-| generic params + boxed future | no — E0038 |
-| generic method present + a non-generic method added | no — E0038 |
-| non-generic + boxed future | **yes** |
-
-So the fix was **not** only boxing futures: `HookRunner::run_hook<S: Slot>` had to move off the trait entirely, to a free `run_hook<S, R: HookRunner + ?Sized>`, leaving a non-generic type-erased `run_json` behind. One generic method anywhere disqualifies the whole trait.
-
-`HookRunner::run_json` deliberately does **not** apply a slot fallback — `S::fallback` needs `S`, which the erased method cannot have. It returns `Ok(HookDecision)` for a produced decision (`HookDecision::none()` meaning "no decision") and `Err(ExecutableError)` for transport failures; the typed wrapper applies the fallback on both paths. `HookDecision` carries the captured `stdout_raw`/`stderr` alongside the value, because a shape mismatch is the one case where the raw output is what a script author needs to see. `LlmClient` likewise builds its request *outside* the async block so only `Send` values cross the await, and carries `Sync` as a supertrait so `&dyn LlmClient` is itself `Send`.
-
-The failure path — error-streak counter, `on_error` hook, stop — is written **once** in `send_or_stop` and shared by all three behaviours, so they cannot drift apart.
+A driver needs the client (`LlmClient`) and the runner (`HookRunner`), which ride alongside as `&impl` arguments: neither the enum nor `RequestCtx` names their types, so adding a client never touches this file. The failure path — error-streak counter, `on_error` hook, stop — is written **once** in `send_or_stop` and shared by all three behaviours, so they cannot drift apart.
 
 Note the interaction with the phase: when `on_input` is set, a tool-less turn **waits for the next user message** rather than finishing. Tests must queue a `Stop` to end such a phase.
 
@@ -99,9 +71,9 @@ The four combinations of `tools_on_input` × `tool_execution` collapse to **two 
 | `SequentialDriver` | `collect_batch`, no drain | `collect_batch`, drain after appending | `run_interruptible_batch(WaitFor::All, Configured(keep\|discard))` |
 | `AsyncDriver` | `take_first`, no drain | `take_first`, drain after appending | `run_interruptible_batch(WaitFor::First, ForceKeep)` — always keeps |
 
-The 2×2 lives in `batch_policy`; `for_agent` turns it into a `Box<dyn ToolBatchDriver>`. `AsyncDriver` ignores `tools_interrupt_strategy` because results already pushed to `messages` cannot be retracted — discarding would leave the assistant message referencing missing tool results.
+The 2×2 lives in `batch_policy`; `for_agent` turns it into a `ToolBatchDriver` enum. The `Async` variant ignores `tools_interrupt_strategy` because results already pushed to `messages` cannot be retracted — discarding would leave the assistant message referencing missing tool results.
 
-Two things the driver deliberately does **not** own, both because a non-generic method cannot take `HookRunner`:
+Two things the driver deliberately does **not** own, both because they need the hook runner, which the driver does not take:
 
 - **`post_tool` hooks** stay in `run_tool_phase`, so the outcome is `Collected` rather than "done".
 - **The final append.** Message order is load-bearing and differs per path, so the driver either appends everything itself (`Handled`, interrupt) or hands the pieces back in the order they must be applied (`Collected`: assistant → denials → results). On the interrupt path the denials go in *first*, because the interruptible batch owns its own pushes.
@@ -122,7 +94,7 @@ Known gap: the executor-gone → `Stopped` path is compiler-checked but untested
 
 ## Session loop
 
-`src/runtime.rs` walks the workflow graph: `session_start` hook → repeat (resolve current step from `ConfigView::workflow`, `before` hooks, `step_runner_for(action)`, `after` hooks, route `on_success` / `on_failure`, stop at `"done"`) → `session_end` hook. Step actions run through `Box<dyn StepRunner>` (`LlmStep` runs the agent loop and maps its outcome; `CommandStep` runs `bash -c` and reports exit status). Shutdown (`shutdown_rx`, graceful Ctrl-C) is honoured on lap boundaries; a removed workflow or step ends the session with a notification instead of panicking.
+`src/runtime.rs` walks the workflow graph: `session_start` hook → repeat (resolve current step from `ConfigView::workflow`, `before` hooks, `StepRunner::from(action)` + `run_step`, `after` hooks, route `on_success` / `on_failure`, stop at `"done"`) → `session_end` hook. Step actions run through the `StepRunner` enum (`Llm` runs the agent loop and maps its outcome; `Command` runs `bash -c` and reports exit status). Shutdown (`shutdown_rx`, graceful Ctrl-C) is honoured on lap boundaries; a removed workflow or step ends the session with a notification instead of panicking.
 
 Stop vs exit: a user `Stop` ends the *step* with success so the walk advances (this is what lets interactive `on_input` agents live inside workflows); only `Exit` ends the whole session. A reload that removes the agent mid-step fails the step (`AgentMissing` → `on_failure`) from either phase. The `session_end` binding is captured at session start, so a mid-session reload cannot skip the audit hook, and it receives the real message count.
 

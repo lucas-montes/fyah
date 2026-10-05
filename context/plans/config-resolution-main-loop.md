@@ -1,4 +1,13 @@
-# Plan: config-resolution-main-loop — raw config (fs_watcher) → resolved runtime structs (Box<dyn>) → main loop
+# Plan: config-resolution-main-loop — raw config (fs_watcher) → resolved runtime structs → main loop
+
+> T14 (2026-10-05) deliberately reverses the T07b/T07c/T08/T09 trait-object
+> design: `impl Future` in a trait return is never dyn-compatible on stable,
+> so keeping `Box<dyn …>` meant keeping `Pin<Box<dyn Future>>` at all 19
+> async sites. The drivers are enums dispatched through one `async fn` each,
+> `LlmClient`/`HookRunner` return `impl Future` with no `+ Send` the compiler
+> does not ask for, and the typed `run_hook` is back on `HookRunner`. The
+> cost is recorded in T14 below: no runtime polymorphism for the three policy
+> enums.
 
 Decisions locked (from clarification round):
 - **Baseline**: the tree is red. An uncommitted, non-compiling draft of *this same refactor* was found
@@ -313,3 +322,16 @@ Assumptions (recorded, user may override):
 1. **T10 approval** — granted by the user ("finish all the remaining tasks"). Implemented as specified, with one addition: `AgentOutcome::Stopped(UserStop)` (including every tool-phase stop) ends the session rather than routing to `on_failure`.
 2. **Reload coherence** — per-phase, as the plan assumed: one `view.agent()` / `view.workflow()` snapshot per phase / lap. Long tool batches keep the snapshot they started with.
 3. **`LimitsGate` as data vs trait** — struct, as specified. Enforcement is identical for every agent; the guard hook is already the extension point.
+
+## 6. T14 — drop trait objects for `impl Future` + enum dispatch (status:done)
+
+- Task ID: T14
+- Goal: Eliminate every `Pin<Box<dyn Future>>` (19 sites: 3 aliases + 2 inline spellings + 14 trait/impl returns). `LlmClient`/`HookRunner` return `impl Future` with no `+ Send` the compiler does not ask for; the three driver traits become enums dispatched through one `async fn` each; the typed `run_hook` moves back onto `HookRunner` as a provided generic method; `LoopDeps`/`RequestCtx`/`StepCtx` stop naming client/runner types.
+- Why (the reversal): RPITIT is never dyn-compatible on stable rustc 1.96 (the plan's own E0038 probe table), so `Box<dyn RequestDriver|ToolBatchDriver|StepRunner>` + `&dyn LlmClient|HookRunner` forced boxing at every async site. The user chose direct futures over trait objects (2026-10-05).
+- Cost, recorded honestly: **no runtime polymorphism** for the three policy enums. Adding a `RequestPolicy` variant is now an exhaustive-`match` compile error in `request.rs` rather than a new `impl RequestDriver` — still a compile error, but the extension point is no longer "add a struct anywhere". `Box<dyn ProviderLogic|ContextPolicy|StreamReconstructor>` stay: sync traits, no futures involved.
+- Boundaries (in/out of scope): In — `src/hooks.rs`, `src/client.rs`, `src/agent/{state,core,limits,request,batch}.rs`, `src/runtime.rs`, tests, `context/config-pipeline.md` + this entry. Out — `ProviderLogic`/`ContextPolicy` (sync, untouched), `LlmClient: Sync` (dropped — it existed only for boxed-`Send` soundness; restored if the compiler ever asks).
+- Done when: `rg "BoxFuture|Pin<Box<dyn Future|Box::pin" src/` empty; `rg "dyn LlmClient|dyn HookRunner|dyn RequestDriver|dyn ToolBatchDriver|dyn StepRunner" src/` empty; suite green twice; clippy 0 errors, no new warning kinds.
+- Completed: 2026-10-05
+- Files changed: `src/agent/request.rs` (`RequestDriver` enum + `async fn request`, `RequestCtx` without client/runner, `send_or_stop`/`on_error` generic over `&R`), `src/agent/batch.rs` (`ToolBatchDriver` enum, `BoxFuture` deleted), `src/runtime.rs` (`StepRunner` enum + `From<&StepKind>`, `StepCtx` without client/runner), `src/hooks.rs` (`BoxFuture` deleted, `run_json` → `impl Future`, `run_hook` back on the trait with explicit lifetimes), `src/client.rs` (`LlmClient` → `impl Future`, `Sync` dropped, phases take `&impl` args, `object_safety` test replaced by `dispatch_coverage`), `src/agent/{state,core,limits}.rs` (`LoopDeps` without client/runner, phases take runner as arg), tests (all stubs → `async fn`)
+- Evidence: both greps empty; `cargo test -- --test-threads=1` → **109 passed, 0 failed**; `cargo test` (parallel) → **109 passed, 0 failed**; `cargo clippy --all-targets` → **0 errors**, warning locations back at the pre-existing baseline kinds (the 2 transient `async_fn_in_trait` lints were resolved by writing the declarations as explicit `impl Future`, not by suppressing them).
+- Notes: explicit `-> impl Future` (not `async fn`) on `run_hook`'s declaration cost two discoveries. (1) Fused `&'s mut HookState<'s>` must be written as `&'s mut HookState<'t>` with `where 't: 'a`, or sequential reborrows stop compiling. (2) The returned future may only promise the call region (`+ 'a`), and two `match runner.run_hook(…).await` sites had to become bind-then-match because the future temporary holds the `&mut` borrow through the arms. Both are recorded so the next `impl Future` conversion does not rediscover them.

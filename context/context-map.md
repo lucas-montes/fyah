@@ -6,7 +6,7 @@
 
 | Path | What it is | Read it when… |
 |---|---|---|
-| [config-pipeline.md](config-pipeline.md) | `src/config/` architecture: raw → validate → resolved → store, which knob is data vs `Box<dyn>`, reload semantics, session loop | touching config, the main loop, or any driver |
+| [config-pipeline.md](config-pipeline.md) | `src/config/` architecture: raw → validate → resolved → store, which knob is data vs enum dispatch, reload semantics, session loop | touching config, the main loop, or any driver |
 | [hooks.md](hooks.md) | Canonical hook-slot inventory: all 10 slots, stdin/stdout JSON, config paths, call sites, `fail_mode` values, context strategies, limits, stop reasons | touching hooks, executables, limits, or context policy |
 | [sota-references.md](sota-references.md) | Research dump (627 lines, over the 250-line guideline) | looking for prior art; do not treat as current-state truth |
 | [plans/config-resolution-main-loop.md](plans/config-resolution-main-loop.md) | Completed plan: raw config → resolved runtime structs → main loop (T01–T13 + T04a/b/c, T07a/b/c), then the review fix-ups (UserExit semantics, cycle guard, session-end hardening, snapshot coherence) | tracing why a driver, the graph loop, or the store looks the way it does |
