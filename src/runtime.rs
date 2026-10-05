@@ -46,22 +46,22 @@ pub enum StepResult {
 
 /// Runs one workflow step's action: an agent loop, or a shell command.
 ///
-/// Object-safe on purpose: the method is non-generic and returns a boxed
-/// future, which is the only shape that survives `Box<dyn …>`. The client and
-/// runner arrive type-erased — possible only since T07b made both traits
-/// object-safe.
-pub trait StepRunner: std::fmt::Debug + Send + Sync {
-    fn run_step<'a>(
-        &'a self,
-        ctx: StepCtx<'a>,
-    ) -> Pin<Box<dyn Future<Output = StepResult> + 'a>>;
+/// An enum, not a trait object: dispatch is one `async fn` with no heap
+/// allocation, and the compiler forces every new action through the one
+/// `From` mapping plus this one method. The client and runner ride alongside
+/// as `&impl` arguments, so the enum never names their types.
+#[derive(Debug, Clone)]
+pub enum StepRunner {
+    Llm { agent: String },
+    Command { command: String },
 }
 
 /// Everything one step needs. All borrows; the caller keeps ownership so a
 /// session loop can thread the same channels and history through steps.
+///
+/// The client and runner are not fields: they arrive as arguments, so the
+/// context stays a plain data bag with no type parameters.
 pub struct StepCtx<'a> {
-    pub client: &'a dyn LlmClient,
-    pub runner: &'a dyn HookRunner,
     pub view: &'a ConfigView,
     pub session: &'a Arc<Session>,
     pub messages: &'a mut Vec<Message>,
@@ -70,93 +70,84 @@ pub struct StepCtx<'a> {
 }
 
 /// Build the runner an action selects. One mapping, at the edge; the session
-/// loop dispatches through the returned object.
-pub fn step_runner_for(action: &StepKind) -> Box<dyn StepRunner> {
-    match action {
-        StepKind::Llm { agent } => Box::new(LlmStep {
-            agent: agent.clone(),
-        }),
-        StepKind::Command { command } => Box::new(CommandStep {
-            command: command.clone(),
-        }),
+/// loop dispatches through the returned value.
+impl From<&StepKind> for StepRunner {
+    fn from(action: &StepKind) -> Self {
+        match action {
+            StepKind::Llm { agent } => StepRunner::Llm {
+                agent: agent.clone(),
+            },
+            StepKind::Command { command } => StepRunner::Command {
+                command: command.clone(),
+            },
+        }
     }
 }
 
-#[derive(Debug)]
-struct LlmStep {
-    agent: String,
-}
-
-impl StepRunner for LlmStep {
-    fn run_step<'a>(
-        &'a self,
+impl StepRunner {
+    /// Run this step's action.
+    pub async fn run_step<'a, C, R>(
+        self,
         ctx: StepCtx<'a>,
-    ) -> Pin<Box<dyn Future<Output = StepResult> + 'a>> {
-        Box::pin(async move {
-            let StepCtx {
-                client,
-                runner,
-                view,
-                session,
-                messages,
-                rx,
-                out,
-            } = ctx;
-            // The agent loop's outcome is what the session loop routes on. A
-            // user stop ends the *step* with success, so the workflow can
-            // advance — the step's work is the interactive conversation, and
-            // the user stopped it deliberately. Only an exit ends the whole
-            // session; any other stop is a step failure to route on.
-            match run_agent_loop(
-                &self.agent,
-                client,
-                runner,
-                view.clone(),
-                Arc::clone(session),
-                messages,
-                rx,
-                out.clone(),
-            )
-            .await
-            {
-                AgentOutcome::Finished => StepResult::Success,
-                AgentOutcome::Stopped(StopReason::UserStop) => StepResult::Success,
-                AgentOutcome::Stopped(StopReason::UserExit) => StepResult::AbortSession,
-                AgentOutcome::Stopped(_) => StepResult::Failure,
-            }
-        })
-    }
-}
-
-#[derive(Debug)]
-struct CommandStep {
-    command: String,
-}
-
-impl StepRunner for CommandStep {
-    fn run_step<'a>(
-        &'a self,
-        _ctx: StepCtx<'a>,
-    ) -> Pin<Box<dyn Future<Output = StepResult> + 'a>> {
-        Box::pin(async move {
-            // Run via shell so multi-word commands like "cargo test" work.
-            match tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(&self.command)
-                .status()
+        client: &C,
+        runner: &R,
+    ) -> StepResult
+    where
+        C: LlmClient,
+        R: HookRunner,
+    {
+        match self {
+            StepRunner::Llm { agent } => {
+                let StepCtx {
+                    view,
+                    session,
+                    messages,
+                    rx,
+                    out,
+                } = ctx;
+                // The agent loop's outcome is what the session loop routes on. A
+                // user stop ends the *step* with success, so the workflow can
+                // advance — the step's work is the interactive conversation, and
+                // the user stopped it deliberately. Only an exit ends the whole
+                // session; any other stop is a step failure to route on.
+                match run_agent_loop(
+                    &agent,
+                    client,
+                    runner,
+                    view.clone(),
+                    Arc::clone(session),
+                    messages,
+                    rx,
+                    out.clone(),
+                )
                 .await
-            {
-                Ok(status) if status.success() => StepResult::Success,
-                Ok(status) => {
-                    tracing::error!(command = self.command.as_str(), status = ?status.code(), "command step failed");
-                    StepResult::Failure
-                }
-                Err(error) => {
-                    tracing::error!(command = self.command.as_str(), error = %error, "command step failed");
-                    StepResult::Failure
+                {
+                    AgentOutcome::Finished => StepResult::Success,
+                    AgentOutcome::Stopped(StopReason::UserStop) => StepResult::Success,
+                    AgentOutcome::Stopped(StopReason::UserExit) => StepResult::AbortSession,
+                    AgentOutcome::Stopped(_) => StepResult::Failure,
                 }
             }
-        })
+            StepRunner::Command { command } => {
+                // Run via shell so multi-word commands like "cargo test" work.
+                match tokio::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(&command)
+                    .status()
+                    .await
+                {
+                    Ok(status) if status.success() => StepResult::Success,
+                    Ok(status) => {
+                        tracing::error!(command = command.as_str(), status = ?status.code(), "command step failed");
+                        StepResult::Failure
+                    }
+                    Err(error) => {
+                        tracing::error!(command = command.as_str(), error = %error, "command step failed");
+                        StepResult::Failure
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -362,22 +353,23 @@ async fn start_workflow(
             }
         }
 
-        // The action runs through its object; after hooks observe but only
+        // The action runs through its enum; after hooks observe but only
         // `AbortWorkflow` changes the routing.
         let result = match result {
             Some(result) => result,
             None => {
-                let runner_obj = step_runner_for(current_step.action());
-                runner_obj
-                    .run_step(StepCtx {
-                        client: &client as &dyn LlmClient,
-                        runner: runner as &dyn HookRunner,
-                        view: &view,
-                        session: &session,
-                        messages: &mut *messages,
-                        rx: &mut *user_input_rx,
-                        out: &user_output_tx,
-                    })
+                StepRunner::from(current_step.action())
+                    .run_step(
+                        StepCtx {
+                            view: &view,
+                            session: &session,
+                            messages: &mut *messages,
+                            rx: &mut *user_input_rx,
+                            out: &user_output_tx,
+                        },
+                        &client,
+                        runner,
+                    )
                     .await
             }
         };
@@ -477,12 +469,8 @@ on_failure = "done"
         out: &'a OutboundChannel,
         session: &'a Arc<Session>,
         view: &'a ConfigView,
-        client: &'a dyn LlmClient,
-        runner: &'a dyn HookRunner,
     ) -> StepCtx<'a> {
         StepCtx {
-            client,
-            runner,
             view,
             session,
             messages,
@@ -502,19 +490,15 @@ on_failure = "done"
         let (_in_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
         let mut messages = Vec::new();
 
-        let ok = step_runner_for(&StepKind::Command {
+        let ok = StepRunner::from(&StepKind::Command {
             command: "true".to_string(),
         });
         assert_eq!(
-            ok.run_step(step_ctx(
-                &mut messages,
-                &mut rx,
-                &out,
-                &session,
-                &view,
+            ok.run_step(
+                step_ctx(&mut messages, &mut rx, &out, &session, &view),
                 &client,
                 &runner,
-            ))
+            )
             .await,
             StepResult::Success
         );
@@ -626,18 +610,14 @@ on_failure = "done"
         let out = OutboundChannel::from(out_tx);
         let (_in_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
         let mut messages = Vec::new();
-        step_runner_for(&StepKind::Llm {
+        StepRunner::from(&StepKind::Llm {
             agent: "coder".to_string(),
         })
-        .run_step(step_ctx(
-            &mut messages,
-            &mut rx,
-            &out,
-            &session,
-            &view,
+        .run_step(
+            step_ctx(&mut messages, &mut rx, &out, &session, &view),
             &client,
             &runner,
-        ))
+        )
         .await
     }
 
