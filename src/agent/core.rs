@@ -213,7 +213,7 @@ where
         let args_val: serde_json::Value = serde_json::from_str(tc.arguments())
             .unwrap_or_else(|_| serde_json::Value::String(tc.arguments().to_string()));
         let input = PreToolInput::new(deps.agent_name, tc.id(), tc.name(), &args_val);
-        let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
+        let mut hook_state = HookState::new(&mut *state.messages);
         match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
             PreToolOutcome::Continue => allowed.push(tc),
             PreToolOutcome::Deny { error } => {
@@ -274,7 +274,7 @@ where
         };
         let tool_name = names.get(&call_id).map(|s| s.as_str()).unwrap_or("unknown");
         let input = PostToolInput::new(deps.agent_name, &call_id, tool_name, output_len);
-        let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
+        let mut hook_state = HookState::new(&mut *state.messages);
         match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
             PostToolOutcome::Continue => kept.push(msg),
             PostToolOutcome::DropResult => {

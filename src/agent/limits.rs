@@ -206,7 +206,7 @@ impl<'a> LimitsGate<'a> {
                 state.consecutive_errors,
                 state.stalled_turns,
             );
-            let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
+            let mut hook_state = HookState::new(&mut *state.messages);
             match runner.run_hook( slot.exe(), &hook, &input, &mut hook_state).await {
                 LoopGuardOutcome::Continue => {}
                 LoopGuardOutcome::Stop { reason } => {

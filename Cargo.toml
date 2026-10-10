@@ -24,8 +24,6 @@ tokio-util = "0.7"
 
 toml = "0.8"
 
-futures = "0.3"
-
 uuid = { version = "1.23.3", features = ["v7"] }
 
 notify = { version = "9.0.0-rc.4", features = ["serde"] }

@@ -77,13 +77,6 @@ pub struct ConfigView {
 }
 
 impl ConfigView {
-    /// The whole active snapshot. Prefer [`Self::agent`] in the loops: it
-    /// hands back an owned `Arc<AgentRuntime>` instead of borrowing the
-    /// snapshot, so a phase can hold it across a reload.
-    pub fn config(&self) -> Arc<ResolvedConfig> {
-        self.config.load_full()
-    }
-
     /// The resolved agent for this generation, or `None` if the name is not
     /// configured — including when the agent was removed from `fyah.toml`
     /// while a session was still running.

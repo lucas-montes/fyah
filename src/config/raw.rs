@@ -88,8 +88,6 @@ pub struct ModelConfig {
     name: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
-    #[serde(default)]
-    streaming: bool,
 }
 
 /// Controls how the agent handles new user input arriving while busy.
@@ -307,9 +305,6 @@ impl AgentConfig {
     pub fn tool_execution(&self) -> &ToolExecution {
         &self.tool_execution
     }
-    pub fn hooks(&self) -> &AgentHooks {
-        &self.hooks
-    }
 }
 
 #[derive(Debug, Deserialize, PartialEq, Valuable, Default)]
@@ -370,20 +365,12 @@ impl WorkflowConfig {
         (self.initial, self.steps)
     }
 
-    pub fn initial(&self) -> &str {
-        &self.initial
-    }
-
     pub fn session_start(&self) -> Option<&Hook<SessionStartSlot>> {
         self.hooks.session_start()
     }
 
     pub fn session_end(&self) -> Option<&Hook<SessionEndSlot>> {
         self.hooks.session_end()
-    }
-
-    pub fn hooks(&self) -> &WorkflowHooks {
-        &self.hooks
     }
 }
 
@@ -422,11 +409,6 @@ impl StepConfig {
     /// Next step on failure; `"done"` terminates the workflow.
     pub fn on_failure(&self) -> &str {
         &self.on_failure
-    }
-
-    /// Optional execution timeout in seconds. Data only for now.
-    pub fn timeout_secs(&self) -> Option<std::num::NonZeroU64> {
-        self.timeout_secs
     }
 }
 
@@ -739,9 +721,6 @@ impl ToolRegistry {
 }
 
 impl ModelConfig {
-    pub fn streaming(&self) -> bool {
-        self.streaming
-    }
     pub fn name(&self) -> &str {
         &self.name
     }

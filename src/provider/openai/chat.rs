@@ -120,15 +120,6 @@ pub fn attach_body<'c>(
     req.json(&body)
 }
 
-pub fn attach_body_stream<'c>(
-    req: reqwest::RequestBuilder,
-    conv: &Conversation<'c>,
-) -> reqwest::RequestBuilder {
-    let mut body = OpenAiRequest::from(conv);
-    body.stream = true;
-    req.json(&body)
-}
-
 // ── Response (owned; parsed from network bytes) ──
 
 #[derive(Deserialize)]

@@ -30,7 +30,6 @@ use crate::communication::{Command, Inbound, OutboundChannel};
 use crate::config::{AgentRuntime, RequestPolicy};
 use crate::hooks::{HookRunner, HookState, OnErrorInput, OnErrorOutcome};
 use crate::model::{AssistantTurn, Message, Tool};
-use crate::session::Session;
 
 /// What the request driver decided.
 #[derive(Debug)]
@@ -49,7 +48,6 @@ pub enum RequestStep {
 /// the driver needs no generics to take them.
 pub struct RequestCtx<'a, 'b> {
     pub agent_name: &'a str,
-    pub session: &'a Session,
     pub out: &'a OutboundChannel,
     pub agent: &'a AgentRuntime,
     pub state: &'a mut LoopState<'b>,
@@ -95,7 +93,6 @@ impl RequestDriver {
             RequestDriver::FireAndForget => {
                 let RequestCtx {
                     agent_name,
-                    session,
                     agent,
                     state,
                     ephemeral,
@@ -105,7 +102,7 @@ impl RequestDriver {
                 let result = client
                     .request_turn(agent, &*state.messages, ephemeral, tools)
                     .await;
-                match send_or_stop(result, state, runner, agent_name, agent, session).await {
+                match send_or_stop(result, state, runner, agent_name, agent).await {
                     Ok(turn) => RequestStep::Turn(turn),
                     Err(step) => step,
                 }
@@ -113,7 +110,6 @@ impl RequestDriver {
             RequestDriver::Queue => {
                 let RequestCtx {
                     agent_name,
-                    session,
                     out,
                     agent,
                     state,
@@ -129,7 +125,6 @@ impl RequestDriver {
                     runner,
                     agent_name,
                     agent,
-                    session,
                 )
                 .await
                 {
@@ -155,7 +150,6 @@ impl RequestDriver {
             RequestDriver::Interrupt => {
                 let RequestCtx {
                     agent_name,
-                    session,
                     out,
                     agent,
                     state,
@@ -165,7 +159,7 @@ impl RequestDriver {
                 } = ctx;
                 let send_fut = client.request_turn(agent, &*state.messages, ephemeral, tools);
                 select! {
-                    r = send_fut => match send_or_stop(r, state, runner, agent_name, agent, session).await {
+                    r = send_fut => match send_or_stop(r, state, runner, agent_name, agent).await {
                         Ok(turn) => RequestStep::Turn(turn),
                         Err(step) => step,
                     },
@@ -210,7 +204,6 @@ async fn send_or_stop<R>(
     runner: &R,
     agent_name: &str,
     agent: &AgentRuntime,
-    session: &Session,
 ) -> Result<AssistantTurn, RequestStep>
 where
     R: HookRunner + ?Sized,
@@ -220,7 +213,7 @@ where
         Err(reason) => {
             state.consecutive_errors = state.consecutive_errors.saturating_add(1);
             let err_str = format!("{reason:?}");
-            match on_error(state, runner, agent_name, agent, session, &err_str).await {
+            match on_error(state, runner, agent_name, agent, &err_str).await {
                 Some(abort) => Err(RequestStep::Stopped(abort)),
                 None => Err(RequestStep::Stopped(reason)),
             }
@@ -240,7 +233,6 @@ async fn on_error<R>(
     runner: &R,
     agent_name: &str,
     agent: &AgentRuntime,
-    session: &Session,
     error_str: &str,
 ) -> Option<StopReason>
 where
@@ -249,7 +241,7 @@ where
     let hook = agent.agent_config().on_error()?;
     let slot = agent.hooks().on_error()?;
     let input = OnErrorInput::new(agent_name, "request", error_str);
-    let mut hook_state = HookState::new(&mut *state.messages, session.id());
+    let mut hook_state = HookState::new(&mut *state.messages);
     match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
         OnErrorOutcome::Continue => None,
         OnErrorOutcome::Abort { error } => {

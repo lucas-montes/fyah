@@ -35,7 +35,6 @@ fn parse_line(line: String) -> Inbound {
 
 pub enum Outbound {
     Ai(String),
-    User(String),
     Notification(String),
 }
 
@@ -45,12 +44,6 @@ pub struct OutboundChannel(UnboundedSender<Outbound>);
 impl OutboundChannel {
     pub fn ai(&self, msg: String) {
         if self.0.send(Outbound::Ai(msg)).is_err() {
-            tracing::error!("failed to send AI message to user output channel");
-        }
-    }
-
-    pub fn user(&self, msg: String) {
-        if self.0.send(Outbound::User(msg)).is_err() {
             tracing::error!("failed to send AI message to user output channel");
         }
     }
@@ -72,7 +65,6 @@ impl Display for Outbound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Outbound::Ai(msg) => write!(f, "AI: {}", msg),
-            Outbound::User(msg) => write!(f, "User: {}", msg),
             Outbound::Notification(msg) => write!(f, "Notification: {}", msg),
         }
     }

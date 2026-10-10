@@ -183,7 +183,7 @@ pub async fn start_session(
             let input =
                 SessionStartInput::new(session.id(), workflow.as_str(), session.vcs_revision());
             let mut messages: Vec<Message> = Vec::new();
-            let mut state = HookState::new(&mut messages, session.id());
+            let mut state = HookState::new(&mut messages);
             match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
                 SessionStartOutcome::Continue => {}
                 SessionStartOutcome::Abort { error } => {
@@ -234,7 +234,7 @@ pub async fn start_session(
             messages.len(),
         );
         let mut hook_messages: Vec<Message> = Vec::new();
-        let mut state = HookState::new(&mut hook_messages, session.id());
+        let mut state = HookState::new(&mut hook_messages);
         let _outcome: SessionEndOutcome =
             runner.run_hook( slot.exe(), &hook, &input, &mut state).await;
     }
@@ -322,7 +322,7 @@ async fn start_workflow(
         if let Some(slot) = current_step.before() {
             let hook = Hook::<StepSlot>::new(slot.name().to_string());
             let input = StepHookInput::new(workflow.as_str(), step_name.as_str(), session.id());
-            let mut state = HookState::new(&mut *messages, session.id());
+            let mut state = HookState::new(&mut *messages);
 
             match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
                 StepHookOutcome::Continue => {}
@@ -375,7 +375,7 @@ async fn start_workflow(
         if let Some(slot) = current_step.after() {
             let hook = Hook::<StepSlot>::new(slot.name().to_string());
             let input = StepHookInput::new(&workflow, &step_name, session.id());
-            let mut state = HookState::new(&mut *messages, session.id());
+            let mut state = HookState::new(&mut *messages);
 
             match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
                 StepHookOutcome::Continue => {}

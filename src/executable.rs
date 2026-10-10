@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 use serde::Deserialize;
@@ -110,28 +109,6 @@ impl ExecutableParams {
             Self::Plugin { .. } => "plugin",
         }
     }
-}
-
-/// Validated registry. The map key is the executable name; the value holds
-/// only the runnable bits (no name duplication inside [`Executable`]).
-#[derive(Debug, Default, Valuable)]
-pub struct ExecutableRegistry(HashMap<String, Executable>);
-
-impl From<HashMap<String, Executable>> for ExecutableRegistry {
-    fn from(map: HashMap<String, Executable>) -> Self {
-        Self(map)
-    }
-}
-
-impl ExecutableRegistry {
-    pub fn get(&self, name: &str) -> Option<&Executable> {
-        self.0.get(name)
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.0.contains_key(name)
-    }
-
 }
 
 /// Max characters kept per stream for log fields. Full byte lengths are

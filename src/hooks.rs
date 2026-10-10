@@ -140,8 +140,8 @@ pub trait Slot: std::fmt::Debug + 'static {
     }
 }
 
-/// Reusable hook reference. All fields private; resolve `executable` via the
-/// [`crate::executable::ExecutableRegistry`]. `T::Options` holds only static
+/// Reusable hook reference. All fields private; `executable` is resolved via
+/// the validated executable map. `T::Options` holds only static
 /// knobs — never JSON schema (tools own that). The slot is known from `T`,
 /// so no user-supplied `name` is needed; logging uses `T::NAME`.
 #[derive(Debug, Deserialize, PartialEq)]
@@ -168,14 +168,11 @@ impl<T: Slot> Hook<T> {
     pub fn executable(&self) -> &str {
         &self.executable
     }
-
-    pub fn options(&self) -> &T::Options {
-        &self.options
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Option structs (private fields + accessors)
+// Option structs (parsed, no runtime reader — see the "Not built yet"
+// section of `context/config-pipeline.md`)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
@@ -195,21 +192,9 @@ pub struct VerifyOptions {
     min_iterations: Option<usize>,
 }
 
-impl VerifyOptions {
-    pub fn min_iterations(&self) -> Option<usize> {
-        self.min_iterations
-    }
-}
-
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct StepOptions {
     abort_on_fail: Option<bool>,
-}
-
-impl StepOptions {
-    pub fn abort_on_fail(&self) -> Option<bool> {
-        self.abort_on_fail
-    }
 }
 
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
@@ -217,21 +202,9 @@ pub struct PrePromptOptions {
     max_tokens: Option<usize>,
 }
 
-impl PrePromptOptions {
-    pub fn max_tokens(&self) -> Option<usize> {
-        self.max_tokens
-    }
-}
-
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct PreToolOptions {
     mode: Option<String>,
-}
-
-impl PreToolOptions {
-    pub fn mode(&self) -> Option<&str> {
-        self.mode.as_deref()
-    }
 }
 
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
@@ -239,21 +212,9 @@ pub struct PostToolOptions {
     max_bytes: Option<usize>,
 }
 
-impl PostToolOptions {
-    pub fn max_bytes(&self) -> Option<usize> {
-        self.max_bytes
-    }
-}
-
 #[derive(Debug, Deserialize, PartialEq, Default, Valuable)]
 pub struct ContextHookOptions {
     max_tokens: Option<usize>,
-}
-
-impl ContextHookOptions {
-    pub fn max_tokens(&self) -> Option<usize> {
-        self.max_tokens
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,18 +263,6 @@ impl<'a> SessionStartInput<'a> {
             vcs_rev,
         }
     }
-
-    pub fn session_id(&self) -> &str {
-        self.session_id
-    }
-
-    pub fn workflow(&self) -> &str {
-        self.workflow
-    }
-
-    pub fn vcs_rev(&self) -> Option<&str> {
-        self.vcs_rev
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -337,22 +286,6 @@ impl<'a> SessionEndInput<'a> {
             success,
             n_messages,
         }
-    }
-
-    pub fn session_id(&self) -> &str {
-        self.session_id
-    }
-
-    pub fn workflow(&self) -> &str {
-        self.workflow
-    }
-
-    pub fn success(&self) -> bool {
-        self.success
-    }
-
-    pub fn n_messages(&self) -> usize {
-        self.n_messages
     }
 }
 
@@ -393,26 +326,6 @@ impl<'a> CustomInput<'a> {
             max_output_bytes,
         }
     }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn iteration(&self) -> usize {
-        self.iteration
-    }
-
-    pub fn n_messages(&self) -> usize {
-        self.n_messages
-    }
-
-    pub fn token_estimate(&self) -> usize {
-        self.token_estimate
-    }
-
-    pub fn tool_output_bytes(&self) -> usize {
-        self.tool_output_bytes
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -437,22 +350,6 @@ impl<'a> VerifyInput<'a> {
             n_messages,
         }
     }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn iteration(&self) -> usize {
-        self.iteration
-    }
-
-    pub fn last_text(&self) -> Option<&str> {
-        self.last_text
-    }
-
-    pub fn n_messages(&self) -> usize {
-        self.n_messages
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -470,18 +367,6 @@ impl<'a> StepHookInput<'a> {
             session_id,
         }
     }
-
-    pub fn workflow(&self) -> &str {
-        self.workflow
-    }
-
-    pub fn step(&self) -> &str {
-        self.step
-    }
-
-    pub fn session_id(&self) -> &str {
-        self.session_id
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -498,18 +383,6 @@ impl<'a> PrePromptInput<'a> {
             iteration,
             n_messages,
         }
-    }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn iteration(&self) -> usize {
-        self.iteration
-    }
-
-    pub fn n_messages(&self) -> usize {
-        self.n_messages
     }
 }
 
@@ -530,22 +403,6 @@ impl<'a> PreToolInput<'a> {
             args,
         }
     }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn call_id(&self) -> &str {
-        self.call_id
-    }
-
-    pub fn tool(&self) -> &str {
-        self.tool
-    }
-
-    pub fn args(&self) -> &Value {
-        self.args
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -565,22 +422,6 @@ impl<'a> PostToolInput<'a> {
             output_len,
         }
     }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn call_id(&self) -> &str {
-        self.call_id
-    }
-
-    pub fn tool(&self) -> &str {
-        self.tool
-    }
-
-    pub fn output_len(&self) -> usize {
-        self.output_len
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -593,18 +434,6 @@ pub struct OnErrorInput<'a> {
 impl<'a> OnErrorInput<'a> {
     pub fn new(agent: &'a str, phase: &'a str, error: &'a str) -> Self {
         Self { agent, phase, error }
-    }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn phase(&self) -> &str {
-        self.phase
-    }
-
-    pub fn error(&self) -> &str {
-        self.error
     }
 }
 
@@ -698,19 +527,6 @@ pub enum VerifyOutcome {
     #[default]
     Done,
     NotDone { error: HookError },
-}
-
-impl VerifyOutcome {
-    pub fn is_done(&self) -> bool {
-        matches!(self, Self::Done)
-    }
-
-    pub fn feedback(&self) -> Option<&str> {
-        match self {
-            Self::Done => None,
-            Self::NotDone { error } => Some(error.detail()),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -931,19 +747,11 @@ impl Slot for ContextSlot {
 #[derive(Debug)]
 pub struct HookState<'a> {
     messages: &'a mut Vec<Message>,
-    session_id: &'a str,
 }
 
 impl<'a> HookState<'a> {
-    pub fn new(messages: &'a mut Vec<Message>, session_id: &'a str) -> Self {
-        Self {
-            messages,
-            session_id,
-        }
-    }
-
-    pub fn session_id(&self) -> &str {
-        self.session_id
+    pub fn new(messages: &'a mut Vec<Message>) -> Self {
+        Self { messages }
     }
 
     pub fn message_count(&self) -> usize {
@@ -1222,7 +1030,7 @@ impl HookRunner for RealHookRunner {
                         elapsed_ms = start.elapsed().as_millis() as u64,
                         "executable kind not implemented"
                     );
-                    Err(error)
+                    todo!("Wasm support: run the module, call the function, pass JSON, return JSON");
                 }
                 ExecutableParams::Plugin { name, function } => {
                     let error = ExecutableError::NotImplemented {
@@ -1238,14 +1046,13 @@ impl HookRunner for RealHookRunner {
                         elapsed_ms = start.elapsed().as_millis() as u64,
                         "executable kind not implemented"
                     );
-                    Err(error)
+                    todo!("Plugin support: call the plugin, pass JSON, return JSON");
                 }
             }
         }
     }
 }
 
-//TODO: not sure this is useful
 /// Built-in name check. Unknown names surface as
 /// [`ExecutableError::UnknownBuiltin`] so `fail_mode` decides fail-open vs
 /// fail-closed; validation catches typos at load time.
@@ -1295,7 +1102,7 @@ mod tests {
             Message::new_tool("a".to_string(), "0123456789".to_string()),
             Message::new_tool("b".to_string(), "xy".to_string()),
         ];
-        let mut state = HookState::new(&mut messages, "s");
+        let mut state = HookState::new(&mut messages);
         assert_eq!(state.truncate_outputs(4), 1);
         assert_eq!(state.drop_tool_results(&["b".to_string()]), 1);
         assert_eq!(state.message_count(), 2);
@@ -1349,7 +1156,7 @@ mod fallback_tests {
     #[tokio::test]
     async fn a_transport_failure_obeys_fail_mode() {
         let mut messages = vec![Message::new_user("hello".to_string())];
-        let mut state = HookState::new(&mut messages, "s");
+        let mut state = HookState::new(&mut messages);
         let hook = Hook::<PrePromptSlot>::new("pp".to_string());
         let input = PrePromptInput::new("coder", 1, 1);
 
@@ -1375,7 +1182,7 @@ mod fallback_tests {
     #[tokio::test]
     async fn unparseable_output_obeys_fail_mode() {
         let mut messages = vec![Message::new_user("hello".to_string())];
-        let mut state = HookState::new(&mut messages, "s");
+        let mut state = HookState::new(&mut messages);
         let hook = Hook::<PrePromptSlot>::new("pp".to_string());
         let input = PrePromptInput::new("coder", 1, 1);
         // Well-formed JSON the slot does not understand: same shape as a
@@ -1404,7 +1211,7 @@ mod fallback_tests {
     #[tokio::test]
     async fn an_empty_decision_is_the_slot_default() {
         let mut messages = vec![Message::new_user("hello".to_string())];
-        let mut state = HookState::new(&mut messages, "s");
+        let mut state = HookState::new(&mut messages);
         let hook = Hook::<PrePromptSlot>::new("pp".to_string());
         let input = PrePromptInput::new("coder", 1, 1);
         let exe = command_exe("abortworkflow");

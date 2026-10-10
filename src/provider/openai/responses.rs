@@ -115,14 +115,6 @@ pub fn attach_body<'c>(
     req.json(&body)
 }
 
-pub fn attach_body_stream<'c>(
-    req: reqwest::RequestBuilder,
-    conv: &Conversation<'c>,
-) -> reqwest::RequestBuilder {
-    let body = build_responses_request_stateful(conv, 0, None, true);
-    req.json(&body)
-}
-
 pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> {
     let resp: ResponsesResponse = serde_json::from_slice(bytes).map_err(|e| {
         error!(

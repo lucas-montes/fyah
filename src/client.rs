@@ -98,25 +98,8 @@ pub trait LlmClient: std::fmt::Debug {
             Ok(response.bytes().await.map_err(Error::ParseRaw)?.to_vec())
         }
     }
-
-    fn stream_request(
-        &self,
-        request: RequestBuilder,
-    ) -> impl Future<Output = Result<reqwest::Response, Error>> {
-        async move {
-            let response = request
-                .send()
-                .await
-                .map_err(|e| Error::RequestFailed(e.to_string()))?;
-            response.error_for_status().map_err(|e| Error::Api {
-                code: e.status().unwrap_or_default().to_string(),
-                message: e.to_string(),
-            })
-        }
-    }
 }
 
-//TODO: we just want a wrapper around the client just the client, so we can have an easy mock for testing
 #[derive(Debug, Default)]
 pub struct Client(reqwest::Client);
 
@@ -206,7 +189,7 @@ where
                 ctx_cfg.max_messages(),
                 ctx_cfg.max_output_bytes(),
             );
-            let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
+            let mut hook_state = HookState::new(&mut *state.messages);
 
             // Bind first: the future borrows `hook_state`, so matching on it
             // directly would hold the borrow through the arms that reuse it.
@@ -278,7 +261,7 @@ where
             None => None,
             Some(slot) => {
                 let input = PrePromptInput::new(agent_name, iteration, state.messages.len());
-                let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
+                let mut hook_state = HookState::new(&mut *state.messages);
                 // Bind first: the future borrows `hook_state`, so matching on
                 // it directly would hold the borrow through the arms that
                 // reuse it.
@@ -337,7 +320,6 @@ where
         .request(
             request::RequestCtx {
                 agent_name: deps.agent_name,
-                session: &deps.session,
                 out: &deps.out,
                 agent: &agent,
                 state,
@@ -370,7 +352,7 @@ where
                     last_text_owned.as_deref(),
                     state.messages.len(),
                 );
-                let mut hook_state = HookState::new(&mut *state.messages, deps.session.id());
+                let mut hook_state = HookState::new(&mut *state.messages);
                 match runner.run_hook( slot.exe(), hook, &input, &mut hook_state).await {
                     VerifyOutcome::Done => {}
                     VerifyOutcome::NotDone { error } => {
