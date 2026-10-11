@@ -52,7 +52,7 @@ use super::raw::{
     AgentConfig, ModelConfig, OnInput, ProviderConfig, StepAction, StepConfig, ToolExecution,
     ToolRegistry, ToolsInterruptStrategy, WorkflowConfig,
 };
-use crate::context::ContextPolicy;
+use crate::context::{ContextPolicy, ContextStrategy};
 use crate::executable::Executable;
 use crate::hooks::{Hook, Slot};
 use crate::model::{AssistantTurn, Conversation, Tool};
@@ -268,16 +268,17 @@ pub struct AgentRuntime {
     tools: Arc<[Tool]>,
     /// The deterministic context policy for this agent's strategy. Stateless;
     /// the knobs it reads are still passed in per call from
-    /// `agent_config().context_config()`.
+    /// `agent_config().context_config()`. Only runs when [`Self::context_impl`]
+    /// is [`ContextImpl::Policy`]; a `custom` strategy resolves to the no-op.
     context_policy: Arc<dyn ContextPolicy>,
     /// How this agent's requests react to user input arriving mid-request,
     /// chosen from `[agents.<name>.on_input`.
     request: RequestPolicy,
+    /// Which context path runs for this agent; see [`ContextImpl`].
+    context_impl: ContextImpl,
     /// The lower of the model's own cap and the per-turn cap from
     /// `[agents.*.limits]`, computed once instead of per request.
     request_max_tokens: Option<u32>,
-    max_iterations: usize,
-    max_concurrent_tools: usize,
 }
 
 impl AgentRuntime {
@@ -311,6 +312,13 @@ impl AgentRuntime {
         self.context_policy.as_ref()
     }
 
+    /// Which context path runs for this agent — the deterministic policy or
+    /// the custom hook. Decided at build; the request phase matches on this
+    /// instead of re-deriving it from the strategy and the hook slot.
+    pub fn context_impl(&self) -> ContextImpl {
+        self.context_impl
+    }
+
     /// How this agent reacts to user input arriving around an LLM request.
     /// Config data; the object-safe driver is built from it once per request
     /// phase by [`crate::agent::request::driver_for`].
@@ -328,11 +336,11 @@ impl AgentRuntime {
     }
 
     pub fn max_iterations(&self) -> usize {
-        self.max_iterations
+        self.agent_config.max_iterations()
     }
 
     pub fn max_concurrent_tools(&self) -> usize {
-        self.max_concurrent_tools
+        self.agent_config.max_concurrent_tools()
     }
 
     pub fn on_input(&self) -> Option<&OnInput> {
@@ -583,6 +591,23 @@ fn resolve_provider<'a>(
     Some((logic, model))
 }
 
+/// How this agent's context window is managed, decided once at build so
+/// the strategy, the policy, and the hook can never disagree.
+///
+/// Previously three places had to agree by convention: validation
+/// (`custom` iff an executable is set), `policy_for` (`custom` maps to the
+/// no-op), and the request phase (run the policy, then the hook iff the
+/// slot is bound). Now the phase matches on this instead: exactly one of
+/// the deterministic policy or the custom hook runs. A new strategy
+/// variant fails to compile here until it picks a side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextImpl {
+    /// `null`, `slidingwindow`, `budget`: run `context_policy()`.
+    Policy,
+    /// `custom`: run the `context` hook; the policy is the no-op.
+    Hook,
+}
+
 /// The whole configuration, resolved.
 ///
 /// This is the single value [`super::store`] publishes. Replacing it swaps
@@ -645,10 +670,12 @@ impl ResolvedConfig {
                         (None, None) => None,
                     },
                     model: model.clone(),
-                    max_iterations: agent.max_iterations(),
-                    max_concurrent_tools: agent.max_concurrent_tools(),
                     request: RequestPolicy::for_on_input(agent.on_input()),
                     context_policy: Arc::from(agent.context_config().strategy().policy_for()),
+                    context_impl: match agent.context_config().strategy() {
+                        ContextStrategy::Custom => ContextImpl::Hook,
+                        _ => ContextImpl::Policy,
+                    },
                     provider: logic,
                     agent_config: agent,
                     hooks,

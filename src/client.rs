@@ -7,6 +7,7 @@ use crate::agent::request::{self, RequestStep};
 use crate::agent::state::{
     InboundAction, LoopDeps, LoopState, RequestOutcome, StopReason, classify_inbound,
 };
+use crate::config::ContextImpl;
 use crate::context::ManagedContext;
 use crate::hooks::{
     ContextSlot, CustomInput, CustomOutcome, Hook, HookRunner, HookState, InjectMode,
@@ -156,26 +157,25 @@ where
         return RequestOutcome::Stopped(reason);
     }
 
-    // Context management: enforce the agent's configured policy before the
-    // turn starts. Policies only return declarative outcomes; applied here.
-    // The policy itself was chosen when the config was built.
-    {
-        let ctx = ManagedContext::new(&*state.messages);
-        let removed = agent
-            .context_policy()
-            .enforce(&ctx, agent.agent_config().context_config())
-            .apply_outcome(&mut *state.messages);
-        if removed > 0 {
-            tracing::info!(agent_name, removed, "context policy pruned messages");
+    // Context management: exactly one of the deterministic policy or the
+    // custom hook runs, decided at build time (`ContextImpl`) so the two
+    // can never disagree about which path owns this phase.
+    match agent.context_impl() {
+        ContextImpl::Policy => {
+            let ctx = ManagedContext::new(&*state.messages);
+            let removed = agent
+                .context_policy()
+                .enforce(&ctx, agent.agent_config().context_config())
+                .apply_outcome(&mut *state.messages);
+            if removed > 0 {
+                tracing::info!(agent_name, removed, "context policy pruned messages");
+            }
         }
-    }
-
-    // Context custom hook (T03 Custom contract). Runs after the
-    // deterministic policy and before pre_prompt. Validation guarantees
-    // executable is set iff strategy is custom.
-    {
-        let ctx_cfg = agent.agent_config().context_config();
-        if let Some(slot) = agent.hooks().context() {
+        ContextImpl::Hook => {
+            // Context custom hook (T03 Custom contract). Runs before
+            // pre_prompt. Validation guarantees the executable is set.
+            let ctx_cfg = agent.agent_config().context_config();
+            if let Some(slot) = agent.hooks().context() {
             let hook = Hook::<ContextSlot>::new(slot.name().to_string());
             let ctx = ManagedContext::new(&*state.messages);
             let input = CustomInput::new(
@@ -242,6 +242,7 @@ where
                         detail: error.to_string(),
                     });
                 }
+            }
             }
         }
     }

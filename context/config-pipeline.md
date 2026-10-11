@@ -43,10 +43,10 @@ Everything the loop needs, owned, with no name lookups and no per-iteration allo
 | `hooks: Arc<HooksRepository>` | 7 agent slots pre-bound to `Arc<Executable>`. The typed `&Hook<S>` is still borrowed from `AgentConfig`, which is why `Hook<T>` needs no `Clone`. |
 | `provider: Arc<dyn ProviderLogic>` | Per **provider**, shared by all its agents. Owns `url` + `api_key`. |
 | `tools: Arc<[Tool]>` | LLM tool definitions, resolved **once**. Tool *names* are not consulted again. |
-| `context_policy: Arc<dyn ContextPolicy>` | The strategy named by `[agents.<name>.context] strategy`, chosen once. Stateless — it still takes `&ContextConfig` per call. |
+| `context_policy: Arc<dyn ContextPolicy>` | The strategy named by `[agents.<name>.context] strategy`, chosen once. Stateless — it still takes `&ContextConfig` per call. Runs only when `context_impl` is `Policy`; see [ContextImpl](#contextimpl). |
 | `request: RequestPolicy` | The inbound policy named by `[agents.<name>.on_input`: `FireAndForget` \| `Queue` \| `Interrupt`. Config data; `agent::request::driver_for` turns it into a `RequestDriver` enum once per request phase — see [Request drivers](#request-drivers). |
 | `request_max_tokens` | Pre-computed `min(model.max_tokens, limits.max_output_tokens_per_turn)`. |
-| `max_iterations`, `max_concurrent_tools` | Copied out of the config. |
+| `max_iterations`, `max_concurrent_tools` | Read through to `agent_config()` — no copies on the runtime struct. |
 
 `HooksRepository::resolve` and `logic_for` both run inside `ResolvedConfig::build`, i.e. **once per config generation**, never per turn. A slot whose executable cannot be resolved stays `None` and the loop skips it (fail-open). A missing provider or model is logged and the agent is omitted — readers then get `None` rather than a panic.
 
@@ -64,12 +64,12 @@ Note the interaction with the phase: when `on_input` is set, a tool-less turn **
 
 `ToolBatchDriver` (`src/agent/batch.rs`) is the config-chosen policy for running one turn's tool batch. It works because `collect_batch` / `take_first` / `run_interruptible_batch` take no client or runner — unlike the request driver, which needed T07b first.
 
-The four combinations of `tools_on_input` × `tool_execution` collapse to **two objects**, not four:
+The four combinations of `tools_on_input` × `tool_execution` collapse to **two variants**, not four:
 
 | Driver | `tools_on_input` unset | `queue` | `interrupt` |
 |---|---|---|---|
-| `SequentialDriver` | `collect_batch`, no drain | `collect_batch`, drain after appending | `run_interruptible_batch(WaitFor::All, Configured(keep\|discard))` |
-| `AsyncDriver` | `take_first`, no drain | `take_first`, drain after appending | `run_interruptible_batch(WaitFor::First, ForceKeep)` — always keeps |
+| `Sequential` | `collect_batch`, no drain | `collect_batch`, drain after appending | `run_interruptible_batch(WaitFor::All, Configured(keep\|discard))` |
+| `Async` | `take_first`, no drain | `take_first`, drain after appending | `run_interruptible_batch(WaitFor::First, ForceKeep)` — always keeps |
 
 The 2×2 lives in `batch_policy`; `for_agent` turns it into a `ToolBatchDriver` enum. The `Async` variant ignores `tools_interrupt_strategy` because results already pushed to `messages` cannot be retracted — discarding would leave the assistant message referencing missing tool results.
 
@@ -81,6 +81,10 @@ Two things the driver deliberately does **not** own, both because they need the 
 The driver is built **per phase** from the phase's own agent snapshot, not stored on `AgentRuntime` — its method needs `LoopState`, and `resolved.rs` may not import `agent`.
 
 Known gap: the executor-gone → `Stopped` path is compiler-checked but untested; killing the executor from outside `tools.rs` needs its private sender.
+
+## ContextImpl
+
+`ContextImpl` (`src/config/resolved.rs`) is how an agent's context window is managed, decided once in `ResolvedConfig::build`: `Policy` for `null`/`slidingwindow`/`budget` (run `context_policy()`), `Hook` for `custom` (run the `context` hook; the policy is the no-op). The request phase matches on it instead of re-deriving the path from the strategy and the hook slot, so the three places that used to agree by convention — validation (`custom` iff an executable is set), `policy_for`, and the phase — cannot drift: exactly one path runs, and a new strategy variant fails to compile until it picks a side.
 
 ## Reload semantics
 

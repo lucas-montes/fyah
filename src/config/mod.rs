@@ -25,8 +25,8 @@ pub use raw::{
 };
 
 pub use resolved::{
-    AgentRuntime, HooksRepository, ProviderLogic, RequestPolicy, ResolvedConfig, ResolvedHook,
-    StepKind, StepRuntime, WorkflowHooks, WorkflowRuntime,
+    AgentRuntime, ContextImpl, HooksRepository, ProviderLogic, RequestPolicy, ResolvedConfig,
+    ResolvedHook, StepKind, StepRuntime, WorkflowHooks, WorkflowRuntime,
 };
 
 pub use store::{ConfigStore, ConfigView};
