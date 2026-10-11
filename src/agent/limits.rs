@@ -16,8 +16,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::agent::state::{LoopDeps, LoopState, StopReason, status_line};
-use crate::communication::{Command, Inbound};
+use crate::agent::state::{InboundAction, LoopDeps, LoopState, StopReason, classify_inbound};
 use crate::config::{AgentRuntime, LimitsConfig, ResolvedHook};
 use crate::context::{ContextConfig, ContextStrategy, ManagedContext};
 use crate::hooks::{Hook, HookRunner, HookState, LoopGuardInput, LoopGuardOutcome, LoopGuardSlot};
@@ -166,25 +165,26 @@ impl<'a> LimitsGate<'a> {
                             remaining = remaining.saturating_sub(chunk);
                         }
                         inbound = deps.rx.recv() => match inbound {
-                            Some(Inbound::Command(Command::Stop)) => {
-                                return Some(StopReason::UserStop);
-                            }
-                            Some(Inbound::Command(Command::Exit)) | None => {
-                                return Some(StopReason::UserExit);
-                            }
-                            Some(Inbound::Message(m)) => {
-                                state.messages.push(Message::new_user(m));
-                            }
-                            Some(Inbound::Command(Command::Interrupt(text))) => {
-                                state.messages.push(Message::new_user(text));
-                            }
-                            Some(Inbound::Command(Command::Status)) => {
-                                deps.out.notification(status_line(
-                                    &state.wal,
-                                    state.launched.len(),
-                                    state.messages.len(),
-                                ));
-                            }
+                            None => return Some(StopReason::UserExit),
+                            Some(inbound) => match classify_inbound(
+                                inbound,
+                                &deps.out,
+                                &state.wal,
+                                state.launched.len(),
+                                state.messages.len(),
+                            ) {
+                                // Status ping, already answered: keep waiting.
+                                None => {}
+                                Some(InboundAction::Message(m)) => {
+                                    state.messages.push(Message::new_user(m));
+                                }
+                                Some(InboundAction::Stop) => {
+                                    return Some(StopReason::UserStop);
+                                }
+                                Some(InboundAction::Exit) => {
+                                    return Some(StopReason::UserExit);
+                                }
+                            },
                         },
                     }
                 }

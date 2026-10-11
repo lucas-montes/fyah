@@ -8,13 +8,12 @@ use crate::config::ConfigView;
 use crate::hooks::{
     HookRunner, HookState, PostToolInput, PostToolOutcome, PreToolInput, PreToolOutcome,
 };
-use crate::model::{AssistantTurn, Message, ToolCall};
+use crate::model::{AssistantTurn, Message};
 use crate::session::Session;
 
 use super::batch::{self, ToolBatch};
 use super::state::{
     LoopDeps, LoopState, AgentOutcome, RequestOutcome, StopReason, ToolOutcome, drain_queue,
-    DrainOutcome,
 };
 use super::tools::{ToolExecutor, ToolWal, drain_pending_tools};
 
@@ -172,17 +171,17 @@ where
 
     if drain {
         let n_messages = state.messages.len();
-        match drain_queue(
+        if let Some(reason) = drain_queue(
             &mut *deps.rx,
             &mut *state.messages,
             &deps.out,
             n_messages,
             &state.wal,
             state.launched.len(),
-        ) {
-            DrainOutcome::Continue => {}
-            DrainOutcome::Stop => return ToolOutcome::Stopped(StopReason::UserStop),
-            DrainOutcome::Exit => return ToolOutcome::Stopped(StopReason::UserExit),
+        )
+        .stop_reason()
+        {
+            return ToolOutcome::Stopped(reason);
         }
     }
     ToolOutcome::Done
@@ -295,6 +294,7 @@ where
 mod tests {
     use super::*;
     use crate::client::Error;
+    use crate::model::ToolCall;
 
     #[test]
     fn stop_message_covers_every_reason() {
@@ -348,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn an_agent_removed_before_the_tool_phase_is_a_failure() {
         use crate::communication::Outbound;
-        use crate::session::VcsKind;
+        use crate::test_support::{loop_state, store_for, test_session};
 
         let raw = r#"
 [providers.local]
@@ -357,32 +357,13 @@ api_key = "test"
 format = "openai"
 models = { "m" = { name = "test-model" } }
 "#;
-        let config: crate::config::Config = toml::from_str(raw).expect("parse");
-        let store = crate::config::ConfigStore::new(config.validate().expect("valid"));
-        let session = Arc::new(Session::new(
-            "tool-test".to_string(),
-            "fyah",
-            "0.1.0",
-            VcsKind::Git,
-            None,
-        ));
+        let (store, _) = store_for(raw);
+        let session = test_session();
         let runner = crate::hooks::RealHookRunner;
         let (out_tx, _dropped) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
         let (_in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
         let mut messages = vec![crate::model::Message::new_user("hi".to_string())];
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 1,
-            executor: ToolExecutor::spawn(Arc::clone(&session)),
-            launched: HashMap::new(),
-            started_at: Instant::now(),
-            request_times: VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
+        let mut state = loop_state(&mut messages, &session, 1);
         let mut deps = LoopDeps {
             agent_name: "coder",
             view: store.subscribe(),

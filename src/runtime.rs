@@ -248,6 +248,42 @@ fn workflow_missing(workflow: &str) -> String {
     format!("workflow {workflow} not found in config")
 }
 
+/// Run one step hook slot: synthesize the typed hook, feed it the input,
+/// warn on abort. Returns the outcome for the caller to route on — the
+/// before site fails the step on `AbortStep`, the after site only observes.
+async fn run_step_hook<R>(
+    runner: &R,
+    slot_name: &'static str,
+    slot: &crate::config::ResolvedHook,
+    workflow: &str,
+    step_name: &str,
+    session: &Session,
+    messages: &mut Vec<Message>,
+) -> StepHookOutcome
+where
+    R: HookRunner,
+{
+    let hook = Hook::<StepSlot>::new(slot.name().to_string());
+    let input = StepHookInput::new(workflow, step_name, session.id());
+    let mut state = HookState::new(messages);
+    let outcome = runner.run_hook(slot.exe(), &hook, &input, &mut state).await;
+    match &outcome {
+        StepHookOutcome::Continue => {}
+        StepHookOutcome::AbortStep { error } | StepHookOutcome::AbortWorkflow { error } => {
+            tracing::warn!(
+                slot = slot_name,
+                executable = slot.name(),
+                workflow,
+                step = step_name,
+                outcome = ?outcome,
+                error = %error,
+                "step hook aborted"
+            );
+        }
+    }
+    outcome
+}
+
 /// Upper bound on steps a single session can run. There is deliberately no
 /// visited-set: `plan.on_failure = "plan"` retry edges are legitimate config,
 /// but a cycle with no exit must terminate instead of looping forever. The
@@ -320,32 +356,22 @@ async fn start_workflow(
         // aborting the workflow ends the session.
         let mut result = None;
         if let Some(slot) = current_step.before() {
-            let hook = Hook::<StepSlot>::new(slot.name().to_string());
-            let input = StepHookInput::new(workflow.as_str(), step_name.as_str(), session.id());
-            let mut state = HookState::new(&mut *messages);
-
-            match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
+            match run_step_hook(
+                runner,
+                "step_before",
+                slot,
+                &workflow,
+                &step_name,
+                &session,
+                &mut *messages,
+            )
+            .await
+            {
                 StepHookOutcome::Continue => {}
-                StepHookOutcome::AbortStep { error } => {
-                    tracing::warn!(
-                        slot = "step_before",
-                        executable = slot.name(),
-                        workflow = workflow.as_str(),
-                        step = step_name.as_str(),
-                        error = %error,
-                        "step before hook aborted step"
-                    );
+                StepHookOutcome::AbortStep { .. } => {
                     result = Some(StepResult::Failure);
                 }
-                StepHookOutcome::AbortWorkflow { error } => {
-                    tracing::warn!(
-                        slot = "step_before",
-                        executable = slot.name(),
-                        workflow = workflow.as_str(),
-                        step = step_name.as_str(),
-                        error = %error,
-                        "step before hook aborted workflow"
-                    );
+                StepHookOutcome::AbortWorkflow { .. } => {
                     return Ok(false);
                 }
             }
@@ -373,33 +399,23 @@ async fn start_workflow(
         };
 
         if let Some(slot) = current_step.after() {
-            let hook = Hook::<StepSlot>::new(slot.name().to_string());
-            let input = StepHookInput::new(&workflow, &step_name, session.id());
-            let mut state = HookState::new(&mut *messages);
-
-            match runner.run_hook( slot.exe(), &hook, &input, &mut state).await {
-                StepHookOutcome::Continue => {}
-                StepHookOutcome::AbortStep { error } => {
-                    tracing::warn!(
-                        slot = "step_after",
-                        executable = slot.name(),
-                        workflow = workflow.as_str(),
-                        step = step_name.as_str(),
-                        error = %error,
-                        "step after hook reported failure"
-                    );
-                }
-                StepHookOutcome::AbortWorkflow { error } => {
-                    tracing::warn!(
-                        slot = "step_after",
-                        executable = slot.name(),
-                        workflow = workflow.as_str(),
-                        step = step_name.as_str(),
-                        error = %error,
-                        "step after hook aborted workflow"
-                    );
+            match run_step_hook(
+                runner,
+                "step_after",
+                slot,
+                &workflow,
+                &step_name,
+                &session,
+                &mut *messages,
+            )
+            .await
+            {
+                // After hooks observe but never reroute: only `AbortWorkflow`
+                // ends the session. The warning already fired inside.
+                StepHookOutcome::AbortWorkflow { .. } => {
                     return Ok(false);
                 }
+                StepHookOutcome::Continue | StepHookOutcome::AbortStep { .. } => {}
             }
         }
 
@@ -423,19 +439,11 @@ mod tests {
     use crate::communication::Outbound;
     use crate::hooks::RealHookRunner;
     use crate::model::AssistantTurn;
-
-    fn test_session() -> Arc<Session> {
-        Arc::new(Session::new(
-            "step-test".to_string(),
-            "fyah",
-            "0.1.0",
-            VcsKind::Git,
-            None,
-        ))
-    }
+    use crate::test_support::{test_session, view_for};
 
     fn test_view() -> ConfigView {
-        let raw = r#"
+        view_for(
+            r#"
 [providers.local]
 url = "http://127.0.0.1:9/v1/chat/completions"
 api_key = "test"
@@ -455,10 +463,8 @@ initial = "only"
 command = "true"
 on_success = "done"
 on_failure = "done"
-"#;
-        let config: crate::config::Config = toml::from_str(raw).expect("parse");
-        let resolved = config.validate().expect("valid");
-        crate::config::ConfigStore::new(resolved).subscribe()
+"#,
+        )
     }
 
     fn step_ctx<'a>(
@@ -668,46 +674,7 @@ mod workflow_tests {
     use crate::communication::Outbound;
     use crate::hooks::RealHookRunner;
     use crate::model::AssistantTurn;
-    use crate::session::VcsKind;
-
-    fn test_session() -> Arc<Session> {
-        Arc::new(Session::new(
-            "graph-test".to_string(),
-            "fyah",
-            "0.1.0",
-            VcsKind::Git,
-            None,
-        ))
-    }
-
-    fn test_channels() -> (
-        tokio::sync::mpsc::UnboundedSender<Inbound>,
-        UnboundedReceiver<Inbound>,
-        OutboundChannel,
-    ) {
-        let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
-        let (out_tx, _dropped) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
-        (in_tx, in_rx, OutboundChannel::from(out_tx))
-    }
-
-    fn view_for(toml: &str) -> ConfigView {
-        let config: crate::config::Config = toml::from_str(toml).expect("parse");
-        let resolved = config.validate().expect("valid");
-        crate::config::ConfigStore::new(resolved).subscribe()
-    }
-
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "fyah_graph_{}_{name}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir
-    }
+    use crate::test_support::{scratch, test_channels, test_session, view_for};
 
     /// A step that appends its name to the log, then succeeds or fails.
     fn logged_step(log: &std::path::Path, name: &str, ok: bool) -> String {
@@ -745,7 +712,7 @@ on_failure = "done"
     async fn run_graph(log: &std::path::Path, first_ok: bool, shutdown: bool) -> (bool, Vec<String>) {
         let view = view_for(&graph_toml(log, first_ok));
         let session = test_session();
-        let (_in_tx, mut in_rx) = test_channels_inner();
+        let (_in_tx, mut in_rx, _) = test_channels();
         let (_, _, out) = test_channels();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         if shutdown {
@@ -773,13 +740,6 @@ on_failure = "done"
             .map(str::to_string)
             .collect();
         (ok, order)
-    }
-
-    fn test_channels_inner() -> (
-        tokio::sync::mpsc::UnboundedSender<Inbound>,
-        UnboundedReceiver<Inbound>,
-    ) {
-        tokio::sync::mpsc::unbounded_channel::<Inbound>()
     }
 
     #[tokio::test]
@@ -810,7 +770,7 @@ on_failure = "done"
     async fn missing_workflow_ends_the_session_cleanly() {
         let view = view_for("[workflows.main]\ninitial = \"only\"\n\n[workflows.main.steps.only]\ncommand = \"true\"\non_success = \"done\"\non_failure = \"done\"\n");
         let session = test_session();
-        let (_in_tx, mut in_rx) = test_channels_inner();
+        let (_in_tx, mut in_rx, _) = test_channels();
         let (_, _, out) = test_channels();
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let client = Client::default();
@@ -946,7 +906,7 @@ on_failure = "done"
 "#;
         let view = view_for(toml);
         let session = test_session();
-        let (_in_tx, mut in_rx) = test_channels_inner();
+        let (_in_tx, mut in_rx, _) = test_channels();
         let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
         let out = OutboundChannel::from(out_tx);
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1174,7 +1134,7 @@ on_failure = "done"
         );
         let view = view_for(&toml);
         let session = test_session();
-        let (_in_tx, mut in_rx) = test_channels_inner();
+        let (_in_tx, mut in_rx, _) = test_channels();
         let (_, _, out) = test_channels();
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let client = Client::default();

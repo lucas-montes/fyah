@@ -155,23 +155,17 @@ impl HooksRepository {
     /// limits tables, and take the same synthesized [`crate::hooks::Hook`]
     /// the loop builds at run time.
     pub(crate) fn resolve(agent: &AgentConfig, executables: &ResolvedExecutables) -> Self {
-        let resolve = |name: &str| -> Option<ResolvedHook> {
-            executables
-                .get(name)
-                .map(|exe| ResolvedHook::new(name, Arc::clone(exe)))
-        };
-
         Self {
             // Configured slots take their name from the hook itself...
-            pre_prompt: agent.pre_prompt().and_then(|h| resolve(h.executable())),
-            pre_tool: agent.pre_tool().and_then(|h| resolve(h.executable())),
-            post_tool: agent.post_tool().and_then(|h| resolve(h.executable())),
-            on_error: agent.on_error().and_then(|h| resolve(h.executable())),
-            verify_done: agent.verify_done().and_then(|h| resolve(h.executable())),
+            pre_prompt: bind_hook(agent.pre_prompt(), executables),
+            pre_tool: bind_hook(agent.pre_tool(), executables),
+            post_tool: bind_hook(agent.post_tool(), executables),
+            on_error: bind_hook(agent.on_error(), executables),
+            verify_done: bind_hook(agent.verify_done(), executables),
             // ...while the two synthesized slots take theirs from the
             // context / limits tables.
-            context: agent.context_config().executable().and_then(resolve),
-            loop_guard: agent.limits().executable().and_then(resolve),
+            context: bind_named(agent.context_config().executable(), executables),
+            loop_guard: bind_named(agent.limits().executable(), executables),
         }
     }
 
@@ -374,8 +368,8 @@ pub enum StepKind {
     Command { command: String },
 }
 
-impl StepKind {
-    fn for_action(action: &StepAction) -> Self {
+impl From<&StepAction> for StepKind {
+    fn from(action: &StepAction) -> Self {
         match action {
             StepAction::Llm { agent } => Self::Llm {
                 agent: agent.clone(),
@@ -400,18 +394,22 @@ pub struct WorkflowHooks {
 
 /// Bind one configured hook slot against the validated executables.
 ///
-/// Used by the workflow and step repositories. (`HooksRepository::resolve`
-/// predates it and hand-rolls the same two lines per slot; unifying the two
-/// is leftover cleanup, not a behaviour difference.) A slot whose executable
-/// cannot be resolved stays `None` and the loop skips it.
+/// Shared by the agent, workflow, and step repositories. A slot whose
+/// executable cannot be resolved stays `None` and the loop skips it.
 fn bind_hook<S: Slot>(
     hook: Option<&Hook<S>>,
     executables: &ResolvedExecutables,
 ) -> Option<ResolvedHook> {
-    let hook = hook?;
+    bind_named(hook.map(|hook| hook.executable()), executables)
+}
+
+/// Bind a bare executable name (for slots named by a sibling table rather
+/// than a hook table, like `context` and `loop_guard`).
+fn bind_named(name: Option<&str>, executables: &ResolvedExecutables) -> Option<ResolvedHook> {
+    let name = name?;
     executables
-        .get(hook.executable())
-        .map(|exe| ResolvedHook::new(hook.executable(), Arc::clone(exe)))
+        .get(name)
+        .map(|exe| ResolvedHook::new(name, Arc::clone(exe)))
 }
 
 impl WorkflowHooks {
@@ -447,7 +445,7 @@ pub struct StepRuntime {
 
 impl StepRuntime {
     fn resolve(name: String, raw: StepConfig, executables: &ResolvedExecutables) -> Self {
-        let action = StepKind::for_action(raw.action());
+        let action = StepKind::from(raw.action());
         let before = bind_hook(raw.before(), executables);
         let after = bind_hook(raw.after(), executables);
         Self {
@@ -539,6 +537,54 @@ impl WorkflowRuntime {
 
 /// The whole configuration, resolved.
 ///
+/// Resolve one agent's shared provider logic and model, or log-and-skip.
+/// The lookups fail the same way — a provider or model validation should
+/// already have rejected — so they share one helper instead of three
+/// near-identical `tracing::error!` blocks.
+fn resolve_provider<'a>(
+    provider_logic: &HashMap<String, Arc<dyn ProviderLogic>>,
+    providers: &'a HashMap<String, ProviderConfig>,
+    agent_name: &str,
+    agent: &AgentConfig,
+) -> Option<(Arc<dyn ProviderLogic>, &'a ModelConfig)> {
+    let logic = match provider_logic.get(agent.provider()) {
+        Some(logic) => Arc::clone(logic),
+        None => {
+            tracing::error!(
+                agent = agent_name,
+                provider = agent.provider(),
+                "Provider not found; agent unavailable"
+            );
+            return None;
+        }
+    };
+    let provider_config = match providers.get(agent.provider()) {
+        Some(config) => config,
+        None => {
+            tracing::error!(
+                agent = agent_name,
+                provider = agent.provider(),
+                "Provider config not found; agent unavailable"
+            );
+            return None;
+        }
+    };
+    let model = match provider_config.get_model(agent.model()) {
+        Some(model) => model,
+        None => {
+            tracing::error!(
+                agent = agent_name,
+                model = agent.model(),
+                "Model not found; agent unavailable"
+            );
+            return None;
+        }
+    };
+    Some((logic, model))
+}
+
+/// The whole configuration, resolved.
+///
 /// This is the single value [`super::store`] publishes. Replacing it swaps
 /// every agent at once, so a reader either sees the entire old generation or
 /// the entire new one.
@@ -579,28 +625,9 @@ impl ResolvedConfig {
             // input, so a miss here means the agent names a provider that
             // validation should already have rejected. Log and skip rather
             // than panic: a running session must survive a bad reload.
-            let Some(logic) = provider_logic.get(agent.provider()) else {
-                tracing::error!(
-                    agent = name.as_str(),
-                    provider = agent.provider(),
-                    "Provider not found; agent unavailable"
-                );
-                continue;
-            };
-            let Some(provider_config) = providers.get(agent.provider()) else {
-                tracing::error!(
-                    agent = name.as_str(),
-                    provider = agent.provider(),
-                    "Provider config not found; agent unavailable"
-                );
-                continue;
-            };
-            let Some(model) = provider_config.get_model(agent.model()) else {
-                tracing::error!(
-                    agent = name.as_str(),
-                    model = agent.model(),
-                    "Model not found; agent unavailable"
-                );
+            let Some((logic, model)) =
+                resolve_provider(&provider_logic, &providers, &name, &agent)
+            else {
                 continue;
             };
             let hooks = Arc::new(HooksRepository::resolve(&agent, &executables));
@@ -622,7 +649,7 @@ impl ResolvedConfig {
                     max_concurrent_tools: agent.max_concurrent_tools(),
                     request: RequestPolicy::for_on_input(agent.on_input()),
                     context_policy: Arc::from(agent.context_config().strategy().policy_for()),
-                    provider: Arc::clone(logic),
+                    provider: logic,
                     agent_config: agent,
                     hooks,
                     tools,
@@ -862,9 +889,7 @@ max_concurrent_tools = 1
     }
 
     fn ten_messages() -> Vec<Message> {
-        (0..10)
-            .map(|i| Message::new_user(format!("hello {i}")))
-            .collect()
+        crate::test_support::user_msgs(10)
     }
 
     #[test]

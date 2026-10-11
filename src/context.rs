@@ -227,16 +227,11 @@ impl ContextPolicy for BudgetPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn msgs(n: usize) -> Vec<Message> {
-        (0..n)
-            .map(|i| Message::new_user(format!("hello {i}")))
-            .collect()
-    }
+    use crate::test_support::user_msgs;
 
     #[test]
     fn size_methods() {
-        let m = msgs(3);
+        let m = user_msgs(3);
         let ctx = ManagedContext::new(&m);
         assert_eq!(ctx.len(), 3);
         assert!(!ctx.is_empty());
@@ -246,7 +241,7 @@ mod tests {
 
     #[test]
     fn sliding_window_prunes() {
-        let m = msgs(10);
+        let m = user_msgs(10);
         let ctx = ManagedContext::new(&m);
         let policy = SlidingWindowPolicy;
         let config: ContextConfig =

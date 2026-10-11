@@ -5,9 +5,8 @@ use reqwest::{Method, RequestBuilder};
 use crate::agent::limits::LimitsGate;
 use crate::agent::request::{self, RequestStep};
 use crate::agent::state::{
-    LoopDeps, LoopState, RequestOutcome, StopReason, status_line,
+    InboundAction, LoopDeps, LoopState, RequestOutcome, StopReason, classify_inbound,
 };
-use crate::communication::{Command, Inbound};
 use crate::context::ManagedContext;
 use crate::hooks::{
     ContextSlot, CustomInput, CustomOutcome, Hook, HookRunner, HookState, InjectMode,
@@ -391,26 +390,29 @@ where
             // This is what lets an `on_input` agent live inside a multi-step
             // workflow instead of aborting it after the first turn.
             Some(_) => match deps.rx.recv().await {
-                Some(Inbound::Message(m)) => state.messages.push(Message::new_user(m)),
-                Some(Inbound::Command(Command::Stop)) => {
-                    return RequestOutcome::Stopped(StopReason::UserStop);
-                }
-                Some(Inbound::Command(Command::Exit)) | None => {
-                    return RequestOutcome::Stopped(StopReason::UserExit);
-                }
-                Some(Inbound::Command(Command::Interrupt(text))) => {
-                    state.messages.push(Message::new_user(text));
-                }
-                Some(Inbound::Command(Command::Status)) => {
-                    let _ = deps.out.notification(status_line(
-                        &state.wal,
-                        state.launched.len(),
-                        state.messages.len(),
-                    ));
-                }
+                None => return RequestOutcome::Stopped(StopReason::UserExit),
+                Some(inbound) => match classify_inbound(
+                    inbound,
+                    &deps.out,
+                    &state.wal,
+                    state.launched.len(),
+                    state.messages.len(),
+                ) {
+                    // Status ping, already answered: wait for real input.
+                    None => return RequestOutcome::Continue,
+                    Some(InboundAction::Message(m)) => {
+                        state.messages.push(Message::new_user(m));
+                        return RequestOutcome::Continue;
+                    }
+                    Some(InboundAction::Stop) => {
+                        return RequestOutcome::Stopped(StopReason::UserStop);
+                    }
+                    Some(InboundAction::Exit) => {
+                        return RequestOutcome::Stopped(StopReason::UserExit);
+                    }
+                },
             },
         }
-        return RequestOutcome::Continue;
     }
 
     // A turn carrying tool calls falls through to the tool phase.
@@ -427,17 +429,15 @@ mod tests {
     // and needs the fakes defined in this module. `limits.rs` owns the
     // thresholds and their wording; this module owns the wiring.
     use super::*;
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use crate::agent::state::{LoopDeps, LoopState};
-    use crate::agent::tools::{ToolExecutor, ToolWal};
-    use crate::communication::{Inbound, Outbound, OutboundChannel};
+    use crate::communication::{Command, Inbound, Outbound, OutboundChannel};
     use crate::config::{AgentRuntime, Config, ConfigStore, ConfigView, RequestPolicy};
     use crate::executable::Executable;
     use crate::executable::ExecutableError;
     use crate::model::Tool;
-    use crate::session::{Session, VcsKind};
+    use crate::session::Session;
 
     /// Records how many messages each LLM call saw; answers with a tool-less
     /// turn so the request phase finishes without entering the tool phase.
@@ -577,15 +577,8 @@ on_failure = "done"
     /// A store plus a session, so a test can reload the store and run
     /// another phase against the same session.
     fn test_store_with(raw: &str) -> (ConfigStore, Arc<Session>) {
-        let resolved = resolved_from(raw);
-        let store = ConfigStore::new(resolved);
-        let session = Arc::new(Session::new(
-            "test-session".to_string(),
-            "fyah",
-            "0.1.0",
-            VcsKind::Git,
-            None,
-        ));
+        let (store, _) = crate::test_support::store_for(raw);
+        let session = crate::test_support::test_session();
         (store, session)
     }
 
@@ -651,19 +644,7 @@ on_failure = "done"
             in_tx.send(item).expect("queue inbound");
         }
         let mut messages = vec![Message::new_user("hello".to_string())];
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 1,
-            executor: ToolExecutor::spawn(Arc::clone(session)),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
+        let mut state = crate::test_support::loop_state(&mut messages, session, 1);
         let mut deps = LoopDeps {
             agent_name: "coder",
             view,

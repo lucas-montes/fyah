@@ -28,7 +28,7 @@ impl ProviderLogic for OpenAiLogic {
     }
 
     fn apply_auth(&self, req: RequestBuilder) -> RequestBuilder {
-        req.bearer_auth(&self.api_key)
+        bearer_auth(req, &self.api_key)
     }
 
     fn attach_body(&self, req: RequestBuilder, conv: &Conversation<'_>) -> RequestBuilder {
@@ -54,7 +54,7 @@ impl ProviderLogic for OpenAiResponsesLogic {
     }
 
     fn apply_auth(&self, req: RequestBuilder) -> RequestBuilder {
-        req.bearer_auth(&self.api_key)
+        bearer_auth(req, &self.api_key)
     }
 
     fn attach_body(&self, req: RequestBuilder, conv: &Conversation<'_>) -> RequestBuilder {
@@ -90,6 +90,12 @@ impl ProviderLogic for AnthropicLogic {
     fn transformation(&self) -> fn(&[u8]) -> Result<AssistantTurn, serde_json::Error> {
         anthropic::parse_response
     }
+}
+
+/// Bearer-token auth, shared by both OpenAI transports so the header
+/// cannot drift between the chat and responses APIs.
+fn bearer_auth(req: RequestBuilder, api_key: &str) -> RequestBuilder {
+    req.bearer_auth(api_key)
 }
 
 /// Build the owned transport for a provider config.

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use valuable::Valuable;
 
+use crate::context::ContextOutcome;
 use crate::executable::{Executable, ExecutableError, ExecutableParams, FailMode, run_command};
 use crate::model::Message;
 
@@ -763,29 +764,13 @@ impl<'a> HookState<'a> {
     }
 
     pub fn prune_to(&mut self, keep: usize) -> usize {
-        if self.messages.len() <= keep {
-            return 0;
-        }
-        let remove = self.messages.len() - keep;
-        self.messages.drain(..remove);
-        remove
+        ContextOutcome::PruneTo(keep).apply_outcome(&mut self.messages)
     }
 
-    /// Truncate every `Tool` message longer than `max_bytes`, mirroring
-    /// [`crate::context::ContextOutcome::TruncateOutputs`]. Returns the
+    /// Truncate every `Tool` message longer than `max_bytes`. Returns the
     /// number of messages truncated.
     pub fn truncate_outputs(&mut self, max_bytes: usize) -> usize {
-        let mut truncated = 0;
-        for msg in self.messages.iter_mut() {
-            if let Message::Tool { content, .. } = msg
-                && content.len() > max_bytes
-            {
-                content.truncate(max_bytes);
-                content.push_str("\n[truncated]");
-                truncated += 1;
-            }
-        }
-        truncated
+        ContextOutcome::TruncateOutputs(max_bytes).apply_outcome(&mut self.messages)
     }
 
     /// Drop `Tool` messages whose `tool_call_id` is listed. Returns the

@@ -192,16 +192,15 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
     let mut content: Option<String> = None;
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-    //TODO: avoid cloning
-    for block in &resp.content {
+    for block in resp.content {
         match block {
             AnthropicBlockOut::Text { text } => match &mut content {
-                Some(c) => c.push_str(text),
-                None => content = Some(text.clone()),
+                Some(c) => c.push_str(&text),
+                None => content = Some(text),
             },
             AnthropicBlockOut::ToolUse { id, name, input } => {
-                let arguments = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-                tool_calls.push(ToolCall::new(id.clone(), name.clone(), arguments));
+                let arguments = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                tool_calls.push(ToolCall::new(id, name, arguments));
             }
             AnthropicBlockOut::ToolResult { .. } => {}
         }

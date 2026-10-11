@@ -228,71 +228,18 @@ impl ToolBatchDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use crate::agent::tools::{ToolExecutor, ToolWal};
-    use crate::model::ToolCall;
-    use crate::session::{Session, VcsKind};
-
-    fn exec_session() -> Arc<Session> {
-        Arc::new(Session::new(
-            "batch-test".to_string(),
-            "fyah",
-            "0.1.0",
-            VcsKind::Git,
-            None,
-        ))
-    }
-
-    fn write_tool_call(id: &str, path: &std::path::Path) -> ToolCall {
-        ToolCall::new(
-            id.to_string(),
-            "write_file".to_string(),
-            serde_json::json!({
-                "path": path.to_str().expect("utf8 path"),
-                "content": "x\n",
-            })
-            .to_string(),
-        )
-    }
-
-    fn test_outbound() -> OutboundChannel {
-        let (tx, _dropped) =
-            tokio::sync::mpsc::unbounded_channel::<crate::communication::Outbound>();
-        OutboundChannel::from(tx)
-    }
-
-    /// The sender is returned too and must be kept alive: the interrupt path
-    /// reads `recv()` in a `select!`, and a closed channel reads as `None`,
-    /// which means `Stop`. A dropped sender would end every interrupt test.
-    fn test_rx() -> (
-        tokio::sync::mpsc::UnboundedSender<Inbound>,
-        UnboundedReceiver<Inbound>,
-    ) {
-        tokio::sync::mpsc::unbounded_channel::<Inbound>()
-    }
-
-    fn scratch(name: &str) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
-        let dir = std::env::temp_dir().join(format!(
-            "fyah_batch_{}_{name}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let paths = vec![dir.join("a.txt"), dir.join("b.txt")];
-        (dir, paths)
-    }
+    use crate::test_support::{
+        loop_state, scratch, test_channels, test_outbound, test_session, write_tool_call,
+    };
 
     fn turn(paths: &[std::path::PathBuf]) -> AssistantTurn {
         AssistantTurn::new(
             None,
             vec![
-                write_tool_call("t1", &paths[0]),
-                write_tool_call("t2", &paths[1]),
+                write_tool_call("t1", &paths[0], "x\n"),
+                write_tool_call("t2", &paths[1], "x\n"),
             ],
         )
     }
@@ -329,23 +276,13 @@ mod tests {
 
     #[tokio::test]
     async fn sequential_collects_every_result_and_hands_back_denials() {
-        let (dir, paths) = scratch("seq");
+        let dir = scratch("seq");
+        let paths = [dir.join("a.txt"), dir.join("b.txt")];
         let mut messages: Vec<Message> = Vec::new();
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 4,
-            executor: ToolExecutor::spawn(exec_session()),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
-        let (_tx, mut rx) = test_rx();
-        let out = test_outbound();
+        let session = test_session();
+        let mut state = loop_state(&mut messages, &session, 4);
+        let (_tx, mut rx, _) = test_channels();
+        let (out, _out_rx) = test_outbound();
         let denied = vec![Message::new_tool(
             "d1".to_string(),
             "denied: nope".to_string(),
@@ -372,23 +309,13 @@ mod tests {
 
     #[tokio::test]
     async fn queue_driver_asks_the_caller_to_drain() {
-        let (dir, paths) = scratch("queue");
+        let dir = scratch("queue");
+        let paths = [dir.join("a.txt"), dir.join("b.txt")];
         let mut messages: Vec<Message> = Vec::new();
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 4,
-            executor: ToolExecutor::spawn(exec_session()),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
-        let (_tx, mut rx) = test_rx();
-        let out = test_outbound();
+        let session = test_session();
+        let mut state = loop_state(&mut messages, &session, 4);
+        let (_tx, mut rx, _) = test_channels();
+        let (out, _out_rx) = test_outbound();
         let d = driver(ToolExecution::Sequential, BatchInbound::Drain, false);
 
         let batch = d
@@ -407,23 +334,13 @@ mod tests {
 
     #[tokio::test]
     async fn async_returns_after_the_first_result() {
-        let (dir, paths) = scratch("async");
+        let dir = scratch("async");
+        let paths = [dir.join("a.txt"), dir.join("b.txt")];
         let mut messages: Vec<Message> = Vec::new();
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 4,
-            executor: ToolExecutor::spawn(exec_session()),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
-        let (_tx, mut rx) = test_rx();
-        let out = test_outbound();
+        let session = test_session();
+        let mut state = loop_state(&mut messages, &session, 4);
+        let (_tx, mut rx, _) = test_channels();
+        let (out, _out_rx) = test_outbound();
         let d = driver(ToolExecution::Async, BatchInbound::Ignore, false);
 
         let batch = d
@@ -441,23 +358,13 @@ mod tests {
     async fn sequential_interrupt_appends_denials_before_the_batch() {
         // The ordering that matters: on the interrupt path the driver owns
         // every push, so the denials must land *before* the assistant message.
-        let (dir, paths) = scratch("seq_interrupt");
+        let dir = scratch("seq_interrupt");
+        let paths = [dir.join("a.txt"), dir.join("b.txt")];
         let mut messages: Vec<Message> = Vec::new();
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 4,
-            executor: ToolExecutor::spawn(exec_session()),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
-        let (_tx, mut rx) = test_rx();
-        let out = test_outbound();
+        let session = test_session();
+        let mut state = loop_state(&mut messages, &session, 4);
+        let (_tx, mut rx, _) = test_channels();
+        let (out, _out_rx) = test_outbound();
         let denied = vec![Message::new_tool(
             "d1".to_string(),
             "denied: nope".to_string(),
@@ -481,23 +388,13 @@ mod tests {
 
     #[tokio::test]
     async fn async_interrupt_forces_keep_and_returns_first() {
-        let (dir, paths) = scratch("async_interrupt");
+        let dir = scratch("async_interrupt");
+        let paths = [dir.join("a.txt"), dir.join("b.txt")];
         let mut messages: Vec<Message> = Vec::new();
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 4,
-            executor: ToolExecutor::spawn(exec_session()),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
-        let (_tx, mut rx) = test_rx();
-        let out = test_outbound();
+        let session = test_session();
+        let mut state = loop_state(&mut messages, &session, 4);
+        let (_tx, mut rx, _) = test_channels();
+        let (out, _out_rx) = test_outbound();
         // Discard is configured, but an async interrupt must ignore it.
         let d = driver(ToolExecution::Async, BatchInbound::Interrupt, true);
 

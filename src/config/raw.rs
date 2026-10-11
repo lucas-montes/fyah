@@ -20,7 +20,7 @@ use crate::context::{ContextConfig, ContextStrategy};
 use crate::executable::Executable;
 use crate::hooks::{
     Hook, OnErrorSlot, PostToolSlot, PrePromptSlot, PreToolSlot, SessionEndSlot, SessionStartSlot,
-    StepSlot, VerifySlot,
+    Slot, StepSlot, VerifySlot,
 };
 use crate::model::Tool;
 
@@ -525,18 +525,10 @@ fn validate_workflows(
             |step_name: &str| workflow_config.steps.contains_key(step_name) || step_name == "done";
 
         for step_config in workflow_config.steps.values() {
-            if !step_exists(&step_config.on_success) {
-                errors.push(ConfigError::step(
-                    workflow_name,
-                    step_config.on_success.as_str(),
-                ));
-            }
-
-            if !step_exists(&step_config.on_failure) {
-                errors.push(ConfigError::step(
-                    workflow_name,
-                    step_config.on_failure.as_str(),
-                ));
+            for edge in [&step_config.on_success, &step_config.on_failure] {
+                if !step_exists(edge) {
+                    errors.push(ConfigError::step(workflow_name, edge.as_str()));
+                }
             }
         }
     }
@@ -550,61 +542,58 @@ fn validate_executables(
     executables: &HashMap<String, Executable>,
     errors: &mut Vec<ConfigError>,
 ) {
-    fn check(
-        executables: &HashMap<String, Executable>,
-        errors: &mut Vec<ConfigError>,
-        owner: &str,
-        slot: &str,
-        exe: &str,
-    ) {
-        if !executables.contains_key(exe) {
-            errors.push(ConfigError::executable(owner, slot, exe));
+    /// Borrowed checker so the ten hook-reference sites below pass only
+    /// `(owner, slot, hook)` instead of re-threading the maps and the error
+    /// vec through a five-parameter free function.
+    struct ExeChecker<'a> {
+        executables: &'a HashMap<String, Executable>,
+        errors: &'a mut Vec<ConfigError>,
+    }
+
+    impl ExeChecker<'_> {
+        fn check(&mut self, owner: &str, slot: &str, exe: &str) {
+            if !self.executables.contains_key(exe) {
+                self.errors.push(ConfigError::executable(owner, slot, exe));
+            }
+        }
+
+        fn check_opt<S: Slot>(&mut self, owner: &str, slot: &str, hook: Option<&Hook<S>>) {
+            if let Some(hook) = hook {
+                self.check(owner, slot, hook.executable());
+            }
+        }
+
+        fn push(&mut self, error: ConfigError) {
+            self.errors.push(error);
         }
     }
+
+    let mut checker = ExeChecker {
+        executables,
+        errors,
+    };
     for (agent_name, agent) in agents {
-        if let Some(h) = agent.pre_prompt() {
-            check(
-                executables,
-                errors,
-                agent_name,
-                "pre_prompt",
-                h.executable(),
-            );
-        }
-        if let Some(h) = agent.pre_tool() {
-            check(executables, errors, agent_name, "pre_tool", h.executable());
-        }
-        if let Some(h) = agent.post_tool() {
-            check(executables, errors, agent_name, "post_tool", h.executable());
-        }
-        if let Some(h) = agent.on_error() {
-            check(executables, errors, agent_name, "on_error", h.executable());
-        }
-        if let Some(h) = agent.verify_done() {
-            check(
-                executables,
-                errors,
-                agent_name,
-                "verify_done",
-                h.executable(),
-            );
-        }
+        checker.check_opt(agent_name, "pre_prompt", agent.pre_prompt());
+        checker.check_opt(agent_name, "pre_tool", agent.pre_tool());
+        checker.check_opt(agent_name, "post_tool", agent.post_tool());
+        checker.check_opt(agent_name, "on_error", agent.on_error());
+        checker.check_opt(agent_name, "verify_done", agent.verify_done());
         // T02: [agents.<name>.context] custom strategy validation.
         // Missing executable with custom, unknown executable, or executable
         // without custom are all config-time errors (no silent misconfig).
         let ctx_cfg = agent.context_config();
         match (ctx_cfg.strategy(), ctx_cfg.executable()) {
             (ContextStrategy::Custom, None) => {
-                errors.push(ConfigError::context(
+                checker.push(ConfigError::context(
                     agent_name,
                     "strategy = \"custom\" requires executable = \"<executables key>\"",
                 ));
             }
             (ContextStrategy::Custom, Some(exe)) => {
-                check(executables, errors, agent_name, "context", exe);
+                checker.check(agent_name, "context", exe);
             }
             (_, Some(_)) => {
-                errors.push(ConfigError::context(
+                checker.push(ConfigError::context(
                     agent_name,
                     "executable requires strategy = \"custom\"",
                 ));
@@ -615,61 +604,36 @@ fn validate_executables(
         // enforcement here). Cost key is rejected until the meter exists.
         let limits = agent.limits();
         if limits.max_cost_usd().is_some() {
-            errors.push(ConfigError::limits(
+            checker.push(ConfigError::limits(
                 agent_name,
                 "max_cost_usd is deferred: cost meter not implemented yet",
             ));
         }
         if let Some(pct) = limits.context_headroom_pct() {
             if pct == 0 || pct > 100 {
-                errors.push(ConfigError::limits(
+                checker.push(ConfigError::limits(
                     agent_name,
                     "context_headroom_pct must be 1..=100",
                 ));
             }
         }
         if limits.max_rpm() == Some(0) {
-            errors.push(ConfigError::limits(
+            checker.push(ConfigError::limits(
                 agent_name,
                 "max_rpm must be >= 1 (omit for unlimited)",
             ));
         }
         if let Some(exe) = limits.executable() {
-            check(executables, errors, agent_name, "limits", exe);
+            checker.check(agent_name, "limits", exe);
         }
     }
     for (wf_name, wf) in workflows {
-        if let Some(h) = wf.session_start() {
-            check(
-                executables,
-                errors,
-                wf_name,
-                "session_start",
-                h.executable(),
-            );
-        }
-        if let Some(h) = wf.session_end() {
-            check(executables, errors, wf_name, "session_end", h.executable());
-        }
+        checker.check_opt(wf_name, "session_start", wf.session_start());
+        checker.check_opt(wf_name, "session_end", wf.session_end());
         for (step_name, step) in &wf.steps {
-            if let Some(h) = step.before() {
-                check(
-                    executables,
-                    errors,
-                    &format!("{wf_name}.{step_name}"),
-                    "before",
-                    h.executable(),
-                );
-            }
-            if let Some(h) = step.after() {
-                check(
-                    executables,
-                    errors,
-                    &format!("{wf_name}.{step_name}"),
-                    "after",
-                    h.executable(),
-                );
-            }
+            let owner = format!("{wf_name}.{step_name}");
+            checker.check_opt(&owner, "before", step.before());
+            checker.check_opt(&owner, "after", step.after());
         }
     }
     // Tools keep lenient validation (see above); only check when executables exist

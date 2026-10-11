@@ -5,13 +5,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::communication::{Command, Inbound, OutboundChannel};
+use crate::communication::{Inbound, OutboundChannel};
 use crate::config::ToolsInterruptStrategy;
 use crate::model::{AssistantTurn, Message, ToolCall};
 use crate::record_write_diff;
 use crate::session::Session;
 
-use super::state::{LoopState, StopReason, ToolOutcome, record_completion, status_line};
+use super::state::{
+    InboundAction, LoopState, StopReason, ToolOutcome, classify_inbound, record_completion,
+};
 /// Execution context for builtin tools. `session` is shared via `Arc` (never
 /// mutated — no `Mutex`), so it can cross `JoinSet::spawn` (`'static`) bounds
 /// with a refcount bump per task instead of a deep clone.
@@ -281,7 +283,74 @@ fn split_cached(
     (content, tool_calls, pending, results)
 }
 
-/// Shared submit prologue (D2): tag the batch with its launching turn, track
+/// The shared opening of every batch strategy: split WAL-cached results
+/// from pending calls, and report the two cases that need no executor.
+/// Each caller finishes those in its own way (return a pair vs push and
+/// report `Done`), but the split itself is written once.
+enum BatchOpen {
+    /// No tool calls, or everything already cached: complete without
+    /// submitting anything.
+    Complete(Message, Vec<Message>),
+    /// Submit these calls; `results` already holds the cached ones.
+    Submit {
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        pending: Vec<ToolCall>,
+        results: Vec<Message>,
+    },
+}
+
+fn open_batch(wal: &ToolWal, turn: AssistantTurn) -> BatchOpen {
+    let (content, tool_calls, pending, results) = split_cached(wal, turn);
+    if tool_calls.is_empty() {
+        return BatchOpen::Complete(Message::new_assistant(content, tool_calls), Vec::new());
+    }
+    if pending.is_empty() {
+        return BatchOpen::Complete(Message::new_assistant(content, tool_calls), results);
+    }
+    BatchOpen::Submit {
+        content,
+        tool_calls,
+        pending,
+        results,
+    }
+}
+
+/// Record one finished tool call: this batch's completions land in
+/// `results`, stragglers from older batches go straight to `messages`.
+/// Returns true when the completion belonged to this batch.
+fn note_completion(
+    state: &mut LoopState,
+    finished: ToolFinished,
+    batch_ids: &mut HashSet<String>,
+    results: &mut Vec<Message>,
+) -> bool {
+    let id = finished.id.clone();
+    let msg = record_completion(state, finished);
+    if batch_ids.remove(&id) {
+        results.push(msg);
+        true
+    } else {
+        // Straggler from an older background batch.
+        state.messages.push(msg);
+        false
+    }
+}
+
+/// Kill an interruptible batch and drop its partials. Anything already
+/// drained into `messages` stays (audit). Shared by the stop, exit, and
+/// message arms of the interrupt wait — all three abort identically.
+fn abort_batch(
+    state: &mut LoopState,
+    batch_ids: HashSet<String>,
+    turn_ids: &[String],
+) {
+    let ids: Vec<String> = batch_ids.into_iter().collect();
+    state.executor.abort_turn(ids);
+    state.wal.remove_for_ids(turn_ids);
+}
+
+/// Shared submit prologue: tag the batch with its launching turn, track
 /// the launches, and hand the batch to the executor. Returns the outstanding
 /// batch ids, or `None` when the executor is gone.
 fn submit_batch(
@@ -323,26 +392,21 @@ pub async fn collect_batch(
     model: &str,
     turn: AssistantTurn,
 ) -> Option<(Message, Vec<Message>)> {
-    let (content, tool_calls, pending, mut results) = split_cached(&state.wal, turn);
-    if tool_calls.is_empty() {
-        return Some((Message::new_assistant(content, tool_calls), Vec::new()));
-    }
-    if pending.is_empty() {
-        return Some((Message::new_assistant(content, tool_calls), results));
-    }
+    let (content, tool_calls, pending, mut results) = match open_batch(&state.wal, turn) {
+        BatchOpen::Complete(assistant, results) => return Some((assistant, results)),
+        BatchOpen::Submit {
+            content,
+            tool_calls,
+            pending,
+            results,
+        } => (content, tool_calls, pending, results),
+    };
 
     let mut batch_ids = submit_batch(&mut *state, out, limit, model, pending)?;
     while !batch_ids.is_empty() {
         match state.executor.next_finished().await {
             Some(finished) => {
-                let id = finished.id.clone();
-                let msg = record_completion(&mut *state, finished);
-                if batch_ids.remove(&id) {
-                    results.push(msg);
-                } else {
-                    // Straggler from an older background batch.
-                    state.messages.push(msg);
-                }
+                note_completion(&mut *state, finished, &mut batch_ids, &mut results);
             }
             None => {
                 out.notification("tool executor stopped unexpectedly".to_string());
@@ -364,25 +428,23 @@ pub async fn take_first(
     model: &str,
     turn: AssistantTurn,
 ) -> Option<(Message, Vec<Message>)> {
-    let (content, tool_calls, pending, mut results) = split_cached(&state.wal, turn);
-    if tool_calls.is_empty() {
-        return Some((Message::new_assistant(content, tool_calls), Vec::new()));
-    }
-    if pending.is_empty() {
-        return Some((Message::new_assistant(content, tool_calls), results));
-    }
+    let (content, tool_calls, pending, mut results) = match open_batch(&state.wal, turn) {
+        BatchOpen::Complete(assistant, results) => return Some((assistant, results)),
+        BatchOpen::Submit {
+            content,
+            tool_calls,
+            pending,
+            results,
+        } => (content, tool_calls, pending, results),
+    };
 
     let mut batch_ids = submit_batch(&mut *state, out, limit, model, pending)?;
     loop {
         match state.executor.next_finished().await {
             Some(finished) => {
-                let id = finished.id.clone();
-                let msg = record_completion(&mut *state, finished);
-                if batch_ids.remove(&id) {
-                    results.push(msg);
+                if note_completion(&mut *state, finished, &mut batch_ids, &mut results) {
                     return Some((Message::new_assistant(content, tool_calls), results));
                 }
-                state.messages.push(msg);
             }
             None => {
                 out.notification("tool executor stopped unexpectedly".to_string());
@@ -426,16 +488,19 @@ pub async fn run_interruptible_batch(
     wait: WaitFor,
     policy: InterruptPolicy<'_>,
 ) -> ToolOutcome {
-    let (content, tool_calls, pending, mut results) = split_cached(&state.wal, turn);
-    if tool_calls.is_empty() {
-        state.messages.push(Message::new_assistant(content, tool_calls));
-        return ToolOutcome::Done;
-    }
-    if pending.is_empty() {
-        state.messages.push(Message::new_assistant(content, tool_calls));
-        state.messages.extend(results);
-        return ToolOutcome::Done;
-    }
+    let (content, tool_calls, pending, mut results) = match open_batch(&state.wal, turn) {
+        BatchOpen::Complete(assistant, results) => {
+            state.messages.push(assistant);
+            state.messages.extend(results);
+            return ToolOutcome::Done;
+        }
+        BatchOpen::Submit {
+            content,
+            tool_calls,
+            pending,
+            results,
+        } => (content, tool_calls, pending, results),
+    };
 
     let turn_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id().to_string()).collect();
     let Some(mut batch_ids) = submit_batch(&mut *state, out, limit, model, pending) else {
@@ -447,13 +512,9 @@ pub async fn run_interruptible_batch(
         tokio::select! {
             finished = state.executor.next_finished() => match finished {
                 Some(finished) => {
-                    let id = finished.id.clone();
-                    let msg = record_completion(&mut *state, finished);
-                    if !batch_ids.remove(&id) {
-                        state.messages.push(msg);
+                    if !note_completion(&mut *state, finished, &mut batch_ids, &mut results) {
                         continue;
                     }
-                    results.push(msg);
                     let done = wait == WaitFor::First || batch_ids.is_empty();
                     if done {
                         state.messages.push(Message::new_assistant(content, tool_calls));
@@ -467,43 +528,44 @@ pub async fn run_interruptible_batch(
                 }
             },
             inbound = rx.recv() => match inbound {
-                Some(Inbound::Command(Command::Stop)) => {
-                    // Stop: kill this batch, drop its partials, exit loop.
-                    // Anything already drained into `messages` stays (audit).
-                    let ids: Vec<String> = batch_ids.into_iter().collect();
-                    state.executor.abort_turn(ids);
-                    state.wal.remove_for_ids(&turn_ids);
-                    return ToolOutcome::Stopped(StopReason::UserStop);
-                }
-                // Exit or a dropped sender: the session is over, not just
-                // this batch.
-                Some(Inbound::Command(Command::Exit)) | None => {
-                    let ids: Vec<String> = batch_ids.into_iter().collect();
-                    state.executor.abort_turn(ids);
-                    state.wal.remove_for_ids(&turn_ids);
+                None => {
+                    abort_batch(&mut *state, batch_ids, &turn_ids);
                     return ToolOutcome::Stopped(StopReason::UserExit);
                 }
-                Some(Inbound::Message(m)) | Some(Inbound::Command(Command::Interrupt(m))) => {
-                    let ids: Vec<String> = batch_ids.into_iter().collect();
-                    state.executor.abort_turn(ids);
-                    let kept = match policy {
-                        InterruptPolicy::ForceKeep => results,
-                        InterruptPolicy::Configured(strategy) => {
-                            handle_tool_abort(strategy, &mut state.wal, &turn_ids)
-                        }
-                    };
-                    state.messages.push(Message::new_assistant(content, tool_calls));
-                    state.messages.extend(kept);
-                    state.messages.push(Message::new_user(m));
-                    return ToolOutcome::Continue;
-                }
-                Some(Inbound::Command(Command::Status)) => {
-                    out.notification(status_line(
-                        &state.wal,
-                        state.launched.len(),
-                        state.messages.len(),
-                    ));
-                }
+                Some(inbound) => match classify_inbound(
+                    inbound,
+                    out,
+                    &state.wal,
+                    state.launched.len(),
+                    state.messages.len(),
+                ) {
+                    // Status ping, already answered: keep waiting.
+                    None => {}
+                    Some(InboundAction::Message(m)) => {
+                        abort_batch(&mut *state, batch_ids, &turn_ids);
+                        let kept = match policy {
+                            InterruptPolicy::ForceKeep => results,
+                            InterruptPolicy::Configured(strategy) => {
+                                handle_tool_abort(strategy, &mut state.wal, &turn_ids)
+                            }
+                        };
+                        state.messages.push(Message::new_assistant(content, tool_calls));
+                        state.messages.extend(kept);
+                        state.messages.push(Message::new_user(m));
+                        return ToolOutcome::Continue;
+                    }
+                    // Stop: kill this batch, drop its partials, exit loop.
+                    // Anything already drained into `messages` stays (audit).
+                    Some(InboundAction::Stop) => {
+                        abort_batch(&mut *state, batch_ids, &turn_ids);
+                        return ToolOutcome::Stopped(StopReason::UserStop);
+                    }
+                    // Exit: the session is over, not just this batch.
+                    Some(InboundAction::Exit) => {
+                        abort_batch(&mut *state, batch_ids, &turn_ids);
+                        return ToolOutcome::Stopped(StopReason::UserExit);
+                    }
+                },
             },
         }
     }
@@ -583,6 +645,9 @@ async fn builtin_write(tool_call: &ToolCall, ctx: &ToolCtx) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        loop_state, scratch, test_outbound, test_session, write_tool_call,
+    };
 
     #[test]
     fn wal_keep_returns_partials() {
@@ -620,17 +685,7 @@ mod tests {
     }
 
     fn test_ctx() -> ToolCtx {
-        use crate::session::{Session, VcsKind};
-        ToolCtx::new(
-            Arc::new(Session::new(
-                "test-session".to_string(),
-                "fyah",
-                "0.1.0",
-                VcsKind::Git,
-                None,
-            )),
-            "test-model".to_string(),
-        )
+        ToolCtx::new(test_session(), "test-model".to_string())
     }
 
     #[tokio::test]
@@ -649,8 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn builtin_write_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("fyah_write_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch("write");
         let path = dir.join("a.txt");
         tokio::fs::write(&path, "hello\nold\n")
             .await
@@ -686,21 +740,9 @@ mod tests {
         assert!(res.starts_with("write error: "), "unexpected result: {res}");
     }
 
-    fn exec_session() -> Arc<Session> {
-        use crate::session::{Session, VcsKind};
-        Arc::new(Session::new(
-            "exec-test".to_string(),
-            "fyah",
-            "0.1.0",
-            VcsKind::Git,
-            None,
-        ))
-    }
-
     #[tokio::test]
     async fn executor_collects_batch_with_turn_tags() {
-        let dir = std::env::temp_dir().join(format!("fyah_exec_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch("exec");
         let pa = dir.join("a.txt");
         let pb = dir.join("b.txt");
         let write_call = |id: &str, path: &std::path::Path| {
@@ -714,7 +756,7 @@ mod tests {
                 .to_string(),
             )
         };
-        let mut ex = ToolExecutor::spawn(exec_session());
+        let mut ex = ToolExecutor::spawn(test_session());
         ex.submit(ExecuteRequest {
             turn: 7,
             calls: vec![write_call("a1", &pa), write_call("b1", &pb)],
@@ -738,7 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn executor_stops_when_sender_dropped() {
-        let mut ex = ToolExecutor::spawn(exec_session());
+        let mut ex = ToolExecutor::spawn(test_session());
         drop(std::mem::replace(
             &mut ex.tx,
             tokio::sync::mpsc::unbounded_channel().0,
@@ -747,46 +789,15 @@ mod tests {
         let _ = ex.handle.await;
     }
 
-    fn write_tool_call(id: &str, path: &std::path::Path, content: &str) -> ToolCall {
-        ToolCall::new(
-            id.to_string(),
-            "write_file".to_string(),
-            serde_json::json!({
-                "path": path.to_str().expect("utf8 path"),
-                "content": content,
-            })
-            .to_string(),
-        )
-    }
-
-    fn test_outbound() -> crate::communication::OutboundChannel {
-        let (tx, _dropped) =
-            tokio::sync::mpsc::unbounded_channel::<crate::communication::Outbound>();
-        crate::communication::OutboundChannel::from(tx)
-    }
-
     #[tokio::test]
     async fn async_take_first_returns_one_and_tracks_launch_turn() {
-        let dir =
-            std::env::temp_dir().join(format!("fyah_async_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch("async");
         let pa = dir.join("a.txt");
         let pb = dir.join("b.txt");
         let mut messages = Vec::new();
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 3,
-            executor: ToolExecutor::spawn(exec_session()),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
-        let out = test_outbound();
+        let session = test_session();
+        let mut state = loop_state(&mut messages, &session, 3);
+        let (out, _out_rx) = test_outbound();
         let turn = AssistantTurn::new(
             None,
             vec![
@@ -835,25 +846,12 @@ mod tests {
 
     #[tokio::test]
     async fn async_take_first_routes_older_stragglers_to_messages() {
-        let dir =
-            std::env::temp_dir().join(format!("fyah_straggler_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch("straggler");
         let old_path = dir.join("old.txt");
         let new_path = dir.join("new.txt");
         let mut messages = Vec::new();
-        let mut state = LoopState {
-            messages: &mut messages,
-            wal: ToolWal::default(),
-            iteration: 9,
-            executor: ToolExecutor::spawn(exec_session()),
-            launched: HashMap::new(),
-            started_at: std::time::Instant::now(),
-            request_times: std::collections::VecDeque::new(),
-            consecutive_errors: 0,
-            stalled_turns: 0,
-            total_tokens_est: 0,
-            last_progress_len: 0,
-        };
+        let session = test_session();
+        let mut state = loop_state(&mut messages, &session, 9);
         // Seed an older background batch directly (turn 8), untracked by
         // `launched`, like a real straggler from a previous iteration.
         state
@@ -865,7 +863,7 @@ mod tests {
                 model: "m".to_string(),
             })
             .expect("submit old batch");
-        let out = test_outbound();
+        let (out, _out_rx) = test_outbound();
         let turn = AssistantTurn::new(None, vec![write_tool_call("new1", &new_path, "new\n")]);
         let (_, results) = take_first(&mut state, &out, 2, "m", turn)
             .await

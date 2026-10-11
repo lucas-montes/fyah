@@ -113,6 +113,53 @@ pub enum DrainOutcome {
     Exit,
 }
 
+impl DrainOutcome {
+    /// The loop-stopping reason, if this drain ended the step.
+    pub fn stop_reason(self) -> Option<StopReason> {
+        match self {
+            DrainOutcome::Continue => None,
+            DrainOutcome::Stop => Some(StopReason::UserStop),
+            DrainOutcome::Exit => Some(StopReason::UserExit),
+        }
+    }
+}
+
+/// What one inbound item means, independent of where it arrived. Every
+/// `rx.recv()` / `try_recv()` match in the loop classifies through this,
+/// so Stop-vs-Exit-vs-message can never drift between the request phase,
+/// the tool phase, the rpm throttle, and the idle wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundAction {
+    /// Stop the current step or batch.
+    Stop,
+    /// End the whole session.
+    Exit,
+    /// A user message to append to history.
+    Message(String),
+}
+
+/// Classify one already-received inbound item. Status pings are answered
+/// with a notification here and report `None` — nothing for the caller to
+/// do beyond carrying on.
+pub fn classify_inbound(
+    inbound: Inbound,
+    out: &OutboundChannel,
+    wal: &ToolWal,
+    pending: usize,
+    n_messages: usize,
+) -> Option<InboundAction> {
+    match inbound {
+        Inbound::Command(Command::Stop) => Some(InboundAction::Stop),
+        Inbound::Command(Command::Exit) => Some(InboundAction::Exit),
+        Inbound::Message(m) => Some(InboundAction::Message(m)),
+        Inbound::Command(Command::Interrupt(text)) => Some(InboundAction::Message(text)),
+        Inbound::Command(Command::Status) => {
+            out.notification(status_line(wal, pending, n_messages));
+            None
+        }
+    }
+}
+
 pub fn drain_queue(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     messages: &mut Vec<Message>,
@@ -122,16 +169,11 @@ pub fn drain_queue(
     pending: usize,
 ) -> DrainOutcome {
     while let Ok(inbound) = rx.try_recv() {
-        match inbound {
-            Inbound::Command(Command::Stop) => return DrainOutcome::Stop,
-            Inbound::Command(Command::Exit) => return DrainOutcome::Exit,
-            Inbound::Message(m) => messages.push(Message::new_user(m)),
-            Inbound::Command(Command::Interrupt(text)) => {
-                messages.push(Message::new_user(text));
-            }
-            Inbound::Command(Command::Status) => {
-                out.notification(status_line(wal, pending, n_messages));
-            }
+        match classify_inbound(inbound, out, wal, pending, n_messages) {
+            None => {}
+            Some(InboundAction::Message(m)) => messages.push(Message::new_user(m)),
+            Some(InboundAction::Stop) => return DrainOutcome::Stop,
+            Some(InboundAction::Exit) => return DrainOutcome::Exit,
         }
     }
     DrainOutcome::Continue

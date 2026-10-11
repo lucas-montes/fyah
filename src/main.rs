@@ -24,6 +24,8 @@ pub mod model;
 pub mod provider;
 pub mod runtime;
 pub mod session;
+#[cfg(test)]
+mod test_support;
 mod traces;
 
 use crate::communication::Outbound;

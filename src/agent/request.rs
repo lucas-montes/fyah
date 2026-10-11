@@ -24,9 +24,11 @@
 use tokio::select;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::agent::state::{DrainOutcome, LoopState, StopReason, drain_queue, status_line};
+use crate::agent::state::{
+    InboundAction, LoopState, StopReason, classify_inbound, drain_queue,
+};
 use crate::client::LlmClient;
-use crate::communication::{Command, Inbound, OutboundChannel};
+use crate::communication::{Inbound, OutboundChannel};
 use crate::config::{AgentRuntime, RequestPolicy};
 use crate::hooks::{HookRunner, HookState, OnErrorInput, OnErrorOutcome};
 use crate::model::{AssistantTurn, Message, Tool};
@@ -89,108 +91,80 @@ impl RequestDriver {
         C: LlmClient + ?Sized,
         R: HookRunner + ?Sized,
     {
-        match self {
-            RequestDriver::FireAndForget => {
-                let RequestCtx {
-                    agent_name,
-                    agent,
-                    state,
-                    ephemeral,
-                    tools,
-                    ..
-                } = ctx;
-                let result = client
-                    .request_turn(agent, &*state.messages, ephemeral, tools)
-                    .await;
-                match send_or_stop(result, state, runner, agent_name, agent).await {
+        let RequestCtx {
+            agent_name,
+            out,
+            agent,
+            state,
+            rx,
+            ephemeral,
+            tools,
+        } = ctx;
+        // All three policies share the send; only Queue drains afterwards
+        // and only Interrupt races inbound against it.
+        if self == RequestDriver::Interrupt {
+            let send_fut = client.request_turn(agent, &*state.messages, ephemeral, tools);
+            return select! {
+                r = send_fut => match send_or_stop(r, state, runner, agent_name, agent).await {
                     Ok(turn) => RequestStep::Turn(turn),
                     Err(step) => step,
-                }
-            }
-            RequestDriver::Queue => {
-                let RequestCtx {
-                    agent_name,
-                    out,
-                    agent,
-                    state,
-                    rx,
-                    ephemeral,
-                    tools,
-                } = ctx;
-                let turn = match send_or_stop(
-                    client
-                        .request_turn(agent, &*state.messages, ephemeral, tools)
-                        .await,
-                    state,
-                    runner,
-                    agent_name,
-                    agent,
-                )
-                .await
-                {
-                    Ok(turn) => turn,
-                    Err(step) => return step,
-                };
-                // Request finished; drain anything that arrived meanwhile.
-                let n_messages = state.messages.len();
-                match drain_queue(
-                    rx,
-                    &mut *state.messages,
-                    out,
-                    n_messages,
-                    &state.wal,
-                    state.launched.len(),
-                ) {
-                    DrainOutcome::Continue => {}
-                    DrainOutcome::Stop => return RequestStep::Stopped(StopReason::UserStop),
-                    DrainOutcome::Exit => return RequestStep::Stopped(StopReason::UserExit),
-                }
-                RequestStep::Turn(turn)
-            }
-            RequestDriver::Interrupt => {
-                let RequestCtx {
-                    agent_name,
-                    out,
-                    agent,
-                    state,
-                    rx,
-                    ephemeral,
-                    tools,
-                } = ctx;
-                let send_fut = client.request_turn(agent, &*state.messages, ephemeral, tools);
-                select! {
-                    r = send_fut => match send_or_stop(r, state, runner, agent_name, agent).await {
-                        Ok(turn) => RequestStep::Turn(turn),
-                        Err(step) => step,
-                    },
-                    inbound = rx.recv() => match inbound {
-                        Some(Inbound::Command(Command::Stop)) => {
-                            RequestStep::Stopped(StopReason::UserStop)
-                        }
-                        // Exit ends the session, not just the request.
-                        Some(Inbound::Command(Command::Exit)) | None => {
-                            RequestStep::Stopped(StopReason::UserExit)
-                        }
-                        Some(Inbound::Message(m)) => {
+                },
+                inbound = rx.recv() => match inbound {
+                    None => RequestStep::Stopped(StopReason::UserExit),
+                    Some(inbound) => match classify_inbound(
+                        inbound,
+                        out,
+                        &state.wal,
+                        state.launched.len(),
+                        state.messages.len(),
+                    ) {
+                        // Status ping, already answered: go round again.
+                        None => RequestStep::Continue,
+                        Some(InboundAction::Message(m)) => {
                             state.messages.push(Message::new_user(m));
                             RequestStep::Continue
                         }
-                        Some(Inbound::Command(Command::Interrupt(text))) => {
-                            state.messages.push(Message::new_user(text));
-                            RequestStep::Continue
+                        Some(InboundAction::Stop) => {
+                            RequestStep::Stopped(StopReason::UserStop)
                         }
-                        Some(Inbound::Command(Command::Status)) => {
-                            out.notification(status_line(
-                                &state.wal,
-                                state.launched.len(),
-                                state.messages.len(),
-                            ));
-                            RequestStep::Continue
+                        Some(InboundAction::Exit) => {
+                            RequestStep::Stopped(StopReason::UserExit)
                         }
                     },
-                }
+                },
+            };
+        }
+        let turn = match send_or_stop(
+            client
+                .request_turn(agent, &*state.messages, ephemeral, tools)
+                .await,
+            state,
+            runner,
+            agent_name,
+            agent,
+        )
+        .await
+        {
+            Ok(turn) => turn,
+            Err(step) => return step,
+        };
+        if self == RequestDriver::Queue {
+            // Request finished; drain anything that arrived meanwhile.
+            let n_messages = state.messages.len();
+            if let Some(reason) = drain_queue(
+                rx,
+                &mut *state.messages,
+                out,
+                n_messages,
+                &state.wal,
+                state.launched.len(),
+            )
+            .stop_reason()
+            {
+                return RequestStep::Stopped(reason);
             }
         }
+        RequestStep::Turn(turn)
     }
 }
 /// Await a request result and route a failure through the shared path.

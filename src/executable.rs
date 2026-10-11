@@ -127,12 +127,13 @@ fn truncate_for_log(s: &str) -> (String, bool) {
     (format!("{truncated}...[truncated {skipped} chars]"), true)
 }
 
-/// Successful `command` run: parsed stdout JSON plus full process telemetry.
-/// `stdout_raw`/`stderr` are truncated to [`MAX_LOG_CHARS`] for logging;
-/// `stdout_len`/`stderr_len` hold the full lengths.
-#[derive(Debug)]
-pub struct CommandOutput {
-    value: Value,
+/// Process telemetry shared by [`CommandOutput`] and [`CommandFailure`]:
+/// captured streams plus exit status and timing. One struct so the two can
+/// never drift apart — a field added to one is added to both, and the five
+/// early-failure constructions share [`Telemetry::empty`] instead of
+/// repeating a ten-field literal.
+#[derive(Debug, Default)]
+pub struct Telemetry {
     stdout_raw: String,
     stderr: String,
     stdout_len: usize,
@@ -145,10 +146,17 @@ pub struct CommandOutput {
     truncated: bool,
 }
 
-impl CommandOutput {
-    pub fn value(&self) -> &Value {
-        &self.value
+impl Telemetry {
+    /// Telemetry for a child that never produced output (spawn/encode/stdin
+    /// failures): everything zeroed except what is known so far.
+    fn empty(stdin_len: usize, start: &std::time::Instant) -> Self {
+        Self {
+            stdin_len,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            ..Default::default()
+        }
     }
+
     pub fn stdout_raw(&self) -> &str {
         &self.stdout_raw
     }
@@ -181,21 +189,60 @@ impl CommandOutput {
     }
 }
 
+/// Successful `command` run: parsed stdout JSON plus full process telemetry.
+/// `stdout_raw`/`stderr` are truncated to [`MAX_LOG_CHARS`] for logging;
+/// `stdout_len`/`stderr_len` hold the full lengths.
+#[derive(Debug)]
+pub struct CommandOutput {
+    value: Value,
+    telemetry: Telemetry,
+}
+
+impl CommandOutput {
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+    pub fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+    pub fn stdout_raw(&self) -> &str {
+        self.telemetry.stdout_raw()
+    }
+    pub fn stderr(&self) -> &str {
+        self.telemetry.stderr()
+    }
+    pub fn stdout_len(&self) -> usize {
+        self.telemetry.stdout_len()
+    }
+    pub fn stderr_len(&self) -> usize {
+        self.telemetry.stderr_len()
+    }
+    pub fn stdin_len(&self) -> usize {
+        self.telemetry.stdin_len()
+    }
+    pub fn exit_code(&self) -> Option<i32> {
+        self.telemetry.exit_code()
+    }
+    pub fn success(&self) -> bool {
+        self.telemetry.success()
+    }
+    pub fn elapsed_ms(&self) -> u64 {
+        self.telemetry.elapsed_ms()
+    }
+    pub fn timed_out(&self) -> bool {
+        self.telemetry.timed_out()
+    }
+    pub fn truncated(&self) -> bool {
+        self.telemetry.truncated()
+    }
+}
+
 /// Failed `command` run: the [`ExecutableError`] plus whatever telemetry was
 /// captured (empty when the child never ran, e.g. spawn/encode/stdin).
 #[derive(Debug)]
 pub struct CommandFailure {
     error: ExecutableError,
-    stdout_raw: String,
-    stderr: String,
-    stdout_len: usize,
-    stderr_len: usize,
-    stdin_len: usize,
-    exit_code: Option<i32>,
-    success: bool,
-    elapsed_ms: u64,
-    timed_out: bool,
-    truncated: bool,
+    telemetry: Telemetry,
 }
 
 impl CommandFailure {
@@ -212,35 +259,38 @@ impl CommandFailure {
     pub fn into_error(self) -> ExecutableError {
         self.error
     }
+    pub fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
     pub fn stdout_raw(&self) -> &str {
-        &self.stdout_raw
+        self.telemetry.stdout_raw()
     }
     pub fn stderr(&self) -> &str {
-        &self.stderr
+        self.telemetry.stderr()
     }
     pub fn stdout_len(&self) -> usize {
-        self.stdout_len
+        self.telemetry.stdout_len()
     }
     pub fn stderr_len(&self) -> usize {
-        self.stderr_len
+        self.telemetry.stderr_len()
     }
     pub fn stdin_len(&self) -> usize {
-        self.stdin_len
+        self.telemetry.stdin_len()
     }
     pub fn exit_code(&self) -> Option<i32> {
-        self.exit_code
+        self.telemetry.exit_code()
     }
     pub fn success(&self) -> bool {
-        self.success
+        self.telemetry.success()
     }
     pub fn elapsed_ms(&self) -> u64 {
-        self.elapsed_ms
+        self.telemetry.elapsed_ms()
     }
     pub fn timed_out(&self) -> bool {
-        self.timed_out
+        self.telemetry.timed_out()
     }
     pub fn truncated(&self) -> bool {
-        self.truncated
+        self.telemetry.truncated()
     }
 }
 
@@ -271,32 +321,14 @@ pub async fn run_command(
             command: command.to_string(),
             detail: e.to_string(),
         },
-        stdout_raw: String::new(),
-        stderr: String::new(),
-        stdout_len: 0,
-        stderr_len: 0,
-        stdin_len: 0,
-        exit_code: None,
-        success: false,
-        elapsed_ms: start.elapsed().as_millis() as u64,
-        timed_out: false,
-        truncated: false,
+        telemetry: Telemetry::empty(0, &start),
     })?;
 
     let input = serde_json::to_vec(stdin_json).map_err(|e| CommandFailure {
         error: ExecutableError::Encode {
             detail: e.to_string(),
         },
-        stdout_raw: String::new(),
-        stderr: String::new(),
-        stdout_len: 0,
-        stderr_len: 0,
-        stdin_len: 0,
-        exit_code: None,
-        success: false,
-        elapsed_ms: start.elapsed().as_millis() as u64,
-        timed_out: false,
-        truncated: false,
+        telemetry: Telemetry::empty(0, &start),
     })?;
     let stdin_len = input.len();
     if let Some(stdin) = child.stdin.take() {
@@ -305,16 +337,7 @@ pub async fn run_command(
             error: ExecutableError::Stdin {
                 detail: e.to_string(),
             },
-            stdout_raw: String::new(),
-            stderr: String::new(),
-            stdout_len: 0,
-            stderr_len: 0,
-            stdin_len,
-            exit_code: None,
-            success: false,
-            elapsed_ms: start.elapsed().as_millis() as u64,
-            timed_out: false,
-            truncated: false,
+            telemetry: Telemetry::empty(stdin_len, &start),
         })?;
     }
 
@@ -329,16 +352,7 @@ pub async fn run_command(
                         error: ExecutableError::Wait {
                             detail: e.to_string(),
                         },
-                        stdout_raw: String::new(),
-                        stderr: String::new(),
-                        stdout_len: 0,
-                        stderr_len: 0,
-                        stdin_len,
-                        exit_code: None,
-                        success: false,
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                        timed_out: false,
-                        truncated: false,
+                        telemetry: Telemetry::empty(stdin_len, &start),
                     });
                 }
                 Err(_) => {
@@ -346,16 +360,10 @@ pub async fn run_command(
                     // `kill_on_drop(true)` ensures the child is killed.
                     return Err(CommandFailure {
                         error: ExecutableError::Timeout { secs: secs.get() },
-                        stdout_raw: String::new(),
-                        stderr: String::new(),
-                        stdout_len: 0,
-                        stderr_len: 0,
-                        stdin_len,
-                        exit_code: None,
-                        success: false,
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                        timed_out: true,
-                        truncated: false,
+                        telemetry: Telemetry {
+                            timed_out: true,
+                            ..Telemetry::empty(stdin_len, &start)
+                        },
                     });
                 }
             }
@@ -364,16 +372,7 @@ pub async fn run_command(
             error: ExecutableError::Wait {
                 detail: e.to_string(),
             },
-            stdout_raw: String::new(),
-            stderr: String::new(),
-            stdout_len: 0,
-            stderr_len: 0,
-            stdin_len,
-            exit_code: None,
-            success: false,
-            elapsed_ms: start.elapsed().as_millis() as u64,
-            timed_out: false,
-            truncated: false,
+            telemetry: Telemetry::empty(stdin_len, &start),
         })?,
     };
 
@@ -388,65 +387,39 @@ pub async fn run_command(
     let (stderr, stderr_trunc) = truncate_for_log(&stderr_full);
     let truncated = stdout_trunc || stderr_trunc;
 
+    let telemetry = Telemetry {
+        stdout_raw,
+        stderr,
+        stdout_len,
+        stderr_len,
+        stdin_len,
+        exit_code,
+        success,
+        elapsed_ms,
+        timed_out: false,
+        truncated,
+    };
+
     if !success {
         return Err(CommandFailure {
             error: ExecutableError::NonZeroExit { code: exit_code },
-            stdout_raw,
-            stderr,
-            stdout_len,
-            stderr_len,
-            stdin_len,
-            exit_code,
-            success,
-            elapsed_ms,
-            timed_out: false,
-            truncated,
+            telemetry,
         });
     }
 
     if output.stdout.is_empty() {
         return Ok(CommandOutput {
             value: Value::Null,
-            stdout_raw,
-            stderr,
-            stdout_len,
-            stderr_len,
-            stdin_len,
-            exit_code,
-            success,
-            elapsed_ms,
-            timed_out: false,
-            truncated,
+            telemetry,
         });
     }
     match serde_json::from_slice::<Value>(&output.stdout) {
-        Ok(value) => Ok(CommandOutput {
-            value,
-            stdout_raw,
-            stderr,
-            stdout_len,
-            stderr_len,
-            stdin_len,
-            exit_code,
-            success,
-            elapsed_ms,
-            timed_out: false,
-            truncated,
-        }),
+        Ok(value) => Ok(CommandOutput { value, telemetry }),
         Err(e) => Err(CommandFailure {
             error: ExecutableError::InvalidOutput {
                 detail: format!("stdout is not JSON: {e}"),
             },
-            stdout_raw,
-            stderr,
-            stdout_len,
-            stderr_len,
-            stdin_len,
-            exit_code,
-            success,
-            elapsed_ms,
-            timed_out: false,
-            truncated,
+            telemetry,
         }),
     }
 }
