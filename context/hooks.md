@@ -1,8 +1,9 @@
 # Hooks Inventory — Shackle / Fyah Harness
 
 > Canonical list of all hook slots. Verified against code truth on 2026-09-30; re-confirmed 2026-10-01;
-> stop/exit semantics and slot table re-confirmed 2026-10-03
-> (10 `impl Slot for`, 11 `exes/*.sh`, no `turn_*` outside comments/tests — all unchanged).
+> stop/exit semantics and slot table re-confirmed 2026-10-03; slot macro and
+> context/impl changes re-confirmed 2026-10-05
+> (10 slots via `define_slot!`, 11 `exes/*.sh`, no `turn_*` outside comments/tests — all unchanged).
 > Exists = 4-layer check: (1) `Slot` def in `src/hooks.rs`, (2) config wiring in `src/config/raw.rs` + validation, (3) runtime execution, (4) `exes/*.sh` + `[executables.*]` + `fyah.toml` HOOKS REFERENCE.
 > Shaping plans (all complete): `context/plans/hooks-inventory-wiring.md`, `context/plans/agent-context-limits.md`,
 > `context/plans/config-resolution-main-loop.md` — rewired config plumbing and the main loop only.
@@ -61,7 +62,7 @@ The strategy is resolved **once**, when the config is built: `AgentRuntime.conte
 
 ## 5. Verification log (2026-09-30, agent-context-limits T07)
 
-- `rg "impl Slot for" src/hooks.rs` → 10 impls (session_start, session_end, verify_done, step_hook, pre_prompt, pre_tool, post_tool, on_error, context, loop_guard).
+- `rg "define_slot!" src/hooks.rs` → 10 slots (session_start, session_end, verify_done, step_hook, pre_prompt, pre_tool, post_tool, on_error, context, loop_guard).
 - `rg "turn_start|turn_end" src/ exes/ fyah.toml` → comments/migration notes only.
 - `ls exes/` → 11 files (context, loop_guard, on_error, post_tool, pre_prompt, pre_tool, session_end, session_start, step_after, step_before, verify_done).
 - `rg "not executed|queued_len" fyah.toml exes/` → clean.

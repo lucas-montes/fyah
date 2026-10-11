@@ -594,151 +594,171 @@ pub enum LoopGuardOutcome {
 // ---------------------------------------------------------------------------
 // Slot impls
 // ---------------------------------------------------------------------------
+// Slot definitions. The ten `impl Slot for` blocks below are three shapes —
+// default fallback, one shared abort outcome, or split step/workflow aborts —
+// so they go through one macro instead of ten hand-written impls that can
+// drift. A new slot is one invocation; the `fail_mode` handling stays
+// explicit per slot (note `session_end`/`post_tool` have none: fail-open
+// only).
+// ---------------------------------------------------------------------------
 
-impl Slot for SessionStartSlot {
-    const NAME: &'static str = "session_start";
-    type Options = SessionStartOptions;
-    type Input<'a> = SessionStartInput<'a>;
-    type Output = SessionStartOutcome;
-
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => SessionStartOutcome::Abort {
-                error: HookError::aborted(AbortScope::Session, &error.to_string()),
-            },
+macro_rules! define_slot {
+    ($slot:ident, $options:ident, $input:ident, $output:ident, $name:literal) => {
+        impl Slot for $slot {
+            const NAME: &'static str = $name;
+            type Options = $options;
+            type Input<'a> = $input<'a>;
+            type Output = $output;
         }
-    }
-}
+    };
+    // The abort expression is a closure over the failure (`|error| ...`) so
+    // macro hygiene is satisfied: the expanded `fallback` parameter is never
+    // named from outside the macro.
+    ($slot:ident, $options:ident, $input:ident, $output:ident, $name:literal, abort = $abort:expr) => {
+        impl Slot for $slot {
+            const NAME: &'static str = $name;
+            type Options = $options;
+            type Input<'a> = $input<'a>;
+            type Output = $output;
 
-impl Slot for SessionEndSlot {
-    const NAME: &'static str = "session_end";
-    type Options = SessionEndOptions;
-    type Input<'a> = SessionEndInput<'a>;
-    type Output = SessionEndOutcome;
-}
-
-impl Slot for VerifySlot {
-    const NAME: &'static str = "verify_done";
-    type Options = VerifyOptions;
-    type Input<'a> = VerifyInput<'a>;
-    type Output = VerifyOutcome;
-
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => VerifyOutcome::NotDone {
-                error: HookError::check_failed("hook", &error.to_string()),
-            },
+            fn fallback(
+                error: &ExecutableError,
+                fail_mode: &FailMode,
+            ) -> Self::Output {
+                match fail_mode {
+                    FailMode::Message => Self::Output::default(),
+                    FailMode::AbortStep | FailMode::AbortWorkflow => ($abort)(error),
+                }
+            }
         }
-    }
-}
+    };
+    ($slot:ident, $options:ident, $input:ident, $output:ident, $name:literal, abort_step = $abort_step:expr, abort_workflow = $abort_flow:expr) => {
+        impl Slot for $slot {
+            const NAME: &'static str = $name;
+            type Options = $options;
+            type Input<'a> = $input<'a>;
+            type Output = $output;
 
-impl Slot for StepSlot {
-    const NAME: &'static str = "step_hook";
-    type Options = StepOptions;
-    type Input<'a> = StepHookInput<'a>;
-    type Output = StepHookOutcome;
-
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep => StepHookOutcome::AbortStep {
-                error: HookError::aborted(AbortScope::Step, &error.to_string()),
-            },
-            FailMode::AbortWorkflow => StepHookOutcome::AbortWorkflow {
-                error: HookError::aborted(AbortScope::Workflow, &error.to_string()),
-            },
+            fn fallback(
+                error: &ExecutableError,
+                fail_mode: &FailMode,
+            ) -> Self::Output {
+                match fail_mode {
+                    FailMode::Message => Self::Output::default(),
+                    FailMode::AbortStep => ($abort_step)(error),
+                    FailMode::AbortWorkflow => ($abort_flow)(error),
+                }
+            }
         }
+    };
+}
+
+define_slot!(
+    SessionStartSlot,
+    SessionStartOptions,
+    SessionStartInput,
+    SessionStartOutcome,
+    "session_start",
+    abort = |error: &ExecutableError| SessionStartOutcome::Abort {
+        error: HookError::aborted(AbortScope::Session, &error.to_string())
     }
-}
+);
 
-impl Slot for PrePromptSlot {
-    const NAME: &'static str = "pre_prompt";
-    type Options = PrePromptOptions;
-    type Input<'a> = PrePromptInput<'a>;
-    type Output = PrePromptOutcome;
+define_slot!(
+    SessionEndSlot,
+    SessionEndOptions,
+    SessionEndInput,
+    SessionEndOutcome,
+    "session_end"
+);
 
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => PrePromptOutcome::Abort {
-                error: HookError::aborted(AbortScope::Turn, &error.to_string()),
-            },
-        }
+define_slot!(
+    VerifySlot,
+    VerifyOptions,
+    VerifyInput,
+    VerifyOutcome,
+    "verify_done",
+    abort = |error: &ExecutableError| VerifyOutcome::NotDone {
+        error: HookError::check_failed("hook", &error.to_string())
     }
-}
+);
 
-impl Slot for PreToolSlot {
-    const NAME: &'static str = "pre_tool";
-    type Options = PreToolOptions;
-    type Input<'a> = PreToolInput<'a>;
-    type Output = PreToolOutcome;
-
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => PreToolOutcome::Deny {
-                error: HookError::denied("hook", &error.to_string()),
-            },
-        }
+define_slot!(
+    StepSlot,
+    StepOptions,
+    StepHookInput,
+    StepHookOutcome,
+    "step_hook",
+    abort_step = |error: &ExecutableError| StepHookOutcome::AbortStep {
+        error: HookError::aborted(AbortScope::Step, &error.to_string())
+    },
+    abort_workflow = |error: &ExecutableError| StepHookOutcome::AbortWorkflow {
+        error: HookError::aborted(AbortScope::Workflow, &error.to_string())
     }
-}
+);
 
-impl Slot for PostToolSlot {
-    const NAME: &'static str = "post_tool";
-    type Options = PostToolOptions;
-    type Input<'a> = PostToolInput<'a>;
-    type Output = PostToolOutcome;
-}
-
-impl Slot for OnErrorSlot {
-    const NAME: &'static str = "on_error";
-    type Options = EmptyOptions;
-    type Input<'a> = OnErrorInput<'a>;
-    type Output = OnErrorOutcome;
-
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => OnErrorOutcome::Abort {
-                error: HookError::aborted(AbortScope::Step, &error.to_string()),
-            },
-        }
+define_slot!(
+    PrePromptSlot,
+    PrePromptOptions,
+    PrePromptInput,
+    PrePromptOutcome,
+    "pre_prompt",
+    abort = |error: &ExecutableError| PrePromptOutcome::Abort {
+        error: HookError::aborted(AbortScope::Turn, &error.to_string())
     }
-}
+);
 
-impl Slot for LoopGuardSlot {
-    const NAME: &'static str = "loop_guard";
-    type Options = EmptyOptions;
-    type Input<'a> = LoopGuardInput<'a>;
-    type Output = LoopGuardOutcome;
-
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => LoopGuardOutcome::Stop {
-                reason: error.to_string(),
-            },
-        }
+define_slot!(
+    PreToolSlot,
+    PreToolOptions,
+    PreToolInput,
+    PreToolOutcome,
+    "pre_tool",
+    abort = |error: &ExecutableError| PreToolOutcome::Deny {
+        error: HookError::denied("hook", &error.to_string())
     }
-}
+);
 
-impl Slot for ContextSlot {
-    const NAME: &'static str = "context";
-    type Options = ContextHookOptions;
-    type Input<'a> = CustomInput<'a>;
-    type Output = CustomOutcome;
+define_slot!(
+    PostToolSlot,
+    PostToolOptions,
+    PostToolInput,
+    PostToolOutcome,
+    "post_tool"
+);
 
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
-        match fail_mode {
-            FailMode::Message => Self::Output::default(),
-            FailMode::AbortStep | FailMode::AbortWorkflow => CustomOutcome::Abort {
-                error: HookError::aborted(AbortScope::Turn, &error.to_string()),
-            },
-        }
+define_slot!(
+    OnErrorSlot,
+    EmptyOptions,
+    OnErrorInput,
+    OnErrorOutcome,
+    "on_error",
+    abort = |error: &ExecutableError| OnErrorOutcome::Abort {
+        error: HookError::aborted(AbortScope::Step, &error.to_string())
     }
-}
+);
+
+define_slot!(
+    LoopGuardSlot,
+    EmptyOptions,
+    LoopGuardInput,
+    LoopGuardOutcome,
+    "loop_guard",
+    abort = |error: &ExecutableError| LoopGuardOutcome::Stop {
+        reason: error.to_string()
+    }
+);
+
+define_slot!(
+    ContextSlot,
+    ContextHookOptions,
+    CustomInput,
+    CustomOutcome,
+    "context",
+    abort = |error: &ExecutableError| CustomOutcome::Abort {
+        error: HookError::aborted(AbortScope::Turn, &error.to_string())
+    }
+);
 
 // ---------------------------------------------------------------------------
 // Mutable state for builtins. Externals get IDs + JSON and return patches.
