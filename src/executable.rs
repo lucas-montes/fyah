@@ -9,7 +9,7 @@ use valuable::Valuable;
 /// by scripts); the runner maps these into slot outcomes via
 /// [`crate::hooks::Slot::fallback`].
 #[derive(Debug, PartialEq, Eq)]
-pub enum ExecutableError {
+pub enum Error {
     Spawn { command: String, detail: String },
     Encode { detail: String },
     Stdin { detail: String },
@@ -21,7 +21,7 @@ pub enum ExecutableError {
     NotImplemented { kind: String },
 }
 
-impl std::fmt::Display for ExecutableError {
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Spawn { command, detail } => {
@@ -42,7 +42,7 @@ impl std::fmt::Display for ExecutableError {
     }
 }
 
-impl std::error::Error for ExecutableError {}
+impl std::error::Error for Error {}
 
 /// What to do when an executable fails or times out.
 #[derive(Debug, Deserialize, PartialEq, Eq, Default, Valuable)]
@@ -237,26 +237,26 @@ impl CommandOutput {
     }
 }
 
-/// Failed `command` run: the [`ExecutableError`] plus whatever telemetry was
+/// Failed `command` run: the [`Error`] plus whatever telemetry was
 /// captured (empty when the child never ran, e.g. spawn/encode/stdin).
 #[derive(Debug)]
 pub struct CommandFailure {
-    error: ExecutableError,
+    error: Error,
     telemetry: Telemetry,
 }
 
 impl CommandFailure {
-    pub fn error(&self) -> &ExecutableError {
+    pub fn error(&self) -> &Error {
         &self.error
     }
 
     /// Consume the failure and keep only the error, discarding the captured
     /// telemetry.
     ///
-    /// `ExecutableError` is deliberately not `Clone` (it is the failure
+    /// `Error` is deliberately not `Clone` (it is the failure
     /// contract, not a value), so a caller that wants to *return* the error
     /// after logging the telemetry has to give up the telemetry to get it.
-    pub fn into_error(self) -> ExecutableError {
+    pub fn into_error(self) -> Error {
         self.error
     }
     pub fn telemetry(&self) -> &Telemetry {
@@ -297,8 +297,8 @@ impl CommandFailure {
 /// Run a `command` executable: write `stdin_json` to its stdin, capture
 /// stdout/stderr plus exit status and timing. Stdout that is empty yields
 /// `Value::Null` so callers can fall back to their `Default` outcome;
-/// non-JSON stdout is an [`ExecutableError::InvalidOutput`]; non-zero exit
-/// is an [`ExecutableError::NonZeroExit`] (warn + fallback per `fail_mode`).
+/// non-JSON stdout is an [`Error::InvalidOutput`]; non-zero exit
+/// is an [`Error::NonZeroExit`] (warn + fallback per `fail_mode`).
 /// On timeout the child is killed via `kill_on_drop(true)`.
 pub async fn run_command(
     exe: &Executable,
@@ -317,7 +317,7 @@ pub async fn run_command(
         .kill_on_drop(true);
 
     let mut child = cmd.spawn().map_err(|e| CommandFailure {
-        error: ExecutableError::Spawn {
+        error: Error::Spawn {
             command: command.to_string(),
             detail: e.to_string(),
         },
@@ -325,7 +325,7 @@ pub async fn run_command(
     })?;
 
     let input = serde_json::to_vec(stdin_json).map_err(|e| CommandFailure {
-        error: ExecutableError::Encode {
+        error: Error::Encode {
             detail: e.to_string(),
         },
         telemetry: Telemetry::empty(0, &start),
@@ -334,7 +334,7 @@ pub async fn run_command(
     if let Some(stdin) = child.stdin.take() {
         let mut stdin = stdin;
         stdin.write_all(&input).await.map_err(|e| CommandFailure {
-            error: ExecutableError::Stdin {
+            error: Error::Stdin {
                 detail: e.to_string(),
             },
             telemetry: Telemetry::empty(stdin_len, &start),
@@ -349,7 +349,7 @@ pub async fn run_command(
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
                     return Err(CommandFailure {
-                        error: ExecutableError::Wait {
+                        error: Error::Wait {
                             detail: e.to_string(),
                         },
                         telemetry: Telemetry::empty(stdin_len, &start),
@@ -359,7 +359,7 @@ pub async fn run_command(
                     // `output_fut` (and its owned child) is dropped here;
                     // `kill_on_drop(true)` ensures the child is killed.
                     return Err(CommandFailure {
-                        error: ExecutableError::Timeout { secs: secs.get() },
+                        error: Error::Timeout { secs: secs.get() },
                         telemetry: Telemetry {
                             timed_out: true,
                             ..Telemetry::empty(stdin_len, &start)
@@ -369,7 +369,7 @@ pub async fn run_command(
             }
         }
         None => output_fut.await.map_err(|e| CommandFailure {
-            error: ExecutableError::Wait {
+            error: Error::Wait {
                 detail: e.to_string(),
             },
             telemetry: Telemetry::empty(stdin_len, &start),
@@ -402,7 +402,7 @@ pub async fn run_command(
 
     if !success {
         return Err(CommandFailure {
-            error: ExecutableError::NonZeroExit { code: exit_code },
+            error: Error::NonZeroExit { code: exit_code },
             telemetry,
         });
     }
@@ -416,7 +416,7 @@ pub async fn run_command(
     match serde_json::from_slice::<Value>(&output.stdout) {
         Ok(value) => Ok(CommandOutput { value, telemetry }),
         Err(e) => Err(CommandFailure {
-            error: ExecutableError::InvalidOutput {
+            error: Error::InvalidOutput {
                 detail: format!("stdout is not JSON: {e}"),
             },
             telemetry,
@@ -475,7 +475,7 @@ mod tests {
         .expect_err("non-zero exit fails");
         assert_eq!(
             err.error(),
-            &ExecutableError::NonZeroExit { code: Some(3) }
+            &Error::NonZeroExit { code: Some(3) }
         );
         assert!(err.stderr().contains("oops"));
         assert!(!err.success());
@@ -499,7 +499,7 @@ mod tests {
         .expect_err("invalid json fails");
         assert!(matches!(
             err.error(),
-            ExecutableError::InvalidOutput { .. }
+            Error::InvalidOutput { .. }
         ));
         assert!(err.stdout_raw().contains("not-json"));
         assert!(err.stderr().contains("err"));
@@ -529,7 +529,7 @@ mod tests {
         let err = run_command(&exe, "sleep", &["5".to_string()], &Value::Null)
             .await
             .expect_err("sleep past timeout fails");
-        assert_eq!(err.error(), &ExecutableError::Timeout { secs: 1 });
+        assert_eq!(err.error(), &Error::Timeout { secs: 1 });
         assert!(err.timed_out());
         assert!(!err.success());
     }

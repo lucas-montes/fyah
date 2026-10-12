@@ -3,7 +3,7 @@ use serde_json::Value;
 use valuable::Valuable;
 
 use crate::context::ContextOutcome;
-use crate::executable::{Executable, ExecutableError, ExecutableParams, FailMode, run_command};
+use crate::executable::{Executable, Error, ExecutableParams, FailMode, run_command};
 use crate::model::Message;
 
 /// A hook's decision plus the captured streams.
@@ -135,7 +135,7 @@ pub trait Slot: std::fmt::Debug + 'static {
     type Input<'a>: Serialize;
     type Output: std::fmt::Debug + PartialEq + DeserializeOwned + Default;
 
-    fn fallback(error: &ExecutableError, fail_mode: &FailMode) -> Self::Output {
+    fn fallback(error: &Error, fail_mode: &FailMode) -> Self::Output {
         let _ = (error, fail_mode);
         Self::Output::default()
     }
@@ -622,7 +622,7 @@ macro_rules! define_slot {
             type Output = $output;
 
             fn fallback(
-                error: &ExecutableError,
+                error: &Error,
                 fail_mode: &FailMode,
             ) -> Self::Output {
                 match fail_mode {
@@ -640,7 +640,7 @@ macro_rules! define_slot {
             type Output = $output;
 
             fn fallback(
-                error: &ExecutableError,
+                error: &Error,
                 fail_mode: &FailMode,
             ) -> Self::Output {
                 match fail_mode {
@@ -659,7 +659,7 @@ define_slot!(
     SessionStartInput,
     SessionStartOutcome,
     "session_start",
-    abort = |error: &ExecutableError| SessionStartOutcome::Abort {
+    abort = |error: &Error| SessionStartOutcome::Abort {
         error: HookError::aborted(AbortScope::Session, &error.to_string())
     }
 );
@@ -678,7 +678,7 @@ define_slot!(
     VerifyInput,
     VerifyOutcome,
     "verify_done",
-    abort = |error: &ExecutableError| VerifyOutcome::NotDone {
+    abort = |error: &Error| VerifyOutcome::NotDone {
         error: HookError::check_failed("hook", &error.to_string())
     }
 );
@@ -689,10 +689,10 @@ define_slot!(
     StepHookInput,
     StepHookOutcome,
     "step_hook",
-    abort_step = |error: &ExecutableError| StepHookOutcome::AbortStep {
+    abort_step = |error: &Error| StepHookOutcome::AbortStep {
         error: HookError::aborted(AbortScope::Step, &error.to_string())
     },
-    abort_workflow = |error: &ExecutableError| StepHookOutcome::AbortWorkflow {
+    abort_workflow = |error: &Error| StepHookOutcome::AbortWorkflow {
         error: HookError::aborted(AbortScope::Workflow, &error.to_string())
     }
 );
@@ -703,7 +703,7 @@ define_slot!(
     PrePromptInput,
     PrePromptOutcome,
     "pre_prompt",
-    abort = |error: &ExecutableError| PrePromptOutcome::Abort {
+    abort = |error: &Error| PrePromptOutcome::Abort {
         error: HookError::aborted(AbortScope::Turn, &error.to_string())
     }
 );
@@ -714,7 +714,7 @@ define_slot!(
     PreToolInput,
     PreToolOutcome,
     "pre_tool",
-    abort = |error: &ExecutableError| PreToolOutcome::Deny {
+    abort = |error: &Error| PreToolOutcome::Deny {
         error: HookError::denied("hook", &error.to_string())
     }
 );
@@ -733,7 +733,7 @@ define_slot!(
     OnErrorInput,
     OnErrorOutcome,
     "on_error",
-    abort = |error: &ExecutableError| OnErrorOutcome::Abort {
+    abort = |error: &Error| OnErrorOutcome::Abort {
         error: HookError::aborted(AbortScope::Step, &error.to_string())
     }
 );
@@ -744,7 +744,7 @@ define_slot!(
     LoopGuardInput,
     LoopGuardOutcome,
     "loop_guard",
-    abort = |error: &ExecutableError| LoopGuardOutcome::Stop {
+    abort = |error: &Error| LoopGuardOutcome::Stop {
         reason: error.to_string()
     }
 );
@@ -755,7 +755,7 @@ define_slot!(
     CustomInput,
     CustomOutcome,
     "context",
-    abort = |error: &ExecutableError| CustomOutcome::Abort {
+    abort = |error: &Error| CustomOutcome::Abort {
         error: HookError::aborted(AbortScope::Turn, &error.to_string())
     }
 );
@@ -829,7 +829,7 @@ pub trait HookRunner: std::fmt::Debug {
         executable: &'a str,
         input: &'a Value,
         state: &'a mut HookState<'b>,
-    ) -> impl Future<Output = Result<HookDecision, ExecutableError>> + 'a
+    ) -> impl Future<Output = Result<HookDecision, Error>> + 'a
     where
         'b: 'a;
 
@@ -878,7 +878,7 @@ pub trait HookRunner: std::fmt::Debug {
                         "hook output not understood"
                     );
                     S::fallback(
-                        &ExecutableError::InvalidOutput {
+                        &Error::InvalidOutput {
                             detail: error.to_string(),
                         },
                         exe.fail_mode(),
@@ -902,7 +902,7 @@ impl HookRunner for RealHookRunner {
         // Reserved for builtin handlers that mutate state directly;
         // external executables receive IDs + JSON and return patches.
         _state: &'a mut HookState<'b>,
-    ) -> Result<HookDecision, ExecutableError>
+    ) -> Result<HookDecision, Error>
     where
         'b: 'a,
     {
@@ -1015,14 +1015,14 @@ impl HookRunner for RealHookRunner {
                                 fail_mode = ?exe.fail_mode(),
                                 "hook command failed"
                             );
-                            // `ExecutableError` is not `Clone`, so give up the
+                            // `Error` is not `Clone`, so give up the
                             // telemetry we just logged to return the error.
                             Err(failure.into_error())
                         }
                     }
                 }
                 ExecutableParams::Wasm { path, function } => {
-                    let error = ExecutableError::NotImplemented {
+                    let error = Error::NotImplemented {
                         kind: exe.params().kind().to_string(),
                     };
                     tracing::warn!(
@@ -1038,7 +1038,7 @@ impl HookRunner for RealHookRunner {
                     todo!("Wasm support: run the module, call the function, pass JSON, return JSON");
                 }
                 ExecutableParams::Plugin { name, function } => {
-                    let error = ExecutableError::NotImplemented {
+                    let error = Error::NotImplemented {
                         kind: exe.params().kind().to_string(),
                     };
                     tracing::warn!(
@@ -1059,13 +1059,13 @@ impl HookRunner for RealHookRunner {
 }
 
 /// Built-in name check. Unknown names surface as
-/// [`ExecutableError::UnknownBuiltin`] so `fail_mode` decides fail-open vs
+/// [`Error::UnknownBuiltin`] so `fail_mode` decides fail-open vs
 /// fail-closed; validation catches typos at load time.
-fn run_builtin_name(builtin: &str) -> Result<(), ExecutableError> {
+fn run_builtin_name(builtin: &str) -> Result<(), Error> {
     match builtin {
         "noop" | "read_file" | "write_file" | "prune_outputs" | "audit_append"
         | "budget_guard" => Ok(()),
-        _ => Err(ExecutableError::UnknownBuiltin {
+        _ => Err(Error::UnknownBuiltin {
             name: builtin.to_string(),
         }),
     }
@@ -1121,7 +1121,7 @@ mod fallback_tests {
     /// A runner that answers with a fixed result, so the *wrapper's* split —
     /// erased call, then `S::fallback` — is what is under test.
     struct Stub {
-        result: Result<Value, ExecutableError>,
+        result: Result<Value, Error>,
     }
 
     impl std::fmt::Debug for Stub {
@@ -1138,13 +1138,13 @@ mod fallback_tests {
             _executable: &'a str,
             _input: &'a Value,
             _state: &'a mut HookState<'b>,
-        ) -> Result<HookDecision, ExecutableError>
+        ) -> Result<HookDecision, Error>
         where
             'b: 'a,
         {
             match &self.result {
                 Ok(v) => Ok(HookDecision::from_value(v.clone())),
-                Err(_) => Err(ExecutableError::NotImplemented {
+                Err(_) => Err(Error::NotImplemented {
                     kind: "stub".to_string(),
                 }),
             }
@@ -1168,7 +1168,7 @@ mod fallback_tests {
         // fail-open: the default outcome, i.e. Continue.
         let open = command_exe("message");
         let stub = Stub {
-            result: Err(ExecutableError::NotImplemented {
+            result: Err(Error::NotImplemented {
                 kind: "stub".to_string(),
             }),
         };

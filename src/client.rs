@@ -436,7 +436,7 @@ mod tests {
     use crate::communication::{Command, Inbound, Outbound, OutboundChannel};
     use crate::config::{AgentRuntime, Config, ConfigStore, ConfigView, RequestPolicy};
     use crate::executable::Executable;
-    use crate::executable::ExecutableError;
+    use crate::executable::Error as ExecutableError;
     use crate::model::Tool;
     use crate::session::Session;
 
