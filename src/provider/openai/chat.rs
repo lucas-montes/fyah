@@ -8,15 +8,15 @@ use crate::provider::openai::OpenAiTool;
 
 #[derive(Serialize)]
 pub struct OpenAiRequest<'a> {
-    pub model: &'a str,
-    pub messages: Vec<OpenAiMessage<'a>>,
+    model: &'a str,
+    messages: Vec<OpenAiMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<OpenAiTool<'a>>,
+    tools: Vec<OpenAiTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
+    temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    pub stream: bool,
+    max_tokens: Option<u32>,
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -42,16 +42,16 @@ pub enum OpenAiMessage<'a> {
 
 #[derive(Serialize)]
 pub struct OpenAiToolCall<'a> {
-    pub id: &'a str,
+    id: &'a str,
     #[serde(rename = "type")]
-    pub tool_type: &'static str,
-    pub function: OpenAiToolCallFn<'a>,
+    tool_type: &'static str,
+    function: OpenAiToolCallFn<'a>,
 }
 
 #[derive(Serialize)]
 pub struct OpenAiToolCallFn<'a> {
-    pub name: &'a str,
-    pub arguments: &'a str,
+    name: &'a str,
+    arguments: &'a str,
 }
 
 impl<'a> From<&'a Message> for OpenAiMessage<'a> {
@@ -124,16 +124,16 @@ pub fn attach_body<'c>(
 
 #[derive(Deserialize)]
 pub struct OpenAiResponse {
-    pub choices: Vec<OpenAiChoice>,
+    choices: Vec<OpenAiChoice>,
 }
 
 #[derive(Deserialize)]
 pub struct OpenAiChoice {
     #[serde(rename = "index")]
-    pub _index: usize,
-    pub message: OpenAiMessageOut,
+    _index: usize,
+    message: OpenAiMessageOut,
     #[serde(rename = "finish_reason")]
-    pub _finish_reason: String,
+    _finish_reason: String,
 }
 
 #[derive(Deserialize)]
@@ -160,16 +160,16 @@ pub enum OpenAiMessageOut {
 
 #[derive(Deserialize)]
 pub struct OpenAiToolCallOut {
-    pub id: String,
+    id: String,
     #[serde(rename = "type")]
-    pub _type: String,
-    pub function: OpenAiToolCallFnOut,
+    _type: String,
+    function: OpenAiToolCallFnOut,
 }
 
 #[derive(Deserialize)]
 pub struct OpenAiToolCallFnOut {
-    pub name: String,
-    pub arguments: String,
+    name: String,
+    arguments: String,
 }
 
 pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> {

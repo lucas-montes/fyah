@@ -10,22 +10,22 @@ const MAX_TOKENS: u32 = 4096;
 
 #[derive(Serialize)]
 pub struct AnthropicRequest<'a> {
-    pub model: &'a str,
-    pub max_tokens: u32,
+    model: &'a str,
+    max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<&'a str>,
-    pub messages: Vec<AnthropicMessage<'a>>,
+    system: Option<&'a str>,
+    messages: Vec<AnthropicMessage<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<AnthropicTool<'a>>,
+    tools: Vec<AnthropicTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    pub stream: bool,
+    temperature: Option<f32>,
+    stream: bool,
 }
 
 #[derive(Serialize)]
 pub struct AnthropicMessage<'a> {
-    pub role: &'a str,
-    pub content: Vec<AnthropicBlock<'a>>,
+    role: &'a str,
+    content: Vec<AnthropicBlock<'a>>,
 }
 
 #[derive(Serialize)]
@@ -49,9 +49,9 @@ pub enum AnthropicBlock<'a> {
 
 #[derive(Serialize)]
 pub struct AnthropicTool<'a> {
-    pub name: &'a str,
-    pub description: &'a str,
-    pub input_schema: &'a Value,
+    name: &'a str,
+    description: &'a str,
+    input_schema: &'a Value,
 }
 
 impl<'a> From<&'a Tool> for AnthropicTool<'a> {

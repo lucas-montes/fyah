@@ -10,19 +10,19 @@ use crate::provider::openai::OpenAiTool;
 
 #[derive(Serialize)]
 pub struct ResponsesRequest<'a> {
-    pub model: &'a str,
+    model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<&'a str>,
-    pub input: Vec<ResponsesInputItem<'a>>,
+    instructions: Option<&'a str>,
+    input: Vec<ResponsesInputItem<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<OpenAiTool<'a>>,
+    tools: Vec<OpenAiTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
+    temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_response_id: Option<String>,
-    pub stream: bool,
+    previous_response_id: Option<String>,
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -36,11 +36,11 @@ pub enum ResponsesInputItem<'a> {
 
 #[derive(Deserialize)]
 pub struct ResponsesResponse {
-    #[serde(default)]
-    pub id: Option<String>,
-    pub output: Vec<ResponsesOutputItem>,
-    #[serde(default)]
-    pub status: Option<String>,
+    #[serde(default, rename = "id")]
+    _id: Option<String>,
+    output: Vec<ResponsesOutputItem>,
+    #[serde(default, rename = "status")]
+    _status: Option<String>,
 }
 
 #[derive(Deserialize)]
