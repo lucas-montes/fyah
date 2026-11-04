@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::model::{AssistantTurn, Conversation, Message, Tool, ToolCall};
-use crate::provider::StreamReconstructor;
+use crate::prompt::{AssistantTurn, Conversation, Message, Tool, ToolCall};
 
 /// Required by the Anthropic API; there is no server default.
 const MAX_TOKENS: u32 = 4096;
@@ -78,7 +77,7 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
         let mut messages: Vec<AnthropicMessage<'c>> = Vec::new();
         let mut pending: Vec<AnthropicBlock<'c>> = Vec::new();
 
-        for m in conv.messages().iter().chain(conv.ephemeral()) {
+        for m in conv.messages() {
             match m {
                 Message::User { content } => {
                     flush(&mut pending, &mut messages);
@@ -207,122 +206,4 @@ pub fn parse_response(bytes: &[u8]) -> Result<AssistantTurn, serde_json::Error> 
     }
 
     Ok(AssistantTurn::new(content, tool_calls))
-}
-
-#[derive(Default)]
-struct AnthropicBlockBuilder {
-    id: String,
-    name: String,
-    input_json: String,
-}
-
-#[derive(Default)]
-pub struct AnthropicReconstructor {
-    content: String,
-    blocks: Vec<AnthropicBlockBuilder>,
-}
-
-impl AnthropicReconstructor {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl StreamReconstructor for AnthropicReconstructor {
-    fn ingest(&mut self, event: &Value) {
-        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match event_type {
-            "content_block_start" => {
-                let idx = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                if self.blocks.len() <= idx {
-                    self.blocks
-                        .resize_with(idx + 1, AnthropicBlockBuilder::default);
-                }
-                if let Some(cb) = event.get("content_block") {
-                    if cb.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                        if let Some(id) = cb.get("id").and_then(|v| v.as_str()) {
-                            self.blocks[idx].id = id.to_string();
-                        }
-                        if let Some(name) = cb.get("name").and_then(|v| v.as_str()) {
-                            self.blocks[idx].name = name.to_string();
-                        }
-                    }
-                }
-            }
-            "content_block_delta" => {
-                if let Some(delta) = event.get("delta") {
-                    let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if delta_type == "text_delta" {
-                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                            self.content.push_str(text);
-                        }
-                    } else if delta_type == "input_json_delta" {
-                        let idx = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        if let Some(partial) = delta.get("partial_json").and_then(|v| v.as_str()) {
-                            self.blocks[idx].input_json.push_str(partial);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn finish(&mut self) -> AssistantTurn {
-        let tool_calls = std::mem::take(&mut self.blocks)
-            .into_iter()
-            .filter(|b| !b.id.is_empty())
-            .map(|b| ToolCall::new(b.id, b.name, b.input_json))
-            .collect();
-        AssistantTurn::new(
-            if self.content.is_empty() {
-                None
-            } else {
-                Some(std::mem::take(&mut self.content))
-            },
-            tool_calls,
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn anthropic_reconstructor_rebuilds_turn() {
-        let events = vec![
-            json!({"type":"message_start","message":{"id":"msg_1","role":"assistant"}}),
-            json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}),
-            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"Write"}}),
-            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"partial"}}),
-            json!({"type":"content_block_stop","index":1}),
-            json!({"type":"message_stop"}),
-        ];
-        let mut rec = AnthropicReconstructor::new();
-        for e in &events {
-            rec.ingest(e);
-        }
-        let turn = rec.finish();
-        assert_eq!(turn.content(), Some("Hi"));
-        assert_eq!(turn.tool_calls().len(), 1);
-        assert_eq!(turn.tool_calls()[0].id(), "tool_1");
-        assert_eq!(turn.tool_calls()[0].name(), "Write");
-        assert_eq!(turn.tool_calls()[0].arguments(), "partial");
-    }
-
-    #[test]
-    fn ephemeral_is_appended_last() {
-        use crate::model::{Conversation, Message};
-        let messages = vec![Message::new_user("hello".to_string())];
-        let extra = Message::new_user("extra".to_string());
-        let tools: Vec<crate::model::Tool> = vec![];
-        let conv = Conversation::new("m", None, None, None, &messages, Some(&extra), &tools);
-        let req = AnthropicRequest::from(&conv);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(req.messages.len(), 2);
-        assert_eq!(req.messages[1].role, "user");
-    }
 }

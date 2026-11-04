@@ -8,8 +8,8 @@ use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    communication::OutboundChannel,
-    config::{self, ConfigError, ConfigStore},
+    ui::OutboundChannel,
+    config::{Error as ConfigError, Config, ConfigStore},
 };
 
 /// Events emitted by the filesystem watcher.
@@ -152,15 +152,10 @@ fn processor_loop(
     loop {
         match event_rx.recv() {
             Ok(FsEvent::ConfigChanged) => {
-                match config::load_validated(&config_path) {
+                match Config::load(&config_path).and_then(Config::validate) {
                     Ok(config) => {
-                        // Read the counts before the move; the generation only
-                        // exists after the store assigns it, so it is logged
-                        // after the replace (logging first always read 0).
-                        let agents = config.agent_names().count();
-                        let workflows = config.workflow_names().count();
                         let generation = store.replace(config);
-                        tracing::debug!(generation, agents, workflows, "store updated");
+                        tracing::debug!(generation, "store updated");
                     }
                     // Validation failure: the file parsed, so the user needs
                     // the collected problems, not the path.
@@ -171,10 +166,10 @@ fn processor_loop(
                     }
                     // Read or TOML parse failure: the file itself is the
                     // problem, so name it.
-                    Err(_) => {
-                        error!(path=%config_path.display(), "failed to load config");
+                    Err(e) => {
+                        error!(error = %e, path=%config_path.display(), "failed to load config");
                         let _ = user_output_tx.notification(format!(
-                            "Failed to load config from {}",
+                            "Failed to load config from {} with error: {e}",
                             config_path.display()
                         ));
                     }

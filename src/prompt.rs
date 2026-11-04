@@ -132,9 +132,6 @@ pub struct Conversation<'a> {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     messages: &'a Vec<Message>,
-    /// Call-scoped injection (pre_prompt ephemeral mode). Appended last at
-    /// serialization time so the request path never clones history.
-    ephemeral: Option<&'a Message>,
     tools: &'a [Tool],
 }
 
@@ -145,7 +142,6 @@ impl<'a> Conversation<'a> {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         messages: &'a Vec<Message>,
-        ephemeral: Option<&'a Message>,
         tools: &'a [Tool],
     ) -> Self {
         Self {
@@ -154,7 +150,6 @@ impl<'a> Conversation<'a> {
             temperature,
             max_tokens,
             messages,
-            ephemeral,
             tools,
         }
     }
@@ -177,10 +172,6 @@ impl<'a> Conversation<'a> {
 
     pub fn messages(&self) -> &[Message] {
         self.messages
-    }
-
-    pub fn ephemeral(&self) -> Option<&Message> {
-        self.ephemeral
     }
 
     pub fn tools(&self) -> &[Tool] {

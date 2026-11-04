@@ -22,6 +22,8 @@ clap = { version = "4.5.40", features = ["derive"] }
 tokio = { version = "1.46.1", features = ["macros", "rt", "net", "rt-multi-thread", "signal", "process", "fs", "io-std", "sync", "time"] }
 tokio-util = "0.7"
 
+futures = "0.3"
+
 toml = "0.8"
 
 uuid = { version = "1.23.3", features = ["v7"] }

@@ -1,7 +1,10 @@
-use super::session::Session;
 use sha2::{Digest, Sha256};
 use similar::{DiffTag, TextDiff};
 use valuable::Valuable;
+
+
+use super::sessions::Session;
+
 /// Agent Trace specification version we emit.
 /// Must satisfy the schema pattern `^[0-9]+\.[0-9]+$` (see <https://agent-trace.dev/> §6.1).
 const TRACE_SPEC_VERSION: &str = "0.1";
@@ -257,7 +260,7 @@ mod tests {
     use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::layer::SubscriberExt;
 
-    use crate::session::{Session, VcsKind};
+    use crate::sessions::{Session, VcsKind};
 
     fn test_session() -> Session {
         Session::new("diff-test".to_string(), "fyah", "0.1.0", VcsKind::Git, None)

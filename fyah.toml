@@ -12,10 +12,10 @@ models = { "nemotron" = { name = "nvidia/nemotron-3.5-lightning:free", temperatu
 
 
 [providers.ollama]
-url = "http://127.0.0.1:11434/v1/chat/completions"
+url = "http://127.0.0.1:11434/v1/chat"
 api_key = "ollama"
 format = "openai"
-models = { "qwen25" = { name = "qwen2.5-coder:14b", temperature = 0.3 } }
+models = { "deepseek" = { name = "deepseek-r1:8b", temperature = 0.3 } }
 
 [providers.mistral]
 url = "https://api.mistral.ai/v1/chat/completions"
@@ -24,43 +24,25 @@ format = "openai"
 models = { "medium" = { name = "mistral-medium-3-5", temperature = 0.3 } }
 
 
-
-[agents.coder]
-system_prompt = "You are Fyah, an AI coding assistant."
+[agents.planer]
+system_prompt = "You are Fyah, an AI coding assistant. You are in plan mode"
 max_iterations = 25
 provider = "ollama"
-model = "qwen25"
-tools = []
+model = "deepseek"
+tools = ["read"]
 max_concurrent_tools = 1
 
 [agents.default]
-system_prompt = "You are Fyah, an AI coding assistant. You are in plan mode"
+system_prompt = "You are Fyah, an AI coding assistant"
 provider = "ollama"
-model = "qwen25"
+model = "deepseek"
 max_iterations = 25
-tools = []
-max_concurrent_tools = 10
-on_input = "queue"
-tools_on_input = "queue"
-tools_interrupt_strategy = "keep"
-# tool_execution = "async"  # sequential (default) | async
-
+tools = ["read", "write"]
+max_concurrent_tools = 5
 
 [runtime]
 ctrl_c = "immediate"
 
-
-[[tools]]
-name = "read_file"
-description = "Read a file from disk"
-executable = "execute_read_file"
-parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = [
-    "path",
-] }
-
-[executables.execute_read_file]
-type = "builtin"
-builtin = "read_file"
 
 [executables.session_start]
 type = "command"
@@ -72,233 +54,7 @@ type = "command"
 command = "./exes/session_end.sh"
 fail_mode = "message"
 
-[executables.step_before]
-type = "command"
-command = "./exes/step_before.sh"
-fail_mode = "message"
-
-[executables.step_after]
-type = "command"
-command = "./exes/step_after.sh"
-fail_mode = "message"
-
-[executables.verify_done]
-type = "command"
-command = "./exes/verify_done.sh"
-fail_mode = "message"
-
-[executables.pre_prompt]
-type = "command"
-command = "./exes/pre_prompt.sh"
-fail_mode = "message"
-
-[executables.pre_tool]
-type = "command"
-command = "./exes/pre_tool.sh"
-fail_mode = "message"
-
-[executables.post_tool]
-type = "command"
-command = "./exes/post_tool.sh"
-fail_mode = "message"
-
-[executables.on_error]
-type = "command"
-command = "./exes/on_error.sh"
-fail_mode = "message"
-
 [executables.context]
 type = "command"
 command = "./exes/context.sh"
 fail_mode = "message"
-
-[executables.loop_guard]
-type = "command"
-command = "./exes/loop_guard.sh"
-fail_mode = "message"
-
-# ============================================================================
-# HOOKS REFERENCE
-# ----------------------------------------------------------------------------
-# One hook per slot: `{ executable = "<executables key>" }`.
-# The harness builds the input (stdin JSON for `command` executables) and
-# interprets the stdout JSON as a decision. Empty stdout means approval
-# (`Continue` / `Done`). A hook whose executable is missing from
-# `[executables.*]` is skipped; a hook whose executable fails is mapped to an
-# outcome via its `fail_mode` (fail-open `message` vs fail-closed
-# `abortstep` / `abortworkflow`).
-#
-# --- Executables -----------------------------------------------------------
-# [executables.<key>]
-# type = "builtin" | "command" | "wasm" | "plugin"
-# timeout_secs = <int, optional>         # command: kill + fail after N s
-# fail_mode = "message" | "abortstep" | "abortworkflow"   # default: message
-#   Values are lowercase, no underscore (FailMode is rename_all="lowercase"):
-#   "abort_step" / "abort_workflow" are hook *outcomes*, not fail_mode values.
-# # type = "builtin": builtin = "noop" | "read_file" | "write_file"
-# #                             | "prune_outputs" | "audit_append" | "budget_guard"
-# #   Tool builtins are read_file + write_file only; there is no shell tool.
-# #   Runs in-process with direct state access. Unknown names surface as an
-# #   error so `fail_mode` decides fail-open vs fail-closed.
-# # type = "command": command = "./hooks/audit.sh"  # + optional args = [...]
-# #   Receives the slot input as stdin JSON, returns decision JSON on stdout.
-# # type = "wasm":   path = "./plugins/x.wasm"      # + optional function = "..."
-# # type = "plugin": name = "mcp__server__tool"     # + optional function = "..."
-# #   wasm/plugin are not implemented yet and fall back per `fail_mode`.
-#
-# --- Workflow hooks: [workflows.<name>.hooks] -------------------------------
-# session_start: once per session, before the workflow runs.
-#   in:  { session_id, workflow, vcs_rev? }
-#   out: {"decision":"continue"} | {"decision":"abort","error":{"code":"aborted","scope":"session","detail":"..."}}
-# session_end: once per session, after the workflow finishes (audit only).
-#   in:  { session_id, workflow, success, n_messages }
-#   out: {"decision":"continue"}
-#
-# --- Step hooks: [workflows.<name>.steps.<step>] -----------------------------
-# before / after: around a single step (`agent = ...` or `command = ...`).
-#   in:  { workflow, step, session_id }
-#   out: {"decision":"continue"} | {"decision":"abort_step",...} | {"decision":"abort_workflow",...}
-#   error shape: {"code":"aborted","scope":"step"|"workflow","detail":"..."}
-#
-# --- Agent hooks: [agents.<name>.hooks] --------------------------------------
-# Execution order per iteration: limits -> context policy -> context custom
-#   -> pre_prompt -> LLM -> verify_done. Tool calls wrap with
-#   pre_tool / post_tool; failures route via on_error (phase="request").
-# REMOVED (no back-compat): turn_start/turn_end deleted; use
-#   [agents.<name>.context] strategy="custom" for dynamic compaction.
-# context: custom compaction (strategy = "custom" + executable in context table).
-#   in:  { agent, iteration, n_messages, token_estimate, tool_output_bytes,
-#          max_tokens?, max_messages?, max_output_bytes? }
-#   out: {"decision":"continue"} | {"decision":"prune_to","keep":N}
-#      | {"decision":"truncate_outputs","max_bytes":N}
-#      | {"decision":"drop_tool_results","ids":[...]} | {"decision":"abort",...}
-# verify_done: when the model makes no tool calls (claims to be done).
-#   A NotDone verdict is injected as a user message and the loop continues.
-#   in:  { agent, iteration, last_text?, n_messages }
-#   out: {"decision":"done"} | {"decision":"not_done","error":{"code":"check_failed","check":"...","detail":"..."}}
-# pre_prompt: before the LLM request.
-#   in:  { agent, iteration, n_messages }
-#   out: {"decision":"continue"}
-#      | {"decision":"inject","mode":"ephemeral"|"persistent","content":"..."}
-#      | {"decision":"abort",...}
-# pre_tool: before a single tool call.
-#   in:  { agent, call_id, tool, args }
-#   out: {"decision":"continue"} | {"decision":"deny","error":{"code":"denied","rule":"...","detail":"..."}}
-# post_tool: after a single tool result.
-#   in:  { agent, call_id, tool, output_len }
-#   out: {"decision":"continue"} | {"decision":"drop_result"}
-# on_error: on LLM/tool errors.
-#   in:  { agent, phase, error }
-#   out: {"decision":"continue"} | {"decision":"abort",...}
-#
-# --- Context: [agents.<name>.context] ------------------------------------------
-# strategy = "null" | "slidingwindow" | "budget" | "custom"   # default: "null"
-# max_messages = <int, optional>      # slidingwindow: keep newest N messages
-# max_tokens = <int, optional>        # budget: prune when estimate exceeds N
-# max_output_bytes = <int, optional>  # budget: truncate tool outputs past N bytes
-# executable = "<key>"                # required iff strategy = "custom"
-# Enforced every iteration after the limits gate; deterministic policies need
-# no extra LLM call. Runtime failures follow the executable's own fail_mode.
-# Full inventory: context/hooks.md.
-#
-# --- Limits: [agents.<name>.limits] --------------------------------------------
-# All optional; absent means unlimited. Checked first each iteration, before
-# verify_done ("can we keep going" wins over "are we done").
-# max_total_tokens_est = <int>   # cumulative heuristic estimate
-# max_tool_calls_total = <int>   # completed + in-flight tool calls
-# max_wall_time_secs = <int>     # wall-clock per agent loop
-# max_consecutive_errors = <int> # request/tool error streak
-# max_rpm = <int, >= 1>          # LLM requests per rolling 60s (throttled)
-# context_headroom_pct = <1-100> # stop when estimate breaches pct of
-#                                # max_tokens and strategy = "null" (unmanaged)
-# max_stall_turns = <int>        # turns without message growth
-# max_output_tokens_per_turn = <int>  # clamps the outgoing request cap
-# executable = "<key>"           # custom guard; in: full meter snapshot,
-#                                # out: continue | stop{reason}
-# NOTE: max_cost_usd is deferred (cost meter not implemented); setting it
-# fails validation. max_iterations stays on the agent itself.
-#
-# --- Worked example (uncomment to enable) ------------------------------------
-# [executables.audit_sh]
-# type = "command"
-# command = "./hooks/audit.sh"
-# fail_mode = "message"
-#
-# [workflows.default.hooks]
-# session_start = { executable = "audit_sh" }
-# session_end = { executable = "audit_sh" }
-#
-# [workflows.default.steps.plan]
-# before = { executable = "audit_sh" }
-# after = { executable = "audit_sh" }
-#
-# [agents.coder.hooks]
-# verify_done = { executable = "audit_sh" }
-# pre_prompt = { executable = "audit_sh" }
-# pre_tool = { executable = "audit_sh" }
-# post_tool = { executable = "audit_sh" }
-# on_error = { executable = "audit_sh" }
-#
-# [agents.coder.context]
-# strategy = "slidingwindow"
-# max_messages = 50
-#
-# [agents.coder.context]
-# strategy = "custom"
-# executable = "audit_sh"
-#
-# [agents.coder.limits]
-# max_total_tokens_est = 200000
-# max_tool_calls_total = 100
-# max_wall_time_secs = 600
-# executable = "audit_sh"
-
-
-[workflows.default]
-initial = "plan"
-
-[workflows.default.hooks]
-session_start = { executable = "session_start" }
-session_end = { executable = "session_end" }
-
-[workflows.default.steps.plan]
-agent = "default"
-on_success = "implement"
-on_failure = "plan"
-before = { executable = "step_before" }
-after = { executable = "step_after" }
-
-[workflows.default.steps.implement]
-agent = "coder"
-on_success = "validate"
-on_failure = "plan"
-before = { executable = "step_before" }
-after = { executable = "step_after" }
-
-[workflows.default.steps.validate]
-command = "cargo test"
-on_success = "commit"
-on_failure = "implement"
-before = { executable = "step_before" }
-after = { executable = "step_after" }
-
-[workflows.default.steps.commit]
-command = "git diff"
-on_success = "done"
-on_failure = "implement"
-before = { executable = "step_before" }
-after = { executable = "step_after" }
-
-[agents.coder.hooks]
-pre_prompt = { executable = "pre_prompt" }
-pre_tool = { executable = "pre_tool" }
-post_tool = { executable = "post_tool" }
-on_error = { executable = "on_error" }
-verify_done = { executable = "verify_done" }
-
-[agents.default.hooks]
-pre_prompt = { executable = "pre_prompt" }
-pre_tool = { executable = "pre_tool" }
-post_tool = { executable = "post_tool" }
-on_error = { executable = "on_error" }
-verify_done = { executable = "verify_done" }

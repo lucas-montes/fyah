@@ -1,25 +1,22 @@
-pub mod chat;
-pub mod responses;
-
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::Tool;
+use crate::prompt::Tool;
 
 /// Tool declaration shared by both OpenAI wire formats (chat completions and
 /// the Responses API).
 #[derive(Serialize)]
 pub struct OpenAiTool<'a> {
     #[serde(rename = "type")]
-    pub tool_type: &'static str,
-    pub function: OpenAiFunction<'a>,
+    tool_type: &'static str,
+    function: OpenAiFunction<'a>,
 }
 
 #[derive(Serialize)]
 pub struct OpenAiFunction<'a> {
-    pub name: &'a str,
-    pub description: &'a str,
-    pub parameters: &'a Value,
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Value,
 }
 
 impl<'a> From<&'a Tool> for OpenAiTool<'a> {
