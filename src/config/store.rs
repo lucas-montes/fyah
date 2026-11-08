@@ -1,4 +1,4 @@
-use std::{ sync::Arc};
+use std::sync::Arc;
 
 use arc_swap::Guard;
 

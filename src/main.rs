@@ -2,7 +2,7 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{ Parser, Args};
+use clap::Parser;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -11,30 +11,23 @@ use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-
-mod config;
-mod traces;
-mod ui;
-mod fs_watcher;
-mod runner;
-mod sessions;
 mod client;
+mod config;
+mod fs_watcher;
 mod prompt;
 mod providers;
+mod runner;
+mod sessions;
+mod traces;
+mod ui;
 
-use ui::{Inbound, spawn_stdin, Outbound};
-use fs_watcher::FsWatcher;
 use config::{Config, ConfigStore};
+use fs_watcher::FsWatcher;
+use ui::{Inbound, Outbound, spawn_stdin};
 
-// use crate::hooks::RealHookRunner;
-// use crate::runtime::start_session;
-
-// use {
-//     client::Client,
-//     communication::{Command, Inbound},
-//     config::ConfigStore,
-//     fs_watcher::FsWatcher,
-// };
+use crate::sessions::Session;
+use crate::sessions::VcsKind;
+use crate::sessions::current_git_revision;
 
 #[derive(Debug, Clone, PartialEq, Default, clap::ValueEnum)]
 enum CtrlCMode {
@@ -47,27 +40,15 @@ enum CtrlCMode {
 #[command(name = "Fyah", version, about)]
 #[command(about = "Yet another harness")]
 pub struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Debug, Parser)]
-enum Commands {
-    // Launch the app as a daemon with an API server
-    Server,
-
-    /// Launch the app as a regular cli with a REPL
-    Cli(CliArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct CliArgs {
     #[arg(short, long, default_value = "fyah.toml")]
     config: PathBuf,
     #[arg(short = 'm', long, default_value = "immediate")]
     ctrl_c: CtrlCMode,
     #[arg(short = 'd', long, default_value = "2000")]
     debounce: NonZeroU64,
+    /// Which `[agents.*]` entry to run.
+    #[arg(long, default_value = "default")]
+    agent: String,
 }
 
 fn start_loggers() -> WorkerGuard {
@@ -106,14 +87,7 @@ async fn main() {
     let _guard = start_loggers();
     let cli = Cli::parse();
 
-    let cli = match cli.command {
-        Commands::Server => {
-            panic!("Server mode is not yet implemented");
-        }
-        Commands::Cli(args) => args,
-    };
-
-    tracing::info!(selected_workflow=%cli.workflow,
+    tracing::info!(
         cli_config=%cli.config.display(),
         debounce=%cli.debounce,
         ctrl_c_mode=?cli.ctrl_c,
@@ -121,6 +95,7 @@ async fn main() {
     );
 
     let config_path = cli.config;
+
     let config = match Config::load(&config_path).and_then(Config::validate) {
         Ok(c) => c,
         Err(e) => {
@@ -129,8 +104,8 @@ async fn main() {
         }
     };
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+    let (user_input_tx, mut user_input_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
     let (user_output_tx, user_output_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
 
     tracing::debug!("Channels spawned for shutdown, user input, and user output");
@@ -155,23 +130,31 @@ async fn main() {
 
     spawn_stdin(user_input_tx, user_output_rx);
     tracing::debug!("Spawning stdin source");
-    // let client = Client::default();
-    // let runner = RealHookRunner;
 
-    // if let Err(e) = start_session(
-    //     client,
-    //     runner,
-    //     cli.workflow,
-    //     view,
-    //     shutdown_rx,
-    //     user_input_rx,
-    //     user_output_tx.into(),
-    // )
-    // .await
-    // {
-    //     tracing::error!(error = %e, "Error during session");
-    //     std::process::exit(1);
-    // }
+    let client = client::Client::default();
+    let mut messages = Vec::new();
+    let session = Session::new(
+        uuid::Uuid::now_v7().to_string(),
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        VcsKind::Git,
+        current_git_revision(),
+    );
+    if let Err(reason) = runner::run_agent_loop(
+        &cli.agent,
+        session,
+        &client,
+        &view,
+        &mut messages,
+        &mut user_input_rx,
+        &user_output_tx.into(),
+    )
+    .await
+    {
+        tracing::info!(?reason, "agent stopped");
+    } else {
+        tracing::info!("agent loop exited successfully");
+    };
 }
 
 async fn listen_to_signals(
