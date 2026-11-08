@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall};
 use super::tool::OpenAiTool;
+use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall};
 
 #[derive(Serialize)]
 pub struct OpenAiRequest<'a> {
@@ -100,7 +100,7 @@ impl<'c, 'a> From<&'c Conversation<'a>> for OpenAiRequest<'c> {
         OpenAiRequest {
             model: conv.model(),
             messages,
-            tools: conv.tools().iter().map(OpenAiTool::from).collect(),
+            tools: conv.tools().iter().copied().map(OpenAiTool::from).collect(),
             temperature: conv.temperature(),
             max_tokens: conv.max_tokens(),
             stream: false,
@@ -108,13 +108,6 @@ impl<'c, 'a> From<&'c Conversation<'a>> for OpenAiRequest<'c> {
     }
 }
 
-pub fn attach_body<'c>(
-    req: reqwest::RequestBuilder,
-    conv: &Conversation<'c>,
-) -> reqwest::RequestBuilder {
-    let body = OpenAiRequest::from(conv);
-    req.json(&body)
-}
 
 // ── Response (owned; parsed from network bytes) ──
 
@@ -133,7 +126,6 @@ pub struct OpenAiChoice {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum OpenAiMessageOut {
     User {

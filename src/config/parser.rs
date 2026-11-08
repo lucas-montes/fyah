@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -126,15 +126,43 @@ pub struct Agent {
     model: String,
     #[serde(default)]
     system_prompt: Option<String>,
-    max_iterations: NonZeroUsize,
     #[serde(default)]
     tools: Vec<String>,
     max_concurrent_tools: NonZeroUsize,
+    max_iterations: NonZeroUsize,
+    max_tokens: Option<NonZeroUsize>,
+    done_check: Option<String>,
+    context_strategy: Option<String>,
+}
+
+impl Agent {
+    /// Key into `[providers.*]`. Resolving this against a `Config` that has
+    /// not passed [`Config::validate`] may legitimately miss.
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Key into the chosen provider's `models` table.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+
+    pub fn max_iterations(&self) -> NonZeroUsize {
+        self.max_iterations
+    }
+
+    /// Keys into the top-level `[tools.*]` table.
+    pub fn tools(&self) -> &[String] {
+        &self.tools
+    }
 }
 
 #[derive(Debug, Deserialize, Valuable, Default)]
 pub struct Tool {
-    name: String,
     description: String,
     executable: String,
     #[valuable(skip)]
@@ -142,9 +170,6 @@ pub struct Tool {
 }
 
 impl Tool {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
     pub fn description(&self) -> &str {
         &self.description
     }
@@ -156,21 +181,10 @@ impl Tool {
     }
 }
 
-/// What to do when an executable fails or times out.
-#[derive(Debug, Deserialize, Default, Valuable)]
-#[serde(rename_all = "lowercase")]
-pub enum FailMode {
-    #[default]
-    Message,
-    AbortStep,
-}
-
 /// How to run something, either a tool or a hook
 #[derive(Debug, Deserialize, Valuable)]
 pub struct Executable {
     timeout_secs: Option<NonZeroU64>,
-    #[serde(default)]
-    fail_mode: FailMode,
     #[serde(flatten)]
     params: ExecutableParams,
 }
@@ -178,10 +192,6 @@ pub struct Executable {
 impl Executable {
     pub fn timeout_secs(&self) -> Option<NonZeroU64> {
         self.timeout_secs
-    }
-
-    pub fn fail_mode(&self) -> &FailMode {
-        &self.fail_mode
     }
 
     pub fn params(&self) -> &ExecutableParams {
@@ -193,26 +203,8 @@ impl Executable {
 #[derive(Debug, Deserialize, Valuable)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ExecutableParams {
-    Builtin(BuiltInExecutable),
-    Command {
-        command: String,
-        args: Option<Vec<String>>,
-    },
-    Wasm {
-        path: String,
-        function: Option<String>,
-    },
-    Plugin {
-        name: String,
-        function: Option<String>,
-    },
-}
-
-#[derive(Debug, Deserialize, Valuable)]
-#[serde(rename_all = "lowercase")]
-pub enum BuiltInExecutable {
-    Read,
-    Write,
+    Command { command: String },
+    Wasm { path: PathBuf, function: String },
 }
 
 /// Raw, fully-parsed configuration.
@@ -223,7 +215,7 @@ pub struct Config {
     #[serde(default)]
     agents: HashMap<String, Agent>,
     #[serde(default)]
-    tools: Vec<Tool>,
+    tools: HashMap<String, Tool>,
     #[serde(default)]
     executables: HashMap<String, Executable>,
 }
@@ -238,6 +230,26 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Look up an agent by its `[agents.*]` key.
+    pub fn agent(&self, name: &str) -> Option<&Agent> {
+        self.agents.get(name)
+    }
+
+    /// Look up a provider by its `[providers.*]` key.
+    pub fn provider(&self, name: &str) -> Option<&Provider> {
+        self.providers.get(name)
+    }
+
+    /// Look up a tool by its `[tools.*]` key.
+    pub fn tool(&self, name: &str) -> Option<&Tool> {
+        self.tools.get(name)
+    }
+
+    /// Look up an executable by its `[executables.*]` key.
+    pub fn executable(&self, name: &str) -> Option<&Executable> {
+        self.executables.get(name)
     }
 
     pub fn validate(self) -> Result<Self, Error> {
@@ -267,11 +279,9 @@ impl Config {
 fn validate_agents(
     agents: &HashMap<String, Agent>,
     providers: &HashMap<String, Provider>,
-    tools: &[Tool],
+    tools: &HashMap<String, Tool>,
     errors: &mut Vec<ValidationError>,
 ) {
-    let tool_names: HashSet<_> = tools.iter().map(|tool| tool.name()).collect();
-
     for (agent_name, agent) in agents {
         if let Some(provider) = providers.get(&agent.provider) {
             if provider.get_model(&agent.model).is_none() {
@@ -282,7 +292,7 @@ fn validate_agents(
         }
 
         for tool_name in &agent.tools {
-            if !tool_names.contains(tool_name.as_str()) {
+            if !tools.contains_key(tool_name.as_str()) {
                 errors.push(ValidationError::tool(agent_name, tool_name));
             }
         }
@@ -291,18 +301,13 @@ fn validate_agents(
 
 fn validate_tools(
     agents: &HashMap<String, Agent>,
-    tools: &[Tool],
+    tools: &HashMap<String, Tool>,
     executables: &HashMap<String, Executable>,
     errors: &mut Vec<ValidationError>,
 ) {
-    let known_tools: HashMap<_, _> = tools
-        .iter()
-        .map(|tool| (tool.name().to_string(), tool))
-        .collect();
-
     for agent in agents.values() {
         for tool_name in &agent.tools {
-            let Some(tool) = known_tools.get(tool_name) else {
+            let Some(tool) = tools.get(tool_name) else {
                 continue;
             };
 
@@ -317,7 +322,7 @@ fn validate_tools(
 }
 
 fn validate_executables(
-    tools: &[Tool],
+    tools: &HashMap<String, Tool>,
     executables: &HashMap<String, Executable>,
     errors: &mut Vec<ValidationError>,
 ) {
@@ -325,14 +330,37 @@ fn validate_executables(
         return;
     }
 
-    for tool in tools {
+    for (name, tool) in tools {
         if !executables.contains_key(tool.executable()) {
-            errors.push(ValidationError::tool_executable(
-                &tool.name,
-                tool.executable(),
-            ));
+            errors.push(ValidationError::tool_executable(name, tool.executable()));
         }
     }
+}
+
+/// Vendor-specific optional headers. Purely additive metadata about *who*
+/// the provider is — never consulted for request/response shape, that's
+/// `WireFormat`'s job — so an unset field here just means "don't send that
+/// header," not an error.
+#[derive(Debug, Deserialize, Valuable)]
+#[serde(tag = "name", rename_all = "lowercase")]
+pub enum Vendor {
+    OpenAi {
+        #[serde(default)]
+        organization: Option<String>,
+        #[serde(default)]
+        project: Option<String>,
+    },
+    Anthropic {
+        #[serde(default)]
+        workspace_id: Option<String>,
+        version: String,
+    },
+    OpenRouter {
+        #[serde(default)]
+        http_referer: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+    },
 }
 
 /// Information about the provider for the given models
@@ -343,6 +371,12 @@ pub struct Provider {
     /// Wire format to use for this provider. Defaults to `WireFormat::OpenAi`.
     #[serde(default)]
     format: WireFormat,
+    /// Who the request is going to, for vendor-specific optional headers.
+    /// Orthogonal to `format`: the same wire format can serve multiple
+    /// vendors (OpenRouter speaks the `OpenAi` format but isn't OpenAI),
+    /// so this never participates in request/response (de)serialization.
+    #[serde(default)]
+    vendor: Option<Vendor>,
     #[serde(default)]
     models: HashMap<String, Model>,
 }
@@ -365,6 +399,10 @@ impl Provider {
     pub fn format(&self) -> &WireFormat {
         &self.format
     }
+
+    pub fn vendor(&self) -> Option<&Vendor> {
+        self.vendor.as_ref()
+    }
 }
 
 /// Format of the requests to use to send requests to the provider.
@@ -373,14 +411,29 @@ impl Provider {
 pub enum WireFormat {
     #[default]
     OpenAi,
-    OpenAiResponses,
     Anthropic,
 }
 
 /// Information about a model that can be used with a provider.
-#[derive(Debug, Clone, Deserialize, Valuable)]
+#[derive(Debug, Deserialize, Valuable)]
 pub struct Model {
     name: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+}
+
+impl Model {
+    /// The provider-side model identifier (e.g. `"gpt-4o"`), distinct from
+    /// the `[providers.*.models.*]` key used to reference it from an agent.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    pub fn max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+    }
 }

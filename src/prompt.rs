@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+use crate::config::Tool;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
@@ -37,35 +38,6 @@ impl Message {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Tool {
-    name: String,
-    description: String,
-    parameters: Value,
-}
-
-impl Tool {
-    pub fn new(name: String, description: String, parameters: Value) -> Self {
-        Self {
-            name,
-            description,
-            parameters,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    pub fn parameters(&self) -> &Value {
-        &self.parameters
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     id: String,
     name: String,
@@ -108,18 +80,6 @@ impl AssistantTurn {
         }
     }
 
-    pub fn content(&self) -> Option<&str> {
-        self.content.as_deref()
-    }
-
-    pub fn tool_calls(&self) -> &[ToolCall] {
-        &self.tool_calls
-    }
-
-    pub fn tool_calls_empty(&self) -> bool {
-        self.tool_calls.is_empty()
-    }
-
     pub fn into_parts(self) -> (Option<String>, Vec<ToolCall>) {
         (self.content, self.tool_calls)
     }
@@ -131,8 +91,15 @@ pub struct Conversation<'a> {
     system: Option<&'a str>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
-    messages: &'a Vec<Message>,
-    tools: &'a [Tool],
+    messages: &'a [Message],
+    /// Borrowed `(name, Tool)` pairs, not an owned `&'a [Tool]`: an agent's
+    /// tools are a named subset of the config's global `[tools.*]` table,
+    /// not a contiguous slice of it, so building this is one small `Vec`
+    /// of pointers — never a clone of a tool's description/schema. The name
+    /// rides along because `Tool` no longer stores it (the `[tools.*]` key
+    /// is the name) and providers need it to build the wire-format
+    /// declaration.
+    tools: &'a [(&'a str, &'a Tool)],
 }
 
 impl<'a> Conversation<'a> {
@@ -141,8 +108,8 @@ impl<'a> Conversation<'a> {
         system: Option<&'a str>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
-        messages: &'a Vec<Message>,
-        tools: &'a [Tool],
+        messages: &'a [Message],
+        tools: &'a [(&'a str, &'a Tool)],
     ) -> Self {
         Self {
             model,
@@ -174,7 +141,7 @@ impl<'a> Conversation<'a> {
         self.messages
     }
 
-    pub fn tools(&self) -> &[Tool] {
+    pub fn tools(&self) -> &[(&'a str, &'a Tool)] {
         self.tools
     }
 }

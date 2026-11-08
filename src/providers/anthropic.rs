@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::prompt::{AssistantTurn, Conversation, Message, Tool, ToolCall};
+use crate::config::Tool;
+use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall};
 
 /// Required by the Anthropic API; there is no server default.
 const MAX_TOKENS: u32 = 4096;
@@ -53,10 +54,10 @@ pub struct AnthropicTool<'a> {
     input_schema: &'a Value,
 }
 
-impl<'a> From<&'a Tool> for AnthropicTool<'a> {
-    fn from(t: &'a Tool) -> Self {
+impl<'a> From<(&'a str, &'a Tool)> for AnthropicTool<'a> {
+    fn from((name, t): (&'a str, &'a Tool)) -> Self {
         AnthropicTool {
-            name: t.name(),
+            name,
             description: t.description(),
             input_schema: t.parameters(),
         }
@@ -134,33 +135,28 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
             max_tokens: conv.max_tokens().unwrap_or(MAX_TOKENS),
             system: conv.system(),
             messages,
-            tools: conv.tools().iter().map(AnthropicTool::from).collect(),
+            tools: conv
+                .tools()
+                .iter()
+                .copied()
+                .map(AnthropicTool::from)
+                .collect(),
             temperature: conv.temperature(),
             stream: false,
         }
     }
 }
 
-pub fn attach_body<'c>(
-    req: reqwest::RequestBuilder,
-    conv: &Conversation<'c>,
-) -> reqwest::RequestBuilder {
-    let body = AnthropicRequest::from(conv);
-    req.json(&body)
-}
-
 // ── Response (owned; parsed from network bytes) ──
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct AnthropicResponse {
-    pub content: Vec<AnthropicBlockOut>,
+    content: Vec<AnthropicBlockOut>,
     #[serde(default)]
-    pub stop_reason: Option<String>,
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicBlockOut {
     Text {
