@@ -6,7 +6,7 @@ use reqwest::{Method, RequestBuilder};
 use crate::{
     config::{Agent, Model, Provider, Tool, Vendor, WireFormat},
     prompt::{AssistantTurn, Conversation, Message},
-    providers::{anthropic, openai},
+    providers::{anthropic::{self, AnthropicRequest}, openai::{self, chat::OpenAiRequest}},
 };
 
 #[derive(Debug)]
@@ -133,11 +133,11 @@ fn attach_body(
 ) -> RequestBuilder {
     match format {
         WireFormat::OpenAi => {
-            let body = openai::chat::attach_body(conv);
+            let body = OpenAiRequest::from(conv);
             req.json(&body)
         }
         WireFormat::Anthropic => {
-            let body = anthropic::attach_body(conv);
+            let body = AnthropicRequest::from(conv);
             req.json(&body)
         }
     }

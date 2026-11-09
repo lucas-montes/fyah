@@ -47,14 +47,11 @@ ctrl_c = "immediate"
 [executables.session_start]
 type = "command"
 command = "./exes/session_start.sh"
-fail_mode = "message"
 
 [executables.session_end]
 type = "command"
 command = "./exes/session_end.sh"
-fail_mode = "message"
 
 [executables.context]
 type = "command"
 command = "./exes/context.sh"
-fail_mode = "message"

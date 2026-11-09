@@ -10,23 +10,21 @@
     sce.url = "github:crocoder-dev/shared-context-engineering";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      crane,
-      rust-overlay,
-      flake-utils,
-      sce,
-      ...
-    }:
+  outputs = {
+    self,
+    nixpkgs,
+    crane,
+    rust-overlay,
+    flake-utils,
+    sce,
+    ...
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
+      system: let
         lib = nixpkgs.lib;
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ rust-overlay.overlays.default ];
+          overlays = [rust-overlay.overlays.default];
         };
 
         rust = pkgs.rust-bin.stable.latest.default.override {
@@ -45,16 +43,19 @@
 
         commonArgs = {
           pname = "fyah";
-          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+          version = (fromTOML (builtins.readFile ./Cargo.toml)).package.version;
           src = fyahSrc;
         };
 
         # Model served by the dev app and baked into the e2e VM. Flip to
         # [ "qwen2.5:1.5b" ] for the bigger instruct model (pin its hash in
         # nix/ollama-models.nix after the first build).
-        ollamaModels = [ "qwen2.5:0.5b" ];
+        ollamaModels = ["qwen2.5:0.5b"];
         rocmEnabled = system == "x86_64-linux";
-        ollamaPkg = if rocmEnabled then pkgs.ollama-rocm else pkgs.ollama;
+        ollamaPkg =
+          if rocmEnabled
+          then pkgs.ollama-rocm
+          else pkgs.ollama;
         ollamaEnv = lib.optionalString rocmEnabled ''
           export OLLAMA_IGPU_ENABLE="''${OLLAMA_IGPU_ENABLE:-1}"
         '';
@@ -67,15 +68,16 @@
 
         fyahDeps = craneLib.buildDepsOnly commonArgs;
 
-        fyah = craneLib.buildPackage (commonArgs // { cargoArtifacts = fyahDeps; });
-      in
-      {
-        packages = {
-          inherit fyah;
-          default = fyah;
-        } // lib.optionalAttrs rocmEnabled {
-          ollama-rocm = pkgs.ollama-rocm;
-        };
+        fyah = craneLib.buildPackage (commonArgs // {cargoArtifacts = fyahDeps;});
+      in {
+        packages =
+          {
+            inherit fyah;
+            default = fyah;
+          }
+          // lib.optionalAttrs rocmEnabled {
+            ollama-rocm = pkgs.ollama-rocm;
+          };
 
         checks = {
           e2e-smoke = import ./nix/tests.nix {
@@ -84,30 +86,34 @@
 
           # Independently cached lint/test runs over the same dependency
           # artifact.
-          fyah-clippy = craneLib.cargoClippy (commonArgs // {
-            cargoArtifacts = fyahDeps;
-            cargoClippyExtraArgs = "--all-targets";
-          });
+          fyah-clippy = craneLib.cargoClippy (commonArgs
+            // {
+              cargoArtifacts = fyahDeps;
+              cargoClippyExtraArgs = "--all-targets";
+            });
 
-          fyah-test = craneLib.cargoTest (commonArgs // {
-            cargoArtifacts = fyahDeps;
-          });
+          fyah-test = craneLib.cargoTest (commonArgs
+            // {
+              cargoArtifacts = fyahDeps;
+            });
         };
 
         devShells.default = pkgs.mkShell {
           name = "fyah";
-          buildInputs = [
-            sce.packages.${system}.default
-            rust
-            ollamaPkg
-            pkgs.bazel
-            pkgs.buildifier
-          ] ++ lib.optionals rocmEnabled [
-            pkgs.rocmPackages.rocminfo
-            pkgs.amdgpu_top
-          ];
+          buildInputs =
+            [
+              sce.packages.${system}.default
+              rust
+              ollamaPkg
+              pkgs.bazel
+              pkgs.buildifier
+            ]
+            ++ lib.optionals rocmEnabled [
+              pkgs.rocmPackages.rocminfo
+              pkgs.amdgpu_top
+            ];
           shellHook = ollamaEnv;
-          RUSTFLAGS="--cfg tracing_unstable";
+          RUSTFLAGS = "--cfg tracing_unstable";
         };
 
         apps = {
