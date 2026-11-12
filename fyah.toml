@@ -29,7 +29,7 @@ system_prompt = "You are Fyah, an AI coding assistant. You are in plan mode"
 max_iterations = 25
 provider = "ollama"
 model = "deepseek"
-tools = ["read"]
+tools = []
 max_concurrent_tools = 1
 
 [agents.default]
@@ -37,7 +37,7 @@ system_prompt = "You are Fyah, an AI coding assistant"
 provider = "ollama"
 model = "deepseek"
 max_iterations = 25
-tools = ["read", "write"]
+tools = []
 max_concurrent_tools = 5
 
 [runtime]
@@ -55,3 +55,10 @@ command = "./exes/session_end.sh"
 [executables.context]
 type = "command"
 command = "./exes/context.sh"
+
+[tools.read_file]
+description = "Read a file from disk"
+executable = "session_start"
+parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = [
+    "path",
+] }
