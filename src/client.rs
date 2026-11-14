@@ -1,12 +1,15 @@
-use std::fmt::{Debug, Display};
+use std::fmt::Display;
 
 use futures::TryFutureExt;
 use reqwest::{Method, RequestBuilder};
 
 use crate::{
-    config::{Agent, Model, Provider, Tool, Vendor, WireFormat},
-    prompt::{AssistantTurn, Conversation, Message},
-    providers::{anthropic::{self, AnthropicRequest}, openai::{self, chat::OpenAiRequest}},
+    config::{Provider, Vendor, WireFormat},
+    prompt::{AssistantTurn, Conversation},
+    providers::{
+        anthropic::{self, AnthropicRequest},
+        openai::{self, chat::OpenAiRequest},
+    },
 };
 
 #[derive(Debug)]
@@ -32,40 +35,63 @@ impl Display for Error {
     }
 }
 
+/// A request with every borrow from the config snapshot already folded into
+/// owned data, so it can be handed to `tokio::spawn` and flown in the
+/// background while the agent loop stays free to answer the user.
+///
+/// This split is what makes the loop's `select!` possible: `prepare` is the
+/// only part that touches the snapshot, and it is synchronous.
+pub struct PreparedRequest {
+    request: RequestBuilder,
+    parse: fn(&[u8]) -> Result<AssistantTurn, serde_json::Error>,
+}
+
+impl PreparedRequest {
+    //TODO: we need a retry mechanism with backoff, jitter and all
+    pub fn send(self) -> impl Future<Output = Result<AssistantTurn, Error>> {
+        self.request
+            .send()
+            .map_err(|e| Error::RequestFailed(e.to_string()))
+            .and_then(|response| {
+                futures::future::ready(response.error_for_status().map_err(|e| {
+                    Error::Api {
+                        code: e
+                            .status()
+                            .map_or_else(|| "unknown".to_string(), |s| s.to_string()),
+                        message: e.to_string(),
+                    }
+                }))
+                .and_then(|resp| resp.bytes().map_err(Error::ParseRaw))
+            })
+            .and_then(move |bytes| {
+                futures::future::ready((self.parse)(bytes.as_ref()).map_err(Error::Parse))
+            })
+    }
+}
+
 /// Abstraction over LLM chat completion providers.
 pub trait LlmClient: std::fmt::Debug {
     fn create_request(&self, method: reqwest::Method, url: &str) -> RequestBuilder;
 
-    fn request_turn(
-        &self,
-        provider: &Provider,
-        conversation: &Conversation<'_>,
-    ) -> impl Future<Output = Result<AssistantTurn, Error>> {
-        tracing::debug!(conversation = ?conversation, "sending request to provider");
+    /// Folds `provider` + `conversation` into an owned, `'static` request.
+    /// Borrows end when this returns — nothing is sent yet.
+    fn prepare(&self, provider: &Provider, conversation: &Conversation<'_>) -> PreparedRequest {
+        tracing::debug!(
+            provider = provider.url(),
+            format = ?provider.format(),
+            model = conversation.model(),
+            messages = conversation.messages().len(),
+            tools = conversation.tools().len(),
+            "preparing request for provider"
+        );
         let wire_format = provider.format();
-        let bytes_transformation = transformation(&wire_format);
         let req = self.create_request(Method::POST, provider.url());
-        let req = apply_auth(&provider.vendor(), req, &provider.api_key());
-        let req = attach_body(&wire_format, req, &conversation);
-        self.send_request(req).and_then(move |bytes| {
-            futures::future::ready(bytes_transformation(bytes.as_ref()).map_err(Error::Parse))
-        })
-    }
-
-    fn send_request(
-        &self,
-        request: RequestBuilder,
-    ) -> impl futures::Future<Output = Result<impl AsRef<[u8]>, Error>> {
-        request
-            .send()
-            .map_err(|e| Error::RequestFailed(e.to_string()))
-            .and_then(|response| {
-                futures::future::ready(response.error_for_status().map_err(|e| Error::Api {
-                    code: e.status().unwrap().to_string(),
-                    message: e.to_string(),
-                }))
-                .and_then(|resp| resp.bytes().map_err(Error::ParseRaw))
-            })
+        let req = apply_auth(&provider.vendor(), req, provider.api_key());
+        let req = attach_body(wire_format, req, conversation);
+        PreparedRequest {
+            request: req,
+            parse: transformation(wire_format),
+        }
     }
 }
 

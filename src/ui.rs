@@ -5,16 +5,22 @@ use tokio::sync::mpsc::UnboundedSender;
 
 /// Represents a command sent from the user to the application.
 pub enum Inbound {
-    // Stops the current loop
+    /// Parks the agent where it is. Nothing is discarded: running tools keep
+    /// running and `Continue` picks up from the same point.
     Stop,
-    // Exits the loop with graceful shutdown
+    /// Exits the loop with graceful shutdown.
     Exit,
-    // Interrupts the current step with a message and starts over the loop
+    /// Cuts the current step short, answers any outstanding tool call as
+    /// interrupted, and goes straight back to the model with this message.
     Interrupt(String),
-    // Appends a message and waits until the turn ends to send it to the llm
+    /// Appends a message and waits until the turn ends to send it to the llm.
     Append(String),
-    // Continues the current turn
+    /// Resumes from wherever `Stop` left off.
     Continue,
+    /// stdin ended. Sent explicitly rather than inferred from the channel
+    /// closing, because the signal handler holds a sender of its own for the
+    /// life of the process -- so the channel never closes on its own.
+    Eof,
 }
 
 
@@ -64,9 +70,11 @@ pub fn spawn_stdin(
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if tx.send(parse_line(line)).is_err() {
-                break;
+                return;
             }
         }
+        // Piped input runs out; say so instead of going quiet.
+        let _ = tx.send(Inbound::Eof);
     });
 
     tokio::spawn(async move {
@@ -85,6 +93,7 @@ fn parse_line(line: String) -> Inbound {
         match parts.next() {
             Some("exit") => Inbound::Exit,
             Some("stop") => Inbound::Stop,
+            Some("continue" | "resume") => Inbound::Continue,
             Some("interrupt") => Inbound::Interrupt(parts.next().unwrap_or("").to_string()),
             _ => Inbound::Append(trimmed.to_string()),
         }

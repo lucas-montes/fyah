@@ -107,6 +107,7 @@
               ollamaPkg
               pkgs.bazel
               pkgs.buildifier
+              pkgs.python3
             ]
             ++ lib.optionals rocmEnabled [
               pkgs.rocmPackages.rocminfo
