@@ -22,7 +22,7 @@ mod tools;
 mod traces;
 mod ui;
 
-use config::{Config, ConfigStore};
+use config::{Config, ConfigStore, RuntimeConfig};
 use fs_watcher::FsWatcher;
 use sessions::{Session, VcsKind, current_git_revision};
 use ui::{Inbound, Outbound, spawn_stdin};
@@ -99,7 +99,9 @@ async fn main() {
 
     let config_path = cli.config;
 
-    let config = match Config::load(&config_path).and_then(Config::validate) {
+    let config = match Config::load(&config_path)
+        .and_then(Config::validate)
+        .map(RuntimeConfig::from) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Config error: {e}");
@@ -108,7 +110,7 @@ async fn main() {
     };
 
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-    let (user_input_tx, mut user_input_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
+    let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
     let (user_output_tx, user_output_rx) = tokio::sync::mpsc::unbounded_channel::<Outbound>();
 
     tracing::debug!("Channels spawned for shutdown, user input, and user output");

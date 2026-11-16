@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -7,6 +8,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::Value;
 use valuable::Valuable;
+
 
 #[derive(Debug)]
 pub enum ValidationError {
@@ -155,6 +157,10 @@ impl Agent {
     pub fn tools(&self) -> &[String] {
         &self.tools
     }
+
+    pub fn max_concurrent_tools(&self) -> NonZeroUsize {
+        self.max_concurrent_tools
+    }
 }
 
 #[derive(Debug, Deserialize, Valuable, Default)]
@@ -174,17 +180,6 @@ impl Tool {
     }
     pub fn parameters(&self) -> &Value {
         &self.parameters
-    }
-}
-
-/// The `[tools.*]` table.
-#[derive(Debug, Default, Deserialize)]
-#[serde(transparent)]
-pub struct Tools(HashMap<String, Tool>);
-
-impl Tools {
-    pub fn get(&self, name: &str) -> Option<&Tool> {
-        self.0.get(name)
     }
 }
 
@@ -214,21 +209,46 @@ pub enum ExecutableParams {
     Wasm { path: PathBuf, function: String },
 }
 
-/// Raw, fully-parsed configuration.
+/// A config as parsed, not yet checked.
+#[derive(Debug)]
+pub struct Raw;
+
+/// A config whose every cross-reference resolves. Only
+/// [`Config::validate`] produces a `Config<Validated>`.
+#[derive(Debug)]
+pub struct Validated;
+
+/// Seals [`Parsed`]: no state outside this module can claim it.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// The states a config may be deserialized into: only [`Raw`]. A
+/// `Config<Validated>` cannot come out of a file.
+pub trait Parsed: sealed::Sealed {}
+
+impl sealed::Sealed for Raw {}
+impl Parsed for Raw {}
+
+/// The configuration, in state `S`: [`Raw`] from [`Config::load`], then
+/// [`Validated`] from [`Config::validate`].
 #[derive(Debug, Deserialize)]
-pub struct Config {
+#[serde(bound(deserialize = "S: Parsed"))]
+pub struct Config<S> {
     #[serde(default)]
     providers: HashMap<String, Provider>,
     #[serde(default)]
     agents: HashMap<String, Agent>,
     #[serde(default)]
-    tools: Tools,
+    tools: HashMap<String, Tool>,
     #[serde(default)]
     executables: HashMap<String, Executable>,
+    #[serde(skip)]
+    state: PhantomData<S>,
 }
 
-impl Config {
-    pub fn load(path: &Path) -> Result<Config, Error> {
+impl Config<Raw> {
+    pub fn load(path: &Path) -> Result<Self, Error> {
         let raw = std::fs::read_to_string(path).map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
@@ -239,47 +259,46 @@ impl Config {
         })
     }
 
-    /// Look up an agent by its `[agents.*]` key.
-    pub fn agent(&self, name: &str) -> Option<&Agent> {
-        self.agents.get(name)
-    }
-
-    /// Look up a provider by its `[providers.*]` key.
-    pub fn provider(&self, name: &str) -> Option<&Provider> {
-        self.providers.get(name)
-    }
-
-    /// The `[tools.*]` table.
-    pub fn tools(&self) -> &Tools {
-        &self.tools
-    }
-
-    /// Look up an executable by its `[executables.*]` key.
-    pub fn executable(&self, name: &str) -> Option<&Executable> {
-        self.executables.get(name)
-    }
-
-    pub fn validate(self) -> Result<Self, Error> {
+    /// Checks every cross-reference, so that afterwards each name the config
+    /// uses resolves. The tables move into the validated config as they are.
+    pub fn validate(self) -> Result<Config<Validated>, Error> {
         let mut errors = Vec::new();
 
-        validate_agents(&self.agents, &self.providers, &self.tools.0, &mut errors);
-        validate_tools(&self.agents, &self.tools.0, &self.executables, &mut errors);
-        validate_executables(&self.tools.0, &self.executables, &mut errors);
+        validate_agents(&self.agents, &self.providers, &self.tools, &mut errors);
+        validate_executables(&self.tools, &self.executables, &mut errors);
 
-        errors
-            .is_empty()
-            .then(|| {
-                tracing::info!(
-                    agents = self.agents.len(),
-                    providers = self.providers.len(),
-                    tools = self.tools.0.len(),
-                    executables = self.executables.len(),
-                    validation_errors = errors.len(),
-                    "validated config"
-                );
-                self
-            })
-            .ok_or(Error::Validation(errors))
+        if !errors.is_empty() {
+            return Err(Error::Validation(errors));
+        }
+
+        tracing::info!(
+            agents = self.agents.len(),
+            providers = self.providers.len(),
+            tools = self.tools.len(),
+            executables = self.executables.len(),
+            "validated config"
+        );
+        Ok(Config {
+            providers: self.providers,
+            agents: self.agents,
+            tools: self.tools,
+            executables: self.executables,
+            state: PhantomData,
+        })
+    }
+}
+
+impl Config<Validated> {
+    /// The four tables, moved out: providers, agents, tools, executables.
+    pub fn into_parts(
+        self,
+    ) -> (
+        HashMap<String, Provider>,
+        HashMap<String, Agent>,
+        HashMap<String, Tool>,
+        HashMap<String, Executable>,
+    ) {
+        (self.providers, self.agents, self.tools, self.executables)
     }
 }
 
@@ -306,37 +325,13 @@ fn validate_agents(
     }
 }
 
-fn validate_tools(
-    agents: &HashMap<String, Agent>,
-    tools: &HashMap<String, Tool>,
-    executables: &HashMap<String, Executable>,
-    errors: &mut Vec<ValidationError>,
-) {
-    for agent in agents.values() {
-        for tool_name in &agent.tools {
-            let Some(tool) = tools.get(tool_name) else {
-                continue;
-            };
-
-            if !executables.is_empty() && !executables.contains_key(tool.executable()) {
-                errors.push(ValidationError::tool_executable(
-                    tool_name,
-                    tool.executable(),
-                ));
-            }
-        }
-    }
-}
-
+/// Every tool, used by an agent or not: the runtime resolves executables
+/// without checking.
 fn validate_executables(
     tools: &HashMap<String, Tool>,
     executables: &HashMap<String, Executable>,
     errors: &mut Vec<ValidationError>,
 ) {
-    if executables.is_empty() {
-        return;
-    }
-
     for (name, tool) in tools {
         if !executables.contains_key(tool.executable()) {
             errors.push(ValidationError::tool_executable(name, tool.executable()));
@@ -393,22 +388,17 @@ impl Provider {
         self.models.get(key)
     }
 
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
-    /// Required in TOML — there is no "no auth" provider — so implementations
-    /// apply it unconditionally.
-    pub fn api_key(&self) -> &str {
-        &self.api_key
-    }
-
-    pub fn format(&self) -> &WireFormat {
-        &self.format
-    }
-
-    pub fn vendor(&self) -> Option<&Vendor> {
-        self.vendor.as_ref()
+    /// Moved out for the runtime: url, api key, format, vendor, models.
+    pub fn into_parts(
+        self,
+    ) -> (
+        String,
+        String,
+        WireFormat,
+        Option<Vendor>,
+        HashMap<String, Model>,
+    ) {
+        (self.url, self.api_key, self.format, self.vendor, self.models)
     }
 }
 

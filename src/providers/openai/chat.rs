@@ -54,24 +54,22 @@ pub struct OpenAiToolCallFn<'a> {
 }
 
 impl<'a> From<&'a Message> for OpenAiMessage<'a> {
-    fn from(m: &'a Message) -> Self {
-        match m {
-            Message::User { content } => OpenAiMessage::User {
-                content: content.as_str(),
+    fn from(message: &'a Message) -> Self {
+        match message {
+            Message::User(user) => OpenAiMessage::User {
+                content: user.content(),
             },
-            Message::Assistant {
-                content,
-                tool_calls,
-            } => OpenAiMessage::Assistant {
-                content: content.as_deref(),
-                tool_calls: tool_calls.iter().map(OpenAiToolCall::from).collect(),
+            Message::Assistant(assistant) => OpenAiMessage::Assistant {
+                content: assistant.content(),
+                tool_calls: assistant
+                    .tool_calls()
+                    .iter()
+                    .map(OpenAiToolCall::from)
+                    .collect(),
             },
-            Message::Tool {
-                tool_call_id,
-                content,
-            } => OpenAiMessage::Tool {
-                tool_call_id: tool_call_id.as_str(),
-                content: content.as_str(),
+            Message::Tool(tool) => OpenAiMessage::Tool {
+                tool_call_id: tool.call_id(),
+                content: tool.content(),
             },
         }
     }

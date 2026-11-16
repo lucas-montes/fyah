@@ -95,29 +95,24 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
 
         for m in conv.messages() {
             match m {
-                Message::User { content } => {
+                Message::User(user) => {
                     flush(&mut pending, &mut messages);
                     messages.push(AnthropicMessage {
                         role: "user",
                         content: vec![AnthropicBlock::Text {
-                            text: content.as_str(),
+                            text: user.content(),
                         }],
                     });
                 }
-                Message::Assistant {
-                    content,
-                    tool_calls,
-                } => {
+                Message::Assistant(assistant) => {
                     flush(&mut pending, &mut messages);
                     let mut blocks = Vec::new();
-                    if let Some(content) = content {
-                        if !content.is_empty() {
-                            blocks.push(AnthropicBlock::Text {
-                                text: content.as_str(),
-                            });
-                        }
+                    if let Some(content) = assistant.content()
+                        && !content.is_empty()
+                    {
+                        blocks.push(AnthropicBlock::Text { text: content });
                     }
-                    for tc in tool_calls {
+                    for tc in assistant.tool_calls() {
                         let input: Value =
                             serde_json::from_str(tc.arguments()).unwrap_or(Value::Null);
                         blocks.push(AnthropicBlock::ToolUse {
@@ -131,16 +126,12 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
                         content: blocks,
                     });
                 }
-                Message::Tool {
-                    tool_call_id,
-                    content,
-                } => {
-                    pending.push(AnthropicBlock::ToolResult {
-                        tool_use_id: tool_call_id.as_str(),
-                        content: content.as_str(),
-                        is_error: None,
-                    });
-                }
+                // Answers are gathered into the next user message.
+                Message::Tool(tool) => pending.push(AnthropicBlock::ToolResult {
+                    tool_use_id: tool.call_id(),
+                    content: tool.content(),
+                    is_error: tool.is_error().then_some(true),
+                }),
             }
         }
         flush(&mut pending, &mut messages);

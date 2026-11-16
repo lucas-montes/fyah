@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     ui::OutboundChannel,
-    config::{Error as ConfigError, Config, ConfigStore},
+    config::{Error as ConfigError, Config, ConfigStore, RuntimeConfig},
 };
 
 /// Events emitted by the filesystem watcher.
@@ -152,7 +152,10 @@ fn processor_loop(
     loop {
         match event_rx.recv() {
             Ok(FsEvent::ConfigChanged) => {
-                match Config::load(&config_path).and_then(Config::validate) {
+                match Config::load(&config_path)
+                    .and_then(Config::validate)
+                    .map(RuntimeConfig::from)
+                {
                     Ok(config) => {
                         let generation = store.replace(config);
                         tracing::debug!(generation, "store updated");
