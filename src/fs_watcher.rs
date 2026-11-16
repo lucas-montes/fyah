@@ -8,8 +8,7 @@ use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    ui::OutboundChannel,
-    config::{Error as ConfigError, Config, ConfigStore, RuntimeConfig},
+    config::{Config, ConfigStore, Error as ConfigError, RuntimeConfig}, ui::{Notice, OutboundChannel}
 };
 
 /// Events emitted by the filesystem watcher.
@@ -160,21 +159,11 @@ fn processor_loop(
                         let generation = store.replace(config);
                         tracing::debug!(generation, "store updated");
                     }
-                    // Validation failure: the file parsed, so the user needs
-                    // the collected problems, not the path.
-                    Err(e @ ConfigError::Validation(_)) => {
-                        error!(error = %e, "failed to reload config");
-                        let _ = user_output_tx
-                            .notification(format!("Failed to reload config: {e}"));
-                    }
-                    // Read or TOML parse failure: the file itself is the
-                    // problem, so name it.
+                    // A read or parse error already names the file; a
+                    // validation error lists the collected problems.
                     Err(e) => {
-                        error!(error = %e, path=%config_path.display(), "failed to load config");
-                        let _ = user_output_tx.notification(format!(
-                            "Failed to load config from {} with error: {e}",
-                            config_path.display()
-                        ));
+                        error!(error = %e, path = %config_path.display(), "failed to reload config");
+                        user_output_tx.notice(Notice::ConfigRejected(e));
                     }
                 }
             }
