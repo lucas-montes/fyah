@@ -2,15 +2,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use super::tool::OpenAiTool;
+use super::tool::OpenAiTools;
 use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall};
 
 #[derive(Serialize)]
 pub struct OpenAiRequest<'a> {
     model: &'a str,
     messages: Vec<OpenAiMessage<'a>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<OpenAiTool<'a>>,
+    #[serde(skip_serializing_if = "OpenAiTools::is_empty")]
+    tools: OpenAiTools<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,7 +100,7 @@ impl<'c, 'a> From<&'c Conversation<'a>> for OpenAiRequest<'c> {
         OpenAiRequest {
             model: conv.model(),
             messages,
-            tools: conv.tools().iter().copied().map(OpenAiTool::from).collect(),
+            tools: conv.tools().into(),
             temperature: conv.temperature(),
             max_tokens: conv.max_tokens(),
             stream: false,

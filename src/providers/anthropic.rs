@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use crate::config::Tool;
-use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall, ToolSpec};
+use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall, ToolSpec, ToolSpecs};
 
 /// Required by the Anthropic API; there is no server default.
 const MAX_TOKENS: u32 = 4096;
@@ -15,8 +14,8 @@ pub struct AnthropicRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
     messages: Vec<AnthropicMessage<'a>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<AnthropicTool<'a>>,
+    #[serde(skip_serializing_if = "AnthropicTools::is_empty")]
+    tools: AnthropicTools<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     stream: bool,
@@ -52,6 +51,22 @@ pub struct AnthropicTool<'a> {
     name: &'a str,
     description: &'a str,
     input_schema: &'a Value,
+}
+
+/// Serializes an agent's tools straight from the lazy specs, never
+/// collecting them.
+struct AnthropicTools<'a>(ToolSpecs<'a>);
+
+impl AnthropicTools<'_> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Serialize for AnthropicTools<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(AnthropicTool::from))
+    }
 }
 
 impl<'a> From<ToolSpec<'a>> for AnthropicTool<'a> {
@@ -135,12 +150,7 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
             max_tokens: conv.max_tokens().unwrap_or(MAX_TOKENS),
             system: conv.system(),
             messages,
-            tools: conv
-                .tools()
-                .iter()
-                .copied()
-                .map(AnthropicTool::from)
-                .collect(),
+            tools: AnthropicTools(conv.tools()),
             temperature: conv.temperature(),
             stream: false,
         }

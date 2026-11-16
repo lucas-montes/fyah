@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::Tool;
+use crate::config::Tools;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
@@ -67,6 +67,38 @@ impl<'a> ToolSpec<'a> {
     }
 }
 
+/// An agent's tools, resolved lazily against the `[tools.*]` table of the
+/// snapshot they belong to. Two references: nothing is collected or allocated.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolSpecs<'a> {
+    names: &'a [String],
+    tools: &'a Tools,
+}
+
+impl<'a> ToolSpecs<'a> {
+    pub fn new(names: &'a [String], tools: &'a Tools) -> Self {
+        Self { names, tools }
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = ToolSpec<'a>> {
+        self.names.iter().filter_map(move |name| {
+            self.tools
+                .get(name)
+                .map(|t| ToolSpec::new(name, t.description(), t.parameters()))
+        })
+    }
+
+    /// Exact count of resolved specs; walks the names without allocating.
+    pub fn len(self) -> usize {
+        self.iter().count()
+    }
+
+    /// Stops at the first resolved spec.
+    pub fn is_empty(self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     id: String,
@@ -123,9 +155,8 @@ pub struct Conversation<'a> {
     max_tokens: Option<u32>,
     messages: &'a [Message],
     /// An agent's tools are a named subset of builtins and `[tools.*]`
-    /// entries, so this is one small `Vec` of borrowed specs — never a clone
-    /// of a tool's description or schema.
-    tools: &'a [ToolSpec<'a>],
+    /// entries, resolved on demand — never collected or cloned.
+    tools: ToolSpecs<'a>,
 }
 
 impl<'a> Conversation<'a> {
@@ -135,7 +166,7 @@ impl<'a> Conversation<'a> {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         messages: &'a [Message],
-        tools: &'a [ToolSpec<'a>],
+        tools: ToolSpecs<'a>,
     ) -> Self {
         Self {
             model,
@@ -167,7 +198,7 @@ impl<'a> Conversation<'a> {
         self.messages
     }
 
-    pub fn tools(&self) -> &[ToolSpec<'a>] {
+    pub fn tools(&self) -> ToolSpecs<'a> {
         self.tools
     }
 }

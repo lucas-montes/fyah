@@ -177,6 +177,17 @@ impl Tool {
     }
 }
 
+/// The `[tools.*]` table.
+#[derive(Debug, Default, Deserialize)]
+#[serde(transparent)]
+pub struct Tools(HashMap<String, Tool>);
+
+impl Tools {
+    pub fn get(&self, name: &str) -> Option<&Tool> {
+        self.0.get(name)
+    }
+}
+
 /// How to run something, either a tool or a hook
 #[derive(Debug, Deserialize, Valuable)]
 pub struct Executable {
@@ -211,7 +222,7 @@ pub struct Config {
     #[serde(default)]
     agents: HashMap<String, Agent>,
     #[serde(default)]
-    tools: HashMap<String, Tool>,
+    tools: Tools,
     #[serde(default)]
     executables: HashMap<String, Executable>,
 }
@@ -238,9 +249,9 @@ impl Config {
         self.providers.get(name)
     }
 
-    /// Look up a tool by its `[tools.*]` key.
-    pub fn tool(&self, name: &str) -> Option<&Tool> {
-        self.tools.get(name)
+    /// The `[tools.*]` table.
+    pub fn tools(&self) -> &Tools {
+        &self.tools
     }
 
     /// Look up an executable by its `[executables.*]` key.
@@ -251,9 +262,9 @@ impl Config {
     pub fn validate(self) -> Result<Self, Error> {
         let mut errors = Vec::new();
 
-        validate_agents(&self.agents, &self.providers, &self.tools, &mut errors);
-        validate_tools(&self.agents, &self.tools, &self.executables, &mut errors);
-        validate_executables(&self.tools, &self.executables, &mut errors);
+        validate_agents(&self.agents, &self.providers, &self.tools.0, &mut errors);
+        validate_tools(&self.agents, &self.tools.0, &self.executables, &mut errors);
+        validate_executables(&self.tools.0, &self.executables, &mut errors);
 
         errors
             .is_empty()
@@ -261,7 +272,7 @@ impl Config {
                 tracing::info!(
                     agents = self.agents.len(),
                     providers = self.providers.len(),
-                    tools = self.tools.len(),
+                    tools = self.tools.0.len(),
                     executables = self.executables.len(),
                     validation_errors = errors.len(),
                     "validated config"

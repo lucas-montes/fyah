@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{config::Tool, prompt::ToolSpec};
+use crate::prompt::{ToolSpec, ToolSpecs};
 
 /// Tool declaration shared by both OpenAI wire formats (chat completions and
 /// the Responses API).
@@ -17,6 +17,28 @@ pub struct OpenAiFunction<'a> {
     name: &'a str,
     description: &'a str,
     parameters: &'a Value,
+}
+
+/// Serializes an agent's tools straight from the lazy specs, never
+/// collecting them.
+pub struct OpenAiTools<'a>(ToolSpecs<'a>);
+
+impl<'a> OpenAiTools<'a> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'a> From<ToolSpecs<'a>> for OpenAiTools<'a> {
+    fn from(specs: ToolSpecs<'a>) -> Self {
+        Self(specs)
+    }
+}
+
+impl Serialize for OpenAiTools<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(OpenAiTool::from))
+    }
 }
 
 impl<'a> From<ToolSpec<'a>> for OpenAiTool<'a> {

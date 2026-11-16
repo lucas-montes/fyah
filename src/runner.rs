@@ -3,7 +3,7 @@ use tracing::warn;
 use crate::{
     client::{LlmClient, Error as ClientError},
     config::{ConfigView},
-    prompt::{AssistantTurn, Conversation, Message, ToolSpec},
+    prompt::{AssistantTurn, Conversation, Message, ToolSpecs},
     sessions::Session,
     tools::{ExecContext, RunnableExt, ToolsExecutor},
     ui::{Inbound, OutboundChannel},
@@ -42,15 +42,14 @@ impl Context {
 }
 
 #[derive(Debug)]
-struct Agent<'a, R: RunnableExt + Send + 'static> {
+struct Agent<R: RunnableExt + Send + 'static> {
     name: String,
     context: Context,
     session: Session,
     tools_executor: ToolsExecutor<R>,
-    tools: Vec<ToolSpec<'a>>,
 }
 
-impl<'a, R: RunnableExt + Send + 'static> Agent<'a, R> {
+impl<R: RunnableExt + Send + 'static> Agent<R> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -81,7 +80,6 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
         context,
         session,
         tools_executor,
-        tools: Vec::new(),
     };
 
     let mut user = UserChannels {
@@ -100,10 +98,10 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
     }
 }
 
-async fn request_phase<'a>(
+async fn request_phase(
     client: &impl LlmClient,
     user: &mut UserChannels,
-    agent: &mut Agent<'a, impl RunnableExt + Send + 'static>,
+    agent: &mut Agent<impl RunnableExt + Send + 'static>,
     config: &ConfigView,
 ) -> Phase {
     let config = config.snapshot();
@@ -118,22 +116,15 @@ async fn request_phase<'a>(
         .get_model(agent_conf.model())
         .expect("model should be set in config");
 
-    // Rebuilt every turn: the config may have changed since the last one
-    let tools_specs = agent_conf
-        .tools()
-        .iter()
-        .filter_map(|name| config.tool(name).map(|t| ToolSpec::new(name, t.description(), t.parameters())));
-
-    agent.tools.clear();
-    agent.tools.extend(tools_specs);
-
+    // Resolved lazily against this turn's snapshot: the config may have
+    // changed since the last one.
     let conversation = Conversation::new(
         model.name(),
         agent_conf.system_prompt(),
         model.temperature(),
         model.max_tokens(),
-        &agent.context.messages(),
-        &agent.tools,
+        agent.context.messages(),
+        ToolSpecs::new(agent_conf.tools(), config.tools()),
     );
 
     let mut request = client.create_request(provider, &conversation);
