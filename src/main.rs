@@ -18,16 +18,19 @@ mod prompt;
 mod providers;
 mod runner;
 mod sessions;
+mod tools;
 mod traces;
 mod ui;
 
 use config::{Config, ConfigStore};
 use fs_watcher::FsWatcher;
+use sessions::{Session, VcsKind, current_git_revision};
 use ui::{Inbound, Outbound, spawn_stdin};
 
-use crate::sessions::Session;
-use crate::sessions::VcsKind;
-use crate::sessions::current_git_revision;
+use crate::client::LlmClient;
+use crate::tools::Runnable;
+use crate::tools::RunnableExt;
+use crate::ui::OutboundChannel;
 
 #[derive(Debug, Clone, PartialEq, Default, clap::ValueEnum)]
 enum CtrlCMode {
@@ -132,7 +135,24 @@ async fn main() {
     tracing::debug!("Spawning stdin source");
 
     let client = client::Client::default();
-    let mut messages = Vec::new();
+
+    start_session::<_, Runnable>(
+        cli.agent,
+        client,
+        view,
+        user_input_rx,
+        user_output_tx.into(),
+    )
+    .await;
+}
+
+async fn start_session<C: LlmClient, R: RunnableExt + Send + 'static>(
+    agent: String,
+    client: C,
+    view: config::ConfigView,
+    user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
+    user_output_tx: OutboundChannel,
+) {
     let session = Session::new(
         uuid::Uuid::now_v7().to_string(),
         env!("CARGO_PKG_NAME"),
@@ -140,21 +160,22 @@ async fn main() {
         VcsKind::Git,
         current_git_revision(),
     );
-    if let Err(reason) = runner::run_agent_loop(
-        &cli.agent,
+    // let messages = Vec::new();
+
+    // let tools_executor = tools::ToolsExecutor::new(view.clone());
+
+    runner::run_agent::<C, R>(
+        agent,
         session,
-        &client,
-        &view,
-        &mut messages,
-        &mut user_input_rx,
-        &user_output_tx.into(),
+        client,
+        view,
+        // messages,
+        user_input_rx,
+        user_output_tx.into(),
+        // tools_executor,
     )
-    .await
-    {
-        tracing::info!(?reason, "agent stopped");
-    } else {
-        tracing::info!("agent loop exited successfully");
-    };
+    .await;
+    tracing::info!("agent loop exited successfully");
 }
 
 async fn listen_to_signals(

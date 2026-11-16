@@ -69,6 +69,10 @@
         fyahDeps = craneLib.buildDepsOnly commonArgs;
 
         fyah = craneLib.buildPackage (commonArgs // {cargoArtifacts = fyahDeps;});
+
+        # Javy ships prebuilt for x86_64-linux only here; see nix/wasm-tools.nix.
+        wasmEnabled = system == "x86_64-linux";
+        wasmTools = import ./nix/wasm-tools.nix {inherit pkgs;};
       in {
         packages =
           {
@@ -77,6 +81,10 @@
           }
           // lib.optionalAttrs rocmEnabled {
             ollama-rocm = pkgs.ollama-rocm;
+          }
+          // lib.optionalAttrs wasmEnabled {
+            inherit (wasmTools) javy python-wasi;
+            wasm-tools = wasmTools.wasm-tools;
           };
 
         checks = {
@@ -112,12 +120,22 @@
             ++ lib.optionals rocmEnabled [
               pkgs.rocmPackages.rocminfo
               pkgs.amdgpu_top
+            ]
+            # To build and try JS tools by hand.
+            ++ lib.optionals wasmEnabled [
+              wasmTools.javy
             ];
           shellHook = ollamaEnv;
           RUSTFLAGS = "--cfg tracing_unstable";
         };
 
-        apps = {
+        apps =
+          lib.optionalAttrs wasmEnabled {
+            # Build the wasm examples and link them to wasm/dist, where
+            # fyah.toml expects them. Run from the repository root.
+            wasm-tools = wasmTools.app;
+          }
+          // {
           # Launch ollama serving the same baked model the e2e test uses.
           ollama-dev = {
             type = "app";

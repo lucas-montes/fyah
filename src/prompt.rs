@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config::Tool;
 
@@ -18,22 +19,51 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn new_user(content: String) -> Self {
+    pub fn user(content: String) -> Self {
         Message::User { content }
     }
 
-    pub fn new_assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+    pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
         Message::Assistant {
             content,
             tool_calls,
         }
     }
 
-    pub fn new_tool(tool_call_id: String, content: String) -> Self {
+    pub fn tool(tool_call_id: String, content: String) -> Self {
         Message::Tool {
             tool_call_id,
             content,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ToolSpec<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Value,
+}
+
+impl<'a> ToolSpec<'a> {
+    pub fn new(name: &'a str, description: &'a str, parameters: &'a Value) -> Self {
+        Self {
+            name,
+            description,
+            parameters,
+        }
+    }
+
+    pub fn name(&self) -> &'a str {
+        self.name
+    }
+
+    pub fn description(&self) -> &'a str {
+        self.description
+    }
+
+    pub fn parameters(&self) -> &'a Value {
+        self.parameters
     }
 }
 
@@ -92,14 +122,10 @@ pub struct Conversation<'a> {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     messages: &'a [Message],
-    /// Borrowed `(name, Tool)` pairs, not an owned `&'a [Tool]`: an agent's
-    /// tools are a named subset of the config's global `[tools.*]` table,
-    /// not a contiguous slice of it, so building this is one small `Vec`
-    /// of pointers — never a clone of a tool's description/schema. The name
-    /// rides along because `Tool` no longer stores it (the `[tools.*]` key
-    /// is the name) and providers need it to build the wire-format
-    /// declaration.
-    tools: &'a [(&'a str, &'a Tool)],
+    /// An agent's tools are a named subset of builtins and `[tools.*]`
+    /// entries, so this is one small `Vec` of borrowed specs — never a clone
+    /// of a tool's description or schema.
+    tools: &'a [ToolSpec<'a>],
 }
 
 impl<'a> Conversation<'a> {
@@ -109,7 +135,7 @@ impl<'a> Conversation<'a> {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         messages: &'a [Message],
-        tools: &'a [(&'a str, &'a Tool)],
+        tools: &'a [ToolSpec<'a>],
     ) -> Self {
         Self {
             model,
@@ -141,7 +167,7 @@ impl<'a> Conversation<'a> {
         self.messages
     }
 
-    pub fn tools(&self) -> &[(&'a str, &'a Tool)] {
+    pub fn tools(&self) -> &[ToolSpec<'a>] {
         self.tools
     }
 }

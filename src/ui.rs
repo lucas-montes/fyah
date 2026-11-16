@@ -4,6 +4,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Represents a command sent from the user to the application.
+#[derive(Debug)]
 pub enum Inbound {
     /// Parks the agent where it is. Nothing is discarded: running tools keep
     /// running and `Continue` picks up from the same point.
@@ -17,10 +18,6 @@ pub enum Inbound {
     Append(String),
     /// Resumes from wherever `Stop` left off.
     Continue,
-    /// stdin ended. Sent explicitly rather than inferred from the channel
-    /// closing, because the signal handler holds a sender of its own for the
-    /// life of the process -- so the channel never closes on its own.
-    Eof,
 }
 
 
@@ -73,8 +70,6 @@ pub fn spawn_stdin(
                 return;
             }
         }
-        // Piped input runs out; say so instead of going quiet.
-        let _ = tx.send(Inbound::Eof);
     });
 
     tokio::spawn(async move {

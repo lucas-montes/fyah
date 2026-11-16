@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::config::Tool;
+use crate::{config::Tool, prompt::ToolSpec};
 
 /// Tool declaration shared by both OpenAI wire formats (chat completions and
 /// the Responses API).
@@ -19,12 +19,12 @@ pub struct OpenAiFunction<'a> {
     parameters: &'a Value,
 }
 
-impl<'a> From<(&'a str, &'a Tool)> for OpenAiTool<'a> {
-    fn from((name, t): (&'a str, &'a Tool)) -> Self {
+impl<'a> From<ToolSpec<'a>> for OpenAiTool<'a> {
+    fn from(t: ToolSpec<'a>) -> Self {
         OpenAiTool {
             tool_type: "function",
             function: OpenAiFunction {
-                name,
+                name: t.name(),
                 description: t.description(),
                 parameters: t.parameters(),
             },

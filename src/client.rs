@@ -1,7 +1,12 @@
-use std::fmt::Display;
+use std::{
+    fmt::Display,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use futures::TryFutureExt;
 use reqwest::{Method, RequestBuilder};
+use tokio::task::JoinHandle;
 
 use crate::{
     config::{Provider, Vendor, WireFormat},
@@ -18,6 +23,8 @@ pub enum Error {
     Api { code: String, message: String },
     ParseRaw(reqwest::Error),
     Parse(serde_json::Error),
+    /// The request task died without an answer.
+    Lost,
 }
 
 impl std::error::Error for Error {}
@@ -31,25 +38,54 @@ impl Display for Error {
             }
             Error::Parse(e) => write!(f, "parse error: {e:?}"),
             Error::ParseRaw(e) => write!(f, "parse raw error: {e:?}"),
+            Error::Lost => write!(f, "the request task died without an answer"),
         }
     }
 }
 
-/// A request with every borrow from the config snapshot already folded into
-/// owned data, so it can be handed to `tokio::spawn` and flown in the
-/// background while the agent loop stays free to answer the user.
-///
-/// This split is what makes the loop's `select!` possible: `prepare` is the
-/// only part that touches the snapshot, and it is synchronous.
-pub struct PreparedRequest {
-    request: RequestBuilder,
-    parse: fn(&[u8]) -> Result<AssistantTurn, serde_json::Error>,
+/// A request in flight. Spawned, so it flies while the agent loop keeps
+/// answering the user; awaiting it gives the model's answer, dropping it
+/// cancels it.
+pub struct Request {
+    handle: JoinHandle<Result<AssistantTurn, Error>>,
 }
 
-impl PreparedRequest {
-    //TODO: we need a retry mechanism with backoff, jitter and all
-    pub fn send(self) -> impl Future<Output = Result<AssistantTurn, Error>> {
-        self.request
+impl Future for Request {
+    type Output = Result<AssistantTurn, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.handle)
+            .poll(cx)
+            .map(|joined| joined.unwrap_or(Err(Error::Lost)))
+    }
+}
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Client(reqwest::Client);
+
+impl LlmClient for Client {
+    fn create_request(&self, provider: &Provider, conversation: &Conversation<'_>) -> Request {
+        tracing::debug!(
+            provider = provider.url(),
+            format = ?provider.format(),
+            model = conversation.model(),
+            messages = conversation.messages().len(),
+            tools = conversation.tools().len(),
+            "sending request to provider"
+        );
+        let wire_format = provider.format();
+        let parse = transformation(wire_format);
+        let req = self.0.request(Method::POST, provider.url());
+        let req = apply_auth(&provider.vendor(), req, provider.api_key());
+        let req = attach_body(wire_format, req, conversation);
+        //TODO: we need a retry mechanism with backoff, jitter and all
+        let turn = req
             .send()
             .map_err(|e| Error::RequestFailed(e.to_string()))
             .and_then(|response| {
@@ -64,35 +100,16 @@ impl PreparedRequest {
                 .and_then(|resp| resp.bytes().map_err(Error::ParseRaw))
             })
             .and_then(move |bytes| {
-                futures::future::ready((self.parse)(bytes.as_ref()).map_err(Error::Parse))
-            })
+                futures::future::ready(parse(bytes.as_ref()).map_err(Error::Parse))
+            });
+        Request {
+            handle: tokio::spawn(turn),
+        }
     }
 }
 
-/// Abstraction over LLM chat completion providers.
-pub trait LlmClient: std::fmt::Debug {
-    fn create_request(&self, method: reqwest::Method, url: &str) -> RequestBuilder;
-
-    /// Folds `provider` + `conversation` into an owned, `'static` request.
-    /// Borrows end when this returns — nothing is sent yet.
-    fn prepare(&self, provider: &Provider, conversation: &Conversation<'_>) -> PreparedRequest {
-        tracing::debug!(
-            provider = provider.url(),
-            format = ?provider.format(),
-            model = conversation.model(),
-            messages = conversation.messages().len(),
-            tools = conversation.tools().len(),
-            "preparing request for provider"
-        );
-        let wire_format = provider.format();
-        let req = self.create_request(Method::POST, provider.url());
-        let req = apply_auth(&provider.vendor(), req, provider.api_key());
-        let req = attach_body(wire_format, req, conversation);
-        PreparedRequest {
-            request: req,
-            parse: transformation(wire_format),
-        }
-    }
+pub trait LlmClient {
+    fn create_request(&self, provider: &Provider, conversation: &Conversation<'_>) -> Request;
 }
 
 fn transformation(format: &WireFormat) -> fn(&[u8]) -> Result<AssistantTurn, serde_json::Error> {
@@ -166,14 +183,5 @@ fn attach_body(
             let body = AnthropicRequest::from(conv);
             req.json(&body)
         }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct Client(reqwest::Client);
-
-impl LlmClient for Client {
-    fn create_request(&self, method: reqwest::Method, url: &str) -> RequestBuilder {
-        self.0.request(method, url)
     }
 }

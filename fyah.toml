@@ -1,5 +1,3 @@
-# Fyah development configuration
-# Overrides the XDG default at ~/.config/fyah/config.toml
 
 [watcher]
 debounce_ms = 2000
@@ -12,10 +10,34 @@ models = { "nemotron" = { name = "nvidia/nemotron-3.5-lightning:free", temperatu
 
 
 [providers.ollama]
-url = "http://127.0.0.1:11434/v1/chat"
+url = "http://127.0.0.1:11434/v1/chat/completions"
 api_key = "ollama"
 format = "openai"
-models = { "deepseek" = { name = "deepseek-r1:8b", temperature = 0.3 } }
+
+# deepseek-r1:8b does not emit tool_calls; qwen does
+[providers.ollama.models.deepseek]
+name = "deepseek-r1:8b"
+temperature = 0.3
+
+[providers.ollama.models."qwen2.5"]
+name = "qwen2.5:14b"
+temperature = 0.1
+
+[providers.ollama.models."qwen3-4"]
+name = "qwen3.5:4b"
+temperature = 0.1
+
+[providers.ollama.models."gemma4"]
+name = "gemma4:e2b"
+temperature = 0.1
+
+[providers.ollama.models.gemma]
+name = "gemma3:27b"
+temperature = 0.1
+
+[providers.ollama.models.ministral]
+name = "ministral-3:8b"
+temperature = 0.1
 
 [providers.mistral]
 url = "https://api.mistral.ai/v1/chat/completions"
@@ -26,19 +48,29 @@ models = { "medium" = { name = "mistral-medium-3-5", temperature = 0.3 } }
 
 [agents.planer]
 system_prompt = "You are Fyah, an AI coding assistant. You are in plan mode"
-max_iterations = 25
+max_turns = 25
 provider = "ollama"
 model = "deepseek"
-tools = []
+# Builtins are opt-in per agent: a planner reads but never writes or runs.
+tools = ["read"]
 max_concurrent_tools = 1
 
 [agents.default]
 system_prompt = "You are Fyah, an AI coding assistant"
 provider = "ollama"
-model = "deepseek"
-max_iterations = 25
-tools = []
+model = "qwen3-4"
+max_turns = 25
+# read/write/bash are builtins -- no [tools.*] or [executables.*] entry needed.
+# git_log, text_stats and line_count are config-declared: see the bottom.
+tools = ["read", "write", "bash", "git_log", "text_stats", "line_count"]
 max_concurrent_tools = 5
+# When tool results go back to the model: "wait" for all of them (default),
+# "eager" as soon as one is in, or { batch = 3 } once three are.
+results = "wait"
+# Optional: tool calls allowed between two user inputs before pausing.
+# max_tool_calls = 50
+# Optional: tokens the whole session may spend before the loop stops itself.
+# token_budget = 200000
 
 [runtime]
 ctrl_c = "immediate"
@@ -56,9 +88,80 @@ command = "./exes/session_end.sh"
 type = "command"
 command = "./exes/context.sh"
 
-[tools.read_file]
-description = "Read a file from disk"
-executable = "session_start"
-parameters = { type = "object", properties = { path = { type = "string", description = "The file path" } }, required = [
-    "path",
-] }
+
+# Optional -- the builtins work without it. These are the defaults.
+[builtins]
+read = { max_bytes = 262144 }
+bash = { timeout_secs = 120 }
+
+# ---------------------------------------------------------------------------
+# A config-declared tool, for exercising that path by hand next to the
+# builtins. Unlike a builtin this needs both halves: the declaration the model
+# sees, and the executable that implements it. Arguments reach the command as
+# raw JSON on its stdin; see exes/git_log.sh.
+# ---------------------------------------------------------------------------
+[executables.git_log]
+type = "command"
+command = "./exes/git_log.sh"
+timeout_secs = 10
+
+[tools.git_log]
+description = "List the most recent commits in this git repository."
+executable = "git_log"
+parameters = { type = "object", additionalProperties = false, properties = { count = { type = "integer", minimum = 1, description = "How many commits to list (default 5)" } } }
+
+# Builtins (read/write/bash) are immutable: a [tools.*] entry with a builtin
+# name is rejected at load. Declare your own tool under a different name.
+
+# ---------------------------------------------------------------------------
+# Wasm tools: WASI preview 1 modules that read their JSON arguments on stdin
+# and print their answer. A module can touch nothing -- no files, env or
+# network -- beyond what its entry grants, and a rebuilt .wasm is picked up on
+# its next call. Run `nix run .#wasm-tools` first: it builds the examples
+# and links them to wasm/dist.
+#
+# Every setting a wasm executable takes:
+#   path = "..."                 the module (required)
+#   function = "_start"          export to call (default _start)
+#   args = ["..."]               command line after the module's name
+#   memory_mb = 64               memory cap (default 64)
+#   timeout_secs = 10            wall-clock limit (default none)
+#   dirs = [{ host = ".", guest = "/repo", write = false }]   read-only unless write = true
+#   env = { KEY = "value" }      variables set here
+#   inherit_env = ["NAME"]       variables copied from fyah's environment
+# ---------------------------------------------------------------------------
+
+# JavaScript, compiled by Javy (wasm/js/text_stats.js). A pure function: it
+# is granted nothing at all.
+[executables.text_stats]
+type = "wasm"
+path = "./wasm/dist/js/text_stats.wasm"
+timeout_secs = 10
+memory_mb = 32
+
+[tools.text_stats]
+description = "Count the lines, words and characters of a piece of text."
+executable = "text_stats"
+parameters = { type = "object", required = ["text"], additionalProperties = false, properties = { text = { type = "string", description = "The text to measure" } } }
+
+# Python, run by CPython for WASI (wasm/python/line_count.py). The
+# interpreter is the module; the script is its argument. It sees exactly
+# three directories, all read-only: its standard library, its own script,
+# and the repository.
+[executables.line_count]
+type = "wasm"
+path = "./wasm/dist/python/python.wasm"
+args = ["-B", "/tool/line_count.py"]
+timeout_secs = 30
+memory_mb = 256
+env = { PYTHONHOME = "/" }
+dirs = [
+  { host = "./wasm/dist/python/lib", guest = "/lib" },
+  { host = "./wasm/python", guest = "/tool" },
+  { host = ".", guest = "/repo" },
+]
+
+[tools.line_count]
+description = "Count the lines, words and bytes of a file in the repository."
+executable = "line_count"
+parameters = { type = "object", required = ["path"], additionalProperties = false, properties = { path = { type = "string", description = "Path relative to the repository root" } } }

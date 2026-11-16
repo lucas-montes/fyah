@@ -41,11 +41,11 @@
 
     [agents.primary]
     system_prompt = "You are a test agent. Reply with exactly: DONE"
-    max_iterations = 10
+    max_turns = 10
 
     [workflows.default]
     initial = "plan"
-    max_iterations = 20
+    max_turns = 20
 
     [workflows.default.steps.plan]
     type = "plan"

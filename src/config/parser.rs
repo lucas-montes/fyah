@@ -129,7 +129,7 @@ pub struct Agent {
     #[serde(default)]
     tools: Vec<String>,
     max_concurrent_tools: NonZeroUsize,
-    max_iterations: NonZeroUsize,
+    max_turns: NonZeroUsize,
     max_tokens: Option<NonZeroUsize>,
     done_check: Option<String>,
     context_strategy: Option<String>,
@@ -149,10 +149,6 @@ impl Agent {
 
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
-    }
-
-    pub fn max_iterations(&self) -> NonZeroUsize {
-        self.max_iterations
     }
 
     /// Keys into the top-level `[tools.*]` table.

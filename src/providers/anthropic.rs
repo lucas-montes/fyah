@@ -3,7 +3,7 @@ use serde_json::Value;
 use tracing::error;
 
 use crate::config::Tool;
-use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall};
+use crate::prompt::{AssistantTurn, Conversation, Message, ToolCall, ToolSpec};
 
 /// Required by the Anthropic API; there is no server default.
 const MAX_TOKENS: u32 = 4096;
@@ -54,10 +54,10 @@ pub struct AnthropicTool<'a> {
     input_schema: &'a Value,
 }
 
-impl<'a> From<(&'a str, &'a Tool)> for AnthropicTool<'a> {
-    fn from((name, t): (&'a str, &'a Tool)) -> Self {
+impl<'a> From<ToolSpec<'a>> for AnthropicTool<'a> {
+    fn from(t: ToolSpec<'a>) -> Self {
         AnthropicTool {
-            name,
+            name: t.name(),
             description: t.description(),
             input_schema: t.parameters(),
         }
