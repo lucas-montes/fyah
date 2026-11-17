@@ -40,8 +40,6 @@ pub enum ExecError {
     Wasm(String),
     /// The executor is gone, so the call was never started.
     ExecutorGone,
-    /// The user stopped the turn before the call finished.
-    Cancelled,
     /// The call could not be matched to anything that runs.
     Unavailable(ResolveError),
 }
@@ -69,7 +67,6 @@ impl std::fmt::Display for ExecError {
             Self::Panicked(message) => write!(f, "panicked: {message}"),
             Self::Wasm(message) => write!(f, "wasm: {message}"),
             Self::ExecutorGone => write!(f, "the tool executor is gone"),
-            Self::Cancelled => write!(f, "cancelled by the user"),
             Self::Unavailable(error) => write!(f, "unavailable: {error}"),
         }
     }

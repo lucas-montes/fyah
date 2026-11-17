@@ -116,7 +116,10 @@ async fn main() {
     tracing::debug!("Channels spawned for shutdown, user input, and user output");
 
     let store = ConfigStore::new(config);
-    let view = store.subscribe();
+    let Some(agent) = store.agent(&cli.agent) else {
+        eprintln!("Config error: agent {} is not in the config", cli.agent);
+        std::process::exit(1);
+    };
     let _fs_watcher = FsWatcher::spawn(
         store,
         config_path,
@@ -139,9 +142,8 @@ async fn main() {
     let client = client::Client::default();
 
     start_session::<_, Runnable>(
-        cli.agent,
+        agent,
         client,
-        view,
         user_input_rx,
         user_output_tx.into(),
     )
@@ -149,9 +151,8 @@ async fn main() {
 }
 
 async fn start_session<C: LlmClient, R: RunnableExt + Send + 'static>(
-    agent: String,
+    agent: config::AgentConfig,
     client: C,
-    view: config::ConfigView,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
 ) {
@@ -170,7 +171,6 @@ async fn start_session<C: LlmClient, R: RunnableExt + Send + 'static>(
         agent,
         session,
         client,
-        view,
         // messages,
         user_input_rx,
         user_output_tx.into(),

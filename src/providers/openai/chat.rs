@@ -69,7 +69,10 @@ impl<'a> From<&'a Message> for OpenAiMessage<'a> {
             },
             Message::Tool(tool) => OpenAiMessage::Tool {
                 tool_call_id: tool.call_id(),
-                content: tool.content(),
+                // The format has no error flag: the text says what happened.
+                content: match tool.output() {
+                    Ok(content) | Err(content) => content,
+                },
             },
         }
     }

@@ -5,62 +5,93 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-use crate::{config::ConfigView, prompt::ToolCall, tools::errors::ExecError};
+use crate::{
+    config::{Executable, ExecConfig, ExecSnapshot},
+    prompt::{ToolCall, ToolMessage},
+    tools::errors::{ExecError, ResolveError},
+};
 
 pub struct Runnable {
     call: ToolCall,
 }
 
-impl Runnable {
-    pub fn new(call: ToolCall) -> Self {
+impl From<ToolCall> for Runnable {
+    fn from(call: ToolCall) -> Self {
         Self { call }
     }
 }
 
 impl RunnableExt for Runnable {
-    fn run(self, env: ExecContext) -> impl Future<Output = ToolResult> + Send + 'static {
-        async move {
-            todo!()
-        }
+    async fn run(self, call: CallContext) -> ToolMessage {
+        let output = resolve_and_execute(&self.call, &call).await;
+        ToolMessage::new(&self.call, output)
     }
 }
 
-pub trait RunnableExt {
-    fn run(self, env: ExecContext) -> impl Future<Output = ToolResult> + Send + 'static;
+/// The model's tool name is not validated config, so this lookup may miss;
+/// everything past it is resolved.
+async fn resolve_and_execute(call: &ToolCall, context: &CallContext) -> Result<String, ExecError> {
+    let executable = context
+        .config
+        .executable(call.name())
+        .ok_or(ExecError::Unavailable(ResolveError::UnknownTool))?;
+    execute(call, executable).await
+}
+
+async fn execute(_call: &ToolCall, _executable: &Executable) -> Result<String, ExecError> {
+    todo!()
+}
+
+/// Built from a call; running it always yields its answer.
+pub trait RunnableExt: From<ToolCall> {
+    fn run(self, call: CallContext) -> impl Future<Output = ToolMessage> + Send + 'static;
 }
 
 #[derive(Debug)]
 pub struct ToolsExecutor<Runnable: RunnableExt> {
     jobs: UnboundedSender<Vec<Runnable>>,
-    results: UnboundedReceiver<ToolResult>,
+    results: UnboundedReceiver<ToolMessage>,
     task: JoinHandle<()>,
 }
 
+/// Dropping the executor kills every call still running.
 impl<Runnable: RunnableExt> Drop for ToolsExecutor<Runnable> {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
 
-#[derive(Debug, Clone)]
+/// What the executor runs with, given once.
+#[derive(Debug)]
 pub struct ExecContext {
+    /// The agent's executables and limits, always the latest.
+    config: ExecConfig,
     // wasm: Arc<WasmEnv>,
-    // settings: Arc<Settings>,
     // session
 }
 
 impl ExecContext {
-    pub fn new(_config: ConfigView) -> Self {
-        Self {
-            // wasm: Arc::new(WasmEnv::new()),
-            // settings: Arc::new(Settings::new()),
+    pub fn new(config: ExecConfig) -> Self {
+        Self { config }
+    }
+
+    /// The context of a call starting now.
+    fn call(&self) -> CallContext {
+        CallContext {
+            config: self.config.snapshot(),
         }
     }
 }
 
+/// What one call runs with, kept for the whole call: a reload or a switch
+/// meanwhile applies to the next one.
+#[derive(Debug)]
+pub struct CallContext {
+    config: ExecSnapshot,
+}
+
 impl<Runnable: RunnableExt + Send + 'static> ToolsExecutor<Runnable> {
-    /// `wasm` is the workspace's runtime, shared with every other agent's
-    /// executor: one engine and one compile cache.
+    /// A configuration change applies from the next call spawned.
     pub fn new(env: ExecContext) -> Self {
         let (jobs_tx, jobs_rx) = unbounded_channel();
         let (results_tx, results_rx) = unbounded_channel();
@@ -71,7 +102,8 @@ impl<Runnable: RunnableExt + Send + 'static> ToolsExecutor<Runnable> {
         }
     }
 
-    /// Queues every call at once.
+    /// Queues every call at once. The `Vec` is moved, not copied: the
+    /// executor takes over its buffer.
     pub fn submit(&self, runnables: Vec<Runnable>) -> Result<(), Vec<Runnable>> {
         self.jobs.send(runnables).map_err(|err| err.0)
     }
@@ -81,29 +113,17 @@ impl<Runnable: RunnableExt + Send + 'static> ToolsExecutor<Runnable> {
     /// executor is gone and nothing it was running will answer.
     pub fn next_results(
         &mut self,
-        out: &mut Vec<ToolResult>,
+        out: &mut Vec<ToolMessage>,
         max: NonZeroUsize,
     ) -> impl Future<Output = usize> {
         self.results.recv_many(out, max.get())
     }
 }
 
-/// A tool call and how it ended.
-pub struct ToolResult {
-    call: ToolCall,
-    output: Result<String, ExecError>,
-}
-
-impl ToolResult {
-    pub fn new(call: ToolCall, output: Result<String, ExecError>) -> Self {
-        Self { call, output }
-    }
-}
-
 /// Returning drops the `JoinSet`, which aborts whatever is still running.
 async fn run<Runnable: RunnableExt>(
     mut jobs: UnboundedReceiver<Vec<Runnable>>,
-    results: UnboundedSender<ToolResult>,
+    results: UnboundedSender<ToolMessage>,
     env: ExecContext,
 ) {
     let mut running = JoinSet::new();
@@ -115,8 +135,7 @@ async fn run<Runnable: RunnableExt>(
                 Some(batch) => queued.extend(batch),
                 None => return,
             },
-            // Disabled while the set is empty; panics are caught inside the
-            // task, so an error here can only be a cancellation.
+            // Disabled while the set is empty.
             Some(joined) = running.join_next() => {
                 if let Ok(result) = joined
                     && results.send(result).is_err()
@@ -124,24 +143,12 @@ async fn run<Runnable: RunnableExt>(
                     return;
                 }
             }
-            // _ = tick.tick(), if !running.is_empty() => wasm.tick(),
-            // // Only wakes the loop: the new settings are read below.
-            // Ok(()) = settings.changed() => {}
         }
 
-        let max = {
-            // let current = settings.borrow_and_update();
-            // if current.tick != every {
-            //     every = current.tick;
-            //     tick = ticker(every);
-            // }
-            // current.max_concurrent.get()
-            5
-        };
-        while running.len() < max
+        while running.len() < env.config.max_concurrent_tools().get()
             && let Some(runnable) = queued.pop_front()
         {
-            running.spawn(runnable.run(env.clone()));
+            running.spawn(runnable.run(env.call()));
         }
     }
 }

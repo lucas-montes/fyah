@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -55,25 +57,26 @@ impl AssistantMessage {
 #[derive(Debug)]
 pub struct ToolMessage {
     call_id: String,
-    content: String,
-    is_error: bool,
+    /// What the tool answered, or why it could not. The success side is
+    /// borrowed for the placeholder, owned for a real answer.
+    output: Result<Cow<'static, str>, String>,
 }
 
 impl ToolMessage {
-    /// Copies the id: the call itself stays in its [`AssistantMessage`].
-    pub fn success(call: &ToolCall, content: String) -> Self {
+    /// Stands in for an answer that is not in yet: every call needs one in
+    /// each request. Replaced in place when the real one arrives.
+    pub fn pending(call: &ToolCall) -> Self {
         Self {
             call_id: call.id.clone(),
-            content,
-            is_error: false,
+            output: Ok(Cow::Borrowed("still running")),
         }
     }
 
-    pub fn failure(call: &ToolCall, error: impl std::fmt::Display) -> Self {
+    /// Copies the id: the call itself stays in its [`AssistantMessage`].
+    pub fn new(call: &ToolCall, output: Result<String, impl std::fmt::Display>) -> Self {
         Self {
             call_id: call.id.clone(),
-            content: error.to_string(),
-            is_error: true,
+            output: output.map(Cow::Owned).map_err(|error| error.to_string()),
         }
     }
 
@@ -81,12 +84,11 @@ impl ToolMessage {
         &self.call_id
     }
 
-    pub fn content(&self) -> &str {
-        &self.content
-    }
-
-    pub fn is_error(&self) -> bool {
-        self.is_error
+    pub fn output(&self) -> Result<&str, &str> {
+        match &self.output {
+            Ok(content) => Ok(content),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -149,7 +151,7 @@ impl<'a> ToolSpecs<'a> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     id: String,
     name: String,

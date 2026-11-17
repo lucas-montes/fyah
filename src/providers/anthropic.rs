@@ -127,11 +127,17 @@ impl<'c, 'a> From<&'c Conversation<'a>> for AnthropicRequest<'c> {
                     });
                 }
                 // Answers are gathered into the next user message.
-                Message::Tool(tool) => pending.push(AnthropicBlock::ToolResult {
-                    tool_use_id: tool.call_id(),
-                    content: tool.content(),
-                    is_error: tool.is_error().then_some(true),
-                }),
+                Message::Tool(tool) => {
+                    let (content, is_error) = match tool.output() {
+                        Ok(content) => (content, None),
+                        Err(error) => (error, Some(true)),
+                    };
+                    pending.push(AnthropicBlock::ToolResult {
+                        tool_use_id: tool.call_id(),
+                        content,
+                        is_error,
+                    });
+                }
             }
         }
         flush(&mut pending, &mut messages);

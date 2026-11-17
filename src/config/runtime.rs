@@ -1,6 +1,8 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use tokio::sync::watch;
+
 use super::parser::{self, Agent, Config, Executable, Model, Tool, Validated, Vendor, WireFormat};
 use super::registry::{Key, Registry};
 use crate::prompt::ToolSpecs;
@@ -77,54 +79,156 @@ impl Provider {
     }
 }
 
-/// One agent within one config generation: what a turn and its tool batch
-/// read. Cloning bumps a reference count; the generation stays alive as long
-/// as a turn or a running tool holds it, then frees itself.
+/// One agent resolved within one generation. Cloning bumps a reference
+/// count; an old generation frees itself once nothing holds it.
 #[derive(Debug, Clone)]
-pub struct AgentRuntime {
+struct Resolved {
     config: Arc<RuntimeConfig>,
     agent: Key<Agent>,
 }
 
-impl AgentRuntime {
-    /// `None` when this generation has no such agent: a reload removed it.
-    pub fn new(config: Arc<RuntimeConfig>, name: &str) -> Option<Self> {
+impl Resolved {
+    /// `None` when `config` has no such agent.
+    fn new(config: Arc<RuntimeConfig>, name: &str) -> Option<Self> {
         let agent = config.agents.key(name)?;
         Some(Self { config, agent })
+    }
+
+    fn name(&self) -> &str {
+        self.config.agents.name(self.agent)
     }
 
     fn agent(&self) -> &Agent {
         &self.config.agents[self.agent]
     }
 
-    pub fn provider(&self) -> &Provider {
-        &self.config.providers[self.agent().provider()]
-    }
-
-    pub fn model(&self) -> &Model {
-        &self.provider().models[self.agent().model()]
-    }
-
-    pub fn system_prompt(&self) -> Option<&str> {
-        self.agent().system_prompt()
-    }
-
-    pub fn max_concurrent_tools(&self) -> NonZeroUsize {
+    fn max_concurrent_tools(&self) -> NonZeroUsize {
         self.agent().max_concurrent_tools()
     }
 
-    /// The tools this agent declares to the model.
-    pub fn tool_specs(&self) -> ToolSpecs<'_> {
-        ToolSpecs::new(self.agent().tools(), &self.config.tools)
-    }
-
-    /// What runs a call. `None` when the model named a tool this agent does
-    /// not have: model output is not validated config.
-    pub fn executable(&self, tool: &str) -> Option<&Executable> {
+    fn executable(&self, tool: &str) -> Option<&Executable> {
         if !self.agent().tools().iter().any(|name| name == tool) {
             return None;
         }
         let tool = &self.config.tools[tool];
         Some(&self.config.executables[tool.executable()])
+    }
+}
+
+/// One agent's configuration, following reloads and switches. The resolved
+/// agent lives once, in a `watch` channel: read here through
+/// [`current`](Self::current), and by the executor through an
+/// [`ExecConfig`].
+#[derive(Debug)]
+pub struct AgentConfig {
+    generations: watch::Receiver<Arc<RuntimeConfig>>,
+    current: watch::Sender<Resolved>,
+}
+
+impl AgentConfig {
+    /// `None` when the current generation has no such agent.
+    pub fn new(mut generations: watch::Receiver<Arc<RuntimeConfig>>, name: &str) -> Option<Self> {
+        let resolved = Resolved::new(Arc::clone(&generations.borrow_and_update()), name)?;
+        Some(Self {
+            generations,
+            current: watch::channel(resolved).0,
+        })
+    }
+
+    /// The agent as it is now. A read guard on the shared value: hold it
+    /// briefly, never across an `.await`.
+    pub fn current(&self) -> AgentView<'_> {
+        AgentView(self.current.borrow())
+    }
+
+    /// The executor's view of the same value.
+    pub fn exec_config(&self) -> ExecConfig {
+        ExecConfig(self.current.subscribe())
+    }
+
+    /// Resolves when a generation newer than the current one is published;
+    /// adopt it with [`update`](Self::update).
+    pub fn changed(&mut self) -> impl Future<Output = Result<(), watch::error::RecvError>> {
+        self.generations.changed()
+    }
+
+    /// Moves to the newest generation, finding the agent there by the name
+    /// it has in the current one. False when a reload removed it: the agent
+    /// then keeps the generation it has.
+    pub fn update(&mut self) -> bool {
+        let config = Arc::clone(&self.generations.borrow_and_update());
+        let resolved = Resolved::new(config, self.current.borrow().name());
+        self.publish(resolved)
+    }
+
+    /// Points at another agent of the newest generation; later reloads
+    /// follow that one. False when there is no such agent: the current one
+    /// stays.
+    pub fn switch(&mut self, name: &str) -> bool {
+        let config = Arc::clone(&self.generations.borrow_and_update());
+        self.publish(Resolved::new(config, name))
+    }
+
+    fn publish(&self, resolved: Option<Resolved>) -> bool {
+        let Some(resolved) = resolved else {
+            return false;
+        };
+        self.current.send_replace(resolved);
+        true
+    }
+}
+
+/// A read guard on an agent's current configuration.
+pub struct AgentView<'a>(watch::Ref<'a, Resolved>);
+
+impl AgentView<'_> {
+    pub fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    pub fn provider(&self) -> &Provider {
+        &self.0.config.providers[self.0.agent().provider()]
+    }
+
+    pub fn model(&self) -> &Model {
+        &self.provider().models[self.0.agent().model()]
+    }
+
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.0.agent().system_prompt()
+    }
+
+    /// The tools this agent declares to the model.
+    pub fn tool_specs(&self) -> ToolSpecs<'_> {
+        ToolSpecs::new(self.0.agent().tools(), &self.0.config.tools)
+    }
+}
+
+/// The part of an agent's configuration the executor reads. Always the
+/// latest: reloads and switches apply to the next call it starts.
+#[derive(Debug)]
+pub struct ExecConfig(watch::Receiver<Resolved>);
+
+impl ExecConfig {
+    pub fn max_concurrent_tools(&self) -> NonZeroUsize {
+        self.0.borrow().max_concurrent_tools()
+    }
+
+    /// What a call starting now runs with. Owned, so it can be held across
+    /// the call's awaits: a reference-count bump, no data copied.
+    pub fn snapshot(&self) -> ExecSnapshot {
+        ExecSnapshot(self.0.borrow().clone())
+    }
+}
+
+/// The configuration one call runs with, kept alive until the call ends.
+#[derive(Debug)]
+pub struct ExecSnapshot(Resolved);
+
+impl ExecSnapshot {
+    /// What runs a call. `None` when the model named a tool this agent does
+    /// not have: model output is not validated config.
+    pub fn executable(&self, tool: &str) -> Option<&Executable> {
+        self.0.executable(tool)
     }
 }

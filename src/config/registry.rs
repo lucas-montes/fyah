@@ -96,6 +96,10 @@ impl<T, const EMPTY: u32, H: BuildHasher> Registry<T, EMPTY, H> {
             bucket = (bucket + 1) & mask;
         }
     }
+
+    pub fn name(&self, key: Key<T>) -> &str {
+        &self.entries[key.index as usize].0
+    }
 }
 
 impl<T> std::ops::Index<&str> for Registry<T> {

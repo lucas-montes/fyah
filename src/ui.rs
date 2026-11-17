@@ -20,6 +20,9 @@ pub enum Inbound {
     Append(String),
     /// Resumes a stopped loop.
     Continue,
+    /// Hands the conversation to another agent from the next request on.
+    /// Calls already made finish with the agent that made them.
+    Agent(String),
 }
 
 /// Something the user should know about. Typed rather than pre-formatted, so
@@ -38,6 +41,9 @@ pub enum Notice {
     ToolsFinished(usize),
     /// A reload failed; the last good config stays active.
     ConfigRejected(ConfigError),
+    /// `/agent` named an agent the config does not have; the current one
+    /// stays.
+    UnknownAgent(String),
 }
 
 impl Display for Notice {
@@ -55,6 +61,7 @@ impl Display for Notice {
             Self::RunningTools(n) => write!(f, "running {n} tool call(s)"),
             Self::ToolsFinished(n) => write!(f, "{n} tool call(s) finished"),
             Self::ConfigRejected(error) => write!(f, "failed to reload config: {error}"),
+            Self::UnknownAgent(name) => write!(f, "no agent named {name}; keeping the current one"),
         }
     }
 }
@@ -119,6 +126,7 @@ pub fn spawn_stdin(
     });
 }
 
+//TODO: maybe return Result with an error
 fn parse_line(line: &str) -> Inbound {
     let trimmed = line.trim();
     if let Some(rest) = trimmed.strip_prefix('/') {
@@ -128,6 +136,7 @@ fn parse_line(line: &str) -> Inbound {
             Some("stop") => Inbound::Stop,
             Some("continue" | "resume") => Inbound::Continue,
             Some("interrupt") => Inbound::Interrupt(parts.next().unwrap_or("").to_owned()),
+            Some("agent") => Inbound::Agent(parts.next().unwrap_or("").trim().to_owned()),
             _ => Inbound::Append(trimmed.to_owned()),
         }
     } else {
