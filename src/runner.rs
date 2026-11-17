@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use tracing::{error, warn};
 
@@ -7,7 +7,7 @@ use crate::{
     config::AgentConfig,
     prompt::{AssistantMessage, AssistantTurn, Conversation, Message, ToolCall, ToolMessage},
     sessions::Session,
-    tools::{ExecContext, RunnableExt, ToolsExecutor},
+    tools::{ExecContext, RunnableExt, ToolsExecutor, WasmRuntime},
     ui::{Inbound, Notice, OutboundChannel},
 };
 
@@ -100,13 +100,14 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
     client: C,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
+    wasm: Arc<WasmRuntime>,
 ) {
     tracing::info!(agent_name = config.current().name(), "Starting agent");
 
     let mut agent = Agent {
         context: Context::default(),
         session,
-        tools_executor: ToolsExecutor::<R>::new(ExecContext::new(config.exec_config())),
+        tools_executor: ToolsExecutor::<R>::new(ExecContext::new(config.exec_config(), wasm)),
         config,
         pending: 0,
         results: Vec::new(),

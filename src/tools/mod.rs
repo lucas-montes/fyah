@@ -1,4 +1,7 @@
-mod executor;
 mod errors;
+mod executor;
+mod output;
+mod wasm;
 
-pub use executor::{ExecContext, ToolsExecutor, RunnableExt, Runnable};
+pub use executor::{ExecContext, Runnable, RunnableExt, ToolsExecutor};
+pub use wasm::WasmRuntime;

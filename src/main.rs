@@ -1,5 +1,6 @@
 use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -27,10 +28,10 @@ use fs_watcher::FsWatcher;
 use sessions::{Session, VcsKind, current_git_revision};
 use ui::{Inbound, Outbound, spawn_stdin};
 
-use crate::client::LlmClient;
-use crate::tools::Runnable;
-use crate::tools::RunnableExt;
-use crate::ui::OutboundChannel;
+use client::LlmClient;
+use tools::{Runnable, RunnableExt, WasmRuntime};
+
+use ui::OutboundChannel;
 
 #[derive(Debug, Clone, PartialEq, Default, clap::ValueEnum)]
 enum CtrlCMode {
@@ -101,7 +102,8 @@ async fn main() {
 
     let config = match Config::load(&config_path)
         .and_then(Config::validate)
-        .map(RuntimeConfig::from) {
+        .map(RuntimeConfig::from)
+    {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Config error: {e}");
@@ -141,13 +143,17 @@ async fn main() {
 
     let client = client::Client::default();
 
-    start_session::<_, Runnable>(
-        agent,
-        client,
-        user_input_rx,
-        user_output_tx.into(),
-    )
-    .await;
+    // Built once, shared by every agent of this workspace: one engine and
+    // one compile of each module.
+    let wasm = match WasmRuntime::new() {
+        Ok(wasm) => Arc::new(wasm),
+        Err(e) => {
+            eprintln!("Wasm runtime error: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    start_session::<_, Runnable>(agent, client, user_input_rx, user_output_tx.into(), wasm).await;
 }
 
 async fn start_session<C: LlmClient, R: RunnableExt + Send + 'static>(
@@ -155,6 +161,7 @@ async fn start_session<C: LlmClient, R: RunnableExt + Send + 'static>(
     client: C,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     user_output_tx: OutboundChannel,
+    wasm: Arc<WasmRuntime>,
 ) {
     let session = Session::new(
         uuid::Uuid::now_v7().to_string(),
@@ -175,6 +182,7 @@ async fn start_session<C: LlmClient, R: RunnableExt + Send + 'static>(
         user_input_rx,
         user_output_tx.into(),
         // tools_executor,
+        wasm,
     )
     .await;
     tracing::info!("agent loop exited successfully");

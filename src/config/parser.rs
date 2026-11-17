@@ -206,7 +206,90 @@ impl Executable {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ExecutableParams {
     Command { command: String },
-    Wasm { path: PathBuf, function: String },
+    Wasm(WasmSpec),
+}
+
+/// A WASI preview 1 module. It reads its JSON arguments on stdin and prints
+/// its answer; it reaches nothing beyond what these settings grant. A
+/// misspelled setting is an error, not a grant silently left out.
+#[derive(Debug, Deserialize, Valuable)]
+#[serde(deny_unknown_fields)]
+pub struct WasmSpec {
+    path: PathBuf,
+    /// The export to call; `_start` when not set.
+    function: Option<String>,
+    /// The command line after the module's name.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Linear memory the module may grow to.
+    #[serde(default = "default_memory_mb")]
+    memory_mb: NonZeroUsize,
+    #[serde(default)]
+    dirs: Vec<WasmDir>,
+    /// Variables set as written.
+    #[serde(default)]
+    env: HashMap<String, String>,
+    /// Variables copied from fyah's own environment, when set there.
+    #[serde(default)]
+    inherit_env: Vec<String>,
+}
+
+const fn default_memory_mb() -> NonZeroUsize {
+    NonZeroUsize::new(64).expect("64 is not zero")
+}
+
+impl WasmSpec {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn function(&self) -> &str {
+        self.function.as_deref().unwrap_or("_start")
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        self.memory_mb.get().saturating_mul(1 << 20)
+    }
+
+    pub fn dirs(&self) -> &[WasmDir] {
+        &self.dirs
+    }
+
+    pub fn env(&self) -> &HashMap<String, String> {
+        &self.env
+    }
+
+    pub fn inherit_env(&self) -> &[String] {
+        &self.inherit_env
+    }
+}
+
+/// A host directory the module sees at `guest`. Read-only unless `write`.
+#[derive(Debug, Deserialize, Valuable)]
+#[serde(deny_unknown_fields)]
+pub struct WasmDir {
+    host: PathBuf,
+    guest: String,
+    #[serde(default)]
+    write: bool,
+}
+
+impl WasmDir {
+    pub fn host(&self) -> &Path {
+        &self.host
+    }
+
+    pub fn guest(&self) -> &str {
+        &self.guest
+    }
+
+    pub fn write(&self) -> bool {
+        self.write
+    }
 }
 
 /// A config as parsed, not yet checked.
