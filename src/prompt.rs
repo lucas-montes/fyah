@@ -178,6 +178,12 @@ impl ToolCall {
     pub fn arguments(&self) -> &str {
         &self.arguments
     }
+
+    /// Moves the arguments out, leaving them empty: for a runner's own copy
+    /// of the call, which hands them to the tool without copying them.
+    pub fn take_arguments(&mut self) -> String {
+        std::mem::take(&mut self.arguments)
+    }
 }
 
 #[derive(Debug, Default)]

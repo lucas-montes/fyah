@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, num::NonZeroUsize};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
@@ -6,9 +6,12 @@ use tokio::{
 };
 
 use crate::{
-    config::{Executable, ExecConfig, ExecSnapshot},
+    config::{ExecConfig, ExecSnapshot, Executable, ExecutableParams},
     prompt::{ToolCall, ToolMessage},
-    tools::errors::{ExecError, ResolveError},
+    tools::{
+        errors::{ExecError, ResolveError},
+        wasm::WasmRuntime,
+    },
 };
 
 pub struct Runnable {
@@ -22,24 +25,43 @@ impl From<ToolCall> for Runnable {
 }
 
 impl RunnableExt for Runnable {
-    async fn run(self, call: CallContext) -> ToolMessage {
-        let output = resolve_and_execute(&self.call, &call).await;
+    async fn run(mut self, call: CallContext) -> ToolMessage {
+        let output = resolve_and_execute(&mut self.call, &call).await;
         ToolMessage::new(&self.call, output)
     }
 }
 
 /// The model's tool name is not validated config, so this lookup may miss;
-/// everything past it is resolved.
-async fn resolve_and_execute(call: &ToolCall, context: &CallContext) -> Result<String, ExecError> {
-    let executable = context
-        .config
-        .executable(call.name())
-        .ok_or(ExecError::Unavailable(ResolveError::UnknownTool))?;
-    execute(call, executable).await
+/// everything past it is resolved. The call is this runnable's own copy: its
+/// arguments are moved into the tool.
+fn resolve_and_execute(
+    call: &mut ToolCall,
+    context: &CallContext,
+) -> impl Future<Output = Result<String, ExecError>> + Send {
+    async move {
+        let executable = context
+            .config
+            .executable(call.name())
+            .ok_or(ExecError::Unavailable(ResolveError::UnknownTool))?;
+        execute(call, executable, &context.wasm).await
+    }
 }
 
-async fn execute(_call: &ToolCall, _executable: &Executable) -> Result<String, ExecError> {
-    todo!()
+fn execute(
+    call: &mut ToolCall,
+    executable: &Executable,
+    wasm: &WasmRuntime,
+) -> impl Future<Output = Result<String, ExecError>> + Send {
+    async move {
+        let timeout = executable
+            .timeout_secs()
+            .map(|secs| Duration::from_secs(secs.get()));
+        let output = match executable.params() {
+            ExecutableParams::Wasm(spec) => wasm.run(spec, call.take_arguments(), timeout).await?,
+            ExecutableParams::Command { .. } => todo!("command executables"),
+        };
+        Ok(output.into_answer())
+    }
 }
 
 /// Built from a call; running it always yields its answer.
@@ -66,19 +88,22 @@ impl<Runnable: RunnableExt> Drop for ToolsExecutor<Runnable> {
 pub struct ExecContext {
     /// The agent's executables and limits, always the latest.
     config: ExecConfig,
-    // wasm: Arc<WasmEnv>,
+    /// The workspace's runtime, shared with every other agent; each call in
+    /// flight holds it too, since a call outlives any borrow of this.
+    wasm: Arc<WasmRuntime>,
     // session
 }
 
 impl ExecContext {
-    pub fn new(config: ExecConfig) -> Self {
-        Self { config }
+    pub fn new(config: ExecConfig, wasm: Arc<WasmRuntime>) -> Self {
+        Self { config, wasm }
     }
 
     /// The context of a call starting now.
     fn call(&self) -> CallContext {
         CallContext {
             config: self.config.snapshot(),
+            wasm: Arc::clone(&self.wasm),
         }
     }
 }
@@ -88,6 +113,7 @@ impl ExecContext {
 #[derive(Debug)]
 pub struct CallContext {
     config: ExecSnapshot,
+    wasm: Arc<WasmRuntime>,
 }
 
 impl<Runnable: RunnableExt + Send + 'static> ToolsExecutor<Runnable> {
