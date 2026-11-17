@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, path::PathBuf};
 
 /// Why a tool call cannot run at all; the model is told instead.
 #[derive(Debug)]
@@ -27,9 +27,15 @@ pub enum ExecError {
     Spawn(std::io::Error),
     /// The arguments the model produced were not valid JSON for this tool.
     BadArguments(serde_json::Error),
-    Io {
-        path: String,
+    /// A wasm module's file could not be resolved or read.
+    ModuleFile {
+        path: PathBuf,
         source: std::io::Error,
+    },
+    /// A directory a wasm module is granted could not be opened.
+    PreopenDir {
+        dir: PathBuf,
+        source: wasmtime::Error,
     },
     Stdin(std::io::Error),
     Wait(std::io::Error),
@@ -37,7 +43,7 @@ pub enum ExecError {
     /// The tool's code panicked. Caught so the call still gets an answer.
     Panicked(String),
     /// A wasm module failed to load, link or run to completion.
-    Wasm(String),
+    Wasm(wasmtime::Error),
     /// The executor is gone, so the call was never started.
     ExecutorGone,
     /// The call could not be matched to anything that runs.
@@ -55,17 +61,26 @@ impl ExecError {
     }
 }
 
+impl From<wasmtime::Error> for ExecError {
+    fn from(error: wasmtime::Error) -> Self {
+        Self::Wasm(error)
+    }
+}
+
 impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Spawn(e) => write!(f, "failed to spawn: {e}"),
             Self::BadArguments(e) => write!(f, "invalid tool arguments: {e}"),
-            Self::Io { path, source } => write!(f, "{path}: {source}"),
+            Self::ModuleFile { path, source } => write!(f, "{}: {source}", path.display()),
+            // `:#` prints the whole chain of causes on one line: the model
+            // reads it.
+            Self::PreopenDir { dir, source } => write!(f, "{}: {source:#}", dir.display()),
             Self::Stdin(e) => write!(f, "failed to write stdin: {e}"),
             Self::Wait(e) => write!(f, "failed to wait for process: {e}"),
             Self::Timeout => write!(f, "execution timed out"),
             Self::Panicked(message) => write!(f, "panicked: {message}"),
-            Self::Wasm(message) => write!(f, "wasm: {message}"),
+            Self::Wasm(error) => write!(f, "wasm: {error:#}"),
             Self::ExecutorGone => write!(f, "the tool executor is gone"),
             Self::Unavailable(error) => write!(f, "unavailable: {error}"),
         }

@@ -1,5 +1,9 @@
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc, time::Duration};
 
+use futures::{
+    TryFutureExt as _,
+    future::{self, Either},
+};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::{JoinHandle, JoinSet},
@@ -9,7 +13,9 @@ use crate::{
     config::{ExecConfig, ExecSnapshot, Executable, ExecutableParams},
     prompt::{ToolCall, ToolMessage},
     tools::{
+        command,
         errors::{ExecError, ResolveError},
+        output::ToolOutput,
         wasm::WasmRuntime,
     },
 };
@@ -25,43 +31,48 @@ impl From<ToolCall> for Runnable {
 }
 
 impl RunnableExt for Runnable {
-    async fn run(mut self, call: CallContext) -> ToolMessage {
-        let output = resolve_and_execute(&mut self.call, &call).await;
-        ToolMessage::new(&self.call, output)
+    /// The one async block of a call: it owns the call and its context while
+    /// the chain below borrows them, which no combinator can do.
+    fn run(mut self, context: CallContext) -> impl Future<Output = ToolMessage> + Send + 'static {
+        async move {
+            // The call is this runnable's own copy: its arguments are moved
+            // into the tool, and the answer only needs its id.
+            let arguments = self.call.take_arguments();
+            let output = resolve_and_execute(self.call.name(), arguments, &context).await;
+            ToolMessage::new(&self.call, output)
+        }
     }
 }
 
 /// The model's tool name is not validated config, so this lookup may miss;
-/// everything past it is resolved. The call is this runnable's own copy: its
-/// arguments are moved into the tool.
+/// everything past it is resolved.
 fn resolve_and_execute(
-    call: &mut ToolCall,
+    name: &str,
+    arguments: String,
     context: &CallContext,
 ) -> impl Future<Output = Result<String, ExecError>> + Send {
-    async move {
-        let executable = context
-            .config
-            .executable(call.name())
-            .ok_or(ExecError::Unavailable(ResolveError::UnknownTool))?;
-        execute(call, executable, &context.wasm).await
+    match context.config.executable(name) {
+        Some(executable) => Either::Left(execute(executable, arguments, &context.wasm)),
+        None => Either::Right(future::ready(Err(ExecError::Unavailable(
+            ResolveError::UnknownTool,
+        )))),
     }
 }
 
+/// Both kinds answer the same way, so everything past the dispatch is shared.
 fn execute(
-    call: &mut ToolCall,
     executable: &Executable,
+    arguments: String,
     wasm: &WasmRuntime,
 ) -> impl Future<Output = Result<String, ExecError>> + Send {
-    async move {
-        let timeout = executable
-            .timeout_secs()
-            .map(|secs| Duration::from_secs(secs.get()));
-        let output = match executable.params() {
-            ExecutableParams::Wasm(spec) => wasm.run(spec, call.take_arguments(), timeout).await?,
-            ExecutableParams::Command { .. } => todo!("command executables"),
-        };
-        Ok(output.into_answer())
+    let timeout = executable
+        .timeout_secs()
+        .map(|secs| Duration::from_secs(secs.get()));
+    match executable.params() {
+        ExecutableParams::Command(spec) => Either::Left(command::run(spec, arguments, timeout)),
+        ExecutableParams::Wasm(spec) => Either::Right(wasm.run(spec, arguments, timeout)),
     }
+    .map_ok(ToolOutput::into_answer)
 }
 
 /// Built from a call; running it always yields its answer.

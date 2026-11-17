@@ -15,6 +15,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use futures::{
+    FutureExt, TryFutureExt,
+    future::{self, Either},
+};
 use tracing::{debug, warn};
 use wasmtime::{
     Cache, Config, Engine, EngineWeak, InstancePre, Linker, Module, Store, StoreLimits,
@@ -28,7 +32,11 @@ use wasmtime_wasi::{
 
 use crate::{
     config::WasmSpec,
-    tools::{errors::ExecError, output::ToolOutput},
+    tools::{
+        deadline::{blocking, within},
+        errors::ExecError,
+        output::ToolOutput,
+    },
 };
 
 /// How often a running guest gives its thread back, so a timeout or a
@@ -112,45 +120,43 @@ impl WasmRuntime {
         stdin: String,
         timeout: Option<Duration>,
     ) -> impl Future<Output = Result<ToolOutput, ExecError>> + Send {
-        async move {
-            let module = self.load(spec.path()).await?;
+        self.load(spec.path())
+            .and_then(move |module| self.execute(module, spec, stdin, timeout))
+    }
 
-            let stdout = MemoryOutputPipe::new(MAX_OUTPUT_BYTES);
-            let stderr = MemoryOutputPipe::new(MAX_OUTPUT_BYTES);
-            let wasi = sandbox(spec, stdin, &stdout, &stderr)?;
-            let limits = StoreLimitsBuilder::new()
-                .memory_size(spec.memory_bytes())
-                .instances(1)
-                .build();
-            let mut store = Store::new(&self.engine, Guest { wasi, limits });
-            store.limiter(|guest| &mut guest.limits);
-            // Also the initial deadline: without one the guest traps at once.
-            store.epoch_deadline_async_yield_and_update(1);
+    /// Builds the call's store, then runs it. Everything up to the call is
+    /// synchronous, so a sandbox that cannot be built answers at once.
+    fn execute(
+        &self,
+        module: InstancePre<Guest>,
+        spec: &WasmSpec,
+        stdin: String,
+        timeout: Option<Duration>,
+    ) -> impl Future<Output = Result<ToolOutput, ExecError>> + Send {
+        let stdout = MemoryOutputPipe::new(MAX_OUTPUT_BYTES);
+        let stderr = MemoryOutputPipe::new(MAX_OUTPUT_BYTES);
+        let wasi = match sandbox(spec, stdin, &stdout, &stderr) {
+            Ok(wasi) => wasi,
+            Err(error) => return Either::Right(future::ready(Err(error))),
+        };
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(spec.memory_bytes())
+            .instances(1)
+            .build();
+        let mut store = Store::new(&self.engine, Guest { wasi, limits });
+        store.limiter(|guest| &mut guest.limits);
+        // Also the initial deadline: without one the guest traps at once.
+        store.epoch_deadline_async_yield_and_update(1);
 
-            let call = call(&module, &mut store, spec.function());
-            let outcome = match timeout {
-                Some(limit) => tokio::time::timeout(limit, call)
-                    .await
-                    .map_err(|_| ExecError::Timeout)?,
-                None => call.await,
-            };
-            let status = match outcome {
-                Ok(()) => 0,
-                Err(error) => match error.downcast_ref::<I32Exit>() {
-                    Some(I32Exit(code)) => *code,
-                    None => return Err(ExecError::Wasm(format!("{error:#}"))),
-                },
-            };
-
-            // Releases the guest's ends of the pipes, so taking their buffers
-            // copies nothing.
-            drop(store);
-            Ok(ToolOutput::from_bytes(
-                status,
-                into_bytes(stdout),
-                into_bytes(stderr),
-            ))
-        }
+        Either::Left(
+            within(timeout, call(module, store, spec.function()).map(exit_status))
+                .map(Result::flatten)
+                // The store is gone with the call, releasing the guest's ends
+                // of the pipes, so taking their buffers copies nothing.
+                .map_ok(move |status| {
+                    ToolOutput::from_bytes(status, into_bytes(stdout), into_bytes(stderr))
+                }),
+        )
     }
 
     /// The module at `path`, compiled from its file as it is now. Two calls
@@ -159,54 +165,52 @@ impl WasmRuntime {
         &self,
         path: &Path,
     ) -> impl Future<Output = Result<InstancePre<Guest>, ExecError>> + Send {
-        async move {
-            let io = |source| ExecError::Io {
-                path: path.display().to_string(),
-                source,
-            };
-            let target = tokio::fs::canonicalize(path).await.map_err(io)?;
-            // Of the target itself, so both describe the same file.
-            let metadata = tokio::fs::metadata(&target).await.map_err(io)?;
-            let stamp = Stamp {
-                target,
-                modified: metadata.modified().map_err(io)?,
-                len: metadata.len(),
-            };
-            if let Some(cached) = self.cache().get(path)
-                && cached.stamp == stamp
-            {
-                // A reference-count bump.
-                return Ok(cached.module.clone());
-            }
-
-            debug!(path = %path.display(), "compiling wasm module");
-            // Compiling is CPU-heavy: kept off the async workers.
-            let engine = self.engine.clone();
-            let owned = path.to_path_buf();
-            let (module, owned) = tokio::task::spawn_blocking(move || {
-                let module = Module::from_file(&engine, &owned);
-                (module, owned)
+        // One trip to the blocking pool for both syscalls, and one copy of
+        // the path, which a miss reuses as the cache key.
+        let owned = path.to_path_buf();
+        blocking(move || stamp(owned))
+            .map(Result::flatten)
+            .and_then(move |(owned, stamp)| match self.cached(&owned, &stamp) {
+                Some(module) => Either::Left(future::ready(Ok(module))),
+                None => Either::Right(self.compile(owned, stamp)),
             })
-            .await
-            .map_err(|join| match join.try_into_panic() {
-                Ok(payload) => ExecError::panicked(&*payload),
-                Err(_) => ExecError::ExecutorGone,
-            })?;
-            let module = module.map_err(|error| ExecError::Wasm(format!("{error:#}")))?;
+    }
+
+    /// A reference-count bump, when the module is still what was compiled.
+    fn cached(&self, path: &Path, stamp: &Stamp) -> Option<InstancePre<Guest>> {
+        self.cache()
+            .get(path)
+            .filter(|cached| cached.stamp == *stamp)
+            .map(|cached| cached.module.clone())
+    }
+
+    /// Compiling is CPU-heavy: kept off the async workers. Linking and
+    /// caching are not, and need the runtime, so they happen back here.
+    fn compile(
+        &self,
+        path: PathBuf,
+        stamp: Stamp,
+    ) -> impl Future<Output = Result<InstancePre<Guest>, ExecError>> + Send {
+        debug!(path = %path.display(), "compiling wasm module");
+        let engine = self.engine.clone();
+        blocking(move || {
+            let module = Module::from_file(&engine, &path);
+            (module, path)
+        })
+        .map(move |compiled| {
+            let (module, path) = compiled?;
             let module = self
                 .linker
-                .instantiate_pre(&module)
-                .map_err(|error| ExecError::Wasm(format!("{error:#}")))?;
-
+                .instantiate_pre(&module?)?;
             self.cache().insert(
-                owned,
+                path,
                 Cached {
                     stamp,
                     module: module.clone(),
                 },
             );
             Ok(module)
-        }
+        })
     }
 
     fn cache(&self) -> MutexGuard<'_, HashMap<PathBuf, Cached>> {
@@ -214,27 +218,62 @@ impl WasmRuntime {
     }
 }
 
+/// The file `path` really is now. Blocking; the path comes back to be
+/// reused, in the error too.
+fn stamp(path: PathBuf) -> Result<(PathBuf, Stamp), ExecError> {
+    match read_stamp(&path) {
+        Ok(stamp) => Ok((path, stamp)),
+        Err(source) => Err(ExecError::ModuleFile { path, source }),
+    }
+}
+
+/// Where `path` points, when it changed and how big it is.
+fn read_stamp(path: &Path) -> std::io::Result<Stamp> {
+    let target = std::fs::canonicalize(path)?;
+    // Of the target itself, so both describe the same file.
+    let metadata = std::fs::metadata(&target)?;
+    Ok(Stamp {
+        target,
+        modified: metadata.modified()?,
+        len: metadata.len(),
+    })
+}
+
 /// Instantiates and calls `function`. A reactor (anything but `_start`)
-/// gets its `_initialize` first, when it has one.
+/// gets its `_initialize` first, when it has one. An async block: it owns
+/// the module and the store while every step borrows them, and dropping
+/// the store as it finishes frees the pipes.
 fn call(
-    module: &InstancePre<Guest>,
-    store: &mut Store<Guest>,
+    module: InstancePre<Guest>,
+    mut store: Store<Guest>,
     function: &str,
 ) -> impl Future<Output = wasmtime::Result<()>> + Send {
     async move {
-        let instance = module.instantiate_async(&mut *store).await?;
+        let instance = module.instantiate_async(&mut store).await?;
         if function != "_start"
-            && let Some(initialize) = instance.get_func(&mut *store, "_initialize")
+            && let Some(initialize) = instance.get_func(&mut store, "_initialize")
         {
             initialize
-                .typed::<(), ()>(&*store)?
-                .call_async(&mut *store, ())
+                .typed::<(), ()>(&store)?
+                .call_async(&mut store, ())
                 .await?;
         }
         instance
-            .get_typed_func::<(), ()>(&mut *store, function)?
-            .call_async(&mut *store, ())
+            .get_typed_func::<(), ()>(&mut store, function)?
+            .call_async(&mut store, ())
             .await
+    }
+}
+
+/// Exiting through `proc_exit` is an answer, with its code; any other
+/// error means the module never got to answer.
+fn exit_status(outcome: wasmtime::Result<()>) -> Result<i32, ExecError> {
+    match outcome {
+        Ok(()) => Ok(0),
+        Err(error) => match error.downcast_ref::<I32Exit>() {
+            Some(I32Exit(code)) => Ok(*code),
+            None => Err(error.into()),
+        },
     }
 }
 
@@ -267,7 +306,11 @@ fn sandbox(
             FsPerms::ReadOnly
         };
         wasi.preopened_dir(dir.host(), dir.guest(), perms)
-            .map_err(|error| ExecError::Wasm(format!("{}: {error:#}", dir.host().display())))?;
+            // An error outlives the borrow of the spec: only the failing path is copied.
+            .map_err(|source| ExecError::PreopenDir {
+                dir: dir.host().to_path_buf(),
+                source,
+            })?;
     }
     Ok(wasi.build_p1())
 }

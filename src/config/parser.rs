@@ -205,8 +205,24 @@ impl Executable {
 #[derive(Debug, Deserialize, Valuable)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ExecutableParams {
-    Command { command: String },
+    Command(CommandSpec),
     Wasm(WasmSpec),
+}
+
+/// A shell command line. It reads the call's JSON arguments on stdin and
+/// prints its answer. Unlike a wasm module it is not sandboxed: it runs as
+/// fyah, in fyah's directory, with fyah's environment.
+#[derive(Debug, Deserialize, Valuable)]
+#[serde(deny_unknown_fields)]
+pub struct CommandSpec {
+    /// Run by `sh -c`, so it may carry arguments, pipes and redirections.
+    command: String,
+}
+
+impl CommandSpec {
+    pub fn command(&self) -> &str {
+        &self.command
+    }
 }
 
 /// A WASI preview 1 module. It reads its JSON arguments on stdin and prints
