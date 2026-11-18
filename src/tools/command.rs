@@ -15,25 +15,24 @@ use tokio::{
     process::{Child, ChildStdin, Command},
 };
 
-use crate::{
-    config::CommandSpec,
-    tools::{deadline::within, errors::ExecError, output::ToolOutput},
-};
+use crate::tools::{deadline::within, errors::ExecError, output::ToolOutput};
 
 /// What is kept of each stream. The rest is read and thrown away, so a
 /// chatty command never blocks on a full pipe.
 const MAX_OUTPUT_BYTES: u64 = 1 << 20;
 
-/// Runs `spec` with `stdin`. `Err` means the command never got to answer:
-/// it could not start, or ran out of time. Exiting non-zero is an answer.
+/// Runs `command` with `stdin`. `Err` means the command never got to
+/// answer: it could not start, or ran out of time. Exiting non-zero is an
+/// answer. The process starts before this returns, so the future borrows
+/// nothing.
 pub fn run(
-    spec: &CommandSpec,
+    command: &str,
     stdin: String,
     timeout: Option<std::time::Duration>,
-) -> impl Future<Output = Result<ToolOutput, ExecError>> + Send {
+) -> impl Future<Output = Result<ToolOutput, ExecError>> + Send + use<> {
     let child = Command::new("sh")
         .arg("-c")
-        .arg(spec.command())
+        .arg(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

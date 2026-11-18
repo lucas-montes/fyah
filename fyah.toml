@@ -53,6 +53,7 @@ provider = "ollama"
 model = "deepseek"
 # Builtins are opt-in per agent: a planner reads but never writes or runs.
 tools = ["read"]
+dirs = [{ path = "." }]
 max_concurrent_tools = 1
 
 [agents.default]
@@ -62,7 +63,10 @@ model = "qwen3-4"
 max_turns = 25
 # read/write/bash are builtins -- no [tools.*] or [executables.*] entry needed.
 # git_log, text_stats and line_count are config-declared: see the bottom.
-tools = ["read", "write", "bash", "git_log", "text_stats", "line_count"]
+tools = ["git_log", "text_stats", "line_count"]
+# What read and write may reach: read-only unless write = true. Empty, or
+# left out, reaches nothing.
+dirs = [{ path = ".", write = true }]
 max_concurrent_tools = 5
 # When tool results go back to the model: "wait" for all of them (default),
 # "eager" as soon as one is in, or { batch = 3 } once three are.

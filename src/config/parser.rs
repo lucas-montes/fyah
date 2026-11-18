@@ -19,6 +19,10 @@ pub enum ValidationError {
     UnknownExecutable(String),
     InvalidContext(String),
     InvalidLimits(String),
+    /// A `[tools.*]` or `[executables.*]` entry takes a builtin's name.
+    ReservedName(String),
+    /// An agent's `dirs` entry does not resolve to a directory.
+    InvalidDir(String),
 }
 
 // Named constructors for the cross-reference failures raised by validation.
@@ -54,6 +58,14 @@ impl ValidationError {
     fn limits(agent: &str, detail: &str) -> Self {
         Self::InvalidLimits(format!("{detail} (referenced by agent {agent}.limits)"))
     }
+
+    fn reserved(table: &str, name: &str) -> Self {
+        Self::ReservedName(format!("[{table}.{name}] (a builtin has that name)"))
+    }
+
+    fn dir(agent: &str, dir: &Path, error: &std::io::Error) -> Self {
+        Self::InvalidDir(format!("{}: {error} (referenced by agent {agent}.dirs)", dir.display()))
+    }
 }
 
 impl std::fmt::Display for ValidationError {
@@ -66,6 +78,8 @@ impl std::fmt::Display for ValidationError {
             Self::UnknownExecutable(e) => write!(f, "unknown executable: {e}"),
             Self::InvalidContext(c) => write!(f, "invalid context config: {c}"),
             Self::InvalidLimits(l) => write!(f, "invalid limits config: {l}"),
+            Self::ReservedName(n) => write!(f, "reserved name: {n}"),
+            Self::InvalidDir(d) => write!(f, "invalid dir: {d}"),
         }
     }
 }
@@ -130,6 +144,10 @@ pub struct Agent {
     system_prompt: Option<String>,
     #[serde(default)]
     tools: Vec<String>,
+    /// What the builtins `read` and `write` may reach. Empty reaches
+    /// nothing: an agent says what it may touch.
+    #[serde(default)]
+    dirs: Vec<AgentDir>,
     max_concurrent_tools: NonZeroUsize,
     max_turns: NonZeroUsize,
     max_tokens: Option<NonZeroUsize>,
@@ -161,6 +179,31 @@ impl Agent {
     pub fn max_concurrent_tools(&self) -> NonZeroUsize {
         self.max_concurrent_tools
     }
+
+    /// Canonical once validated: resolved through every symlink.
+    pub fn dirs(&self) -> &[AgentDir] {
+        &self.dirs
+    }
+}
+
+/// A directory an agent's builtins may reach, with everything under it.
+/// Read-only unless `write`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDir {
+    path: PathBuf,
+    #[serde(default)]
+    write: bool,
+}
+
+impl AgentDir {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn write(&self) -> bool {
+        self.write
+    }
 }
 
 #[derive(Debug, Deserialize, Valuable, Default)]
@@ -180,6 +223,14 @@ impl Tool {
     }
     pub fn parameters(&self) -> &Value {
         &self.parameters
+    }
+
+    fn builtin(name: &str, description: &str, parameters: Value) -> Self {
+        Self {
+            description: description.into(),
+            executable: name.into(),
+            parameters,
+        }
     }
 }
 
@@ -207,6 +258,126 @@ impl Executable {
 pub enum ExecutableParams {
     Command(CommandSpec),
     Wasm(WasmSpec),
+    /// Never read from a file: validation adds one per builtin.
+    #[serde(skip)]
+    Builtin(Builtin),
+}
+
+/// A tool fyah runs itself.
+#[derive(Debug, Valuable)]
+pub enum Builtin {
+    /// Answers with at most `max_bytes` of the file.
+    Read { max_bytes: u64 },
+    Write,
+    Bash,
+}
+
+/// The `[builtins]` table: the settings of the tools fyah runs itself.
+/// Every one is optional.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Builtins {
+    #[serde(default)]
+    read: ReadSettings,
+    #[serde(default)]
+    bash: BashSettings,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadSettings {
+    max_bytes: NonZeroU64,
+}
+
+impl Default for ReadSettings {
+    fn default() -> Self {
+        Self {
+            max_bytes: NonZeroU64::new(256 << 10).expect("not zero"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BashSettings {
+    timeout_secs: NonZeroU64,
+}
+
+impl Default for BashSettings {
+    fn default() -> Self {
+        Self {
+            timeout_secs: NonZeroU64::new(120).expect("not zero"),
+        }
+    }
+}
+
+impl Builtins {
+    /// Each builtin as the tool the model sees and the executable that runs
+    /// it, both under the builtin's name.
+    fn into_entries(self) -> [(&'static str, Tool, Executable); 3] {
+        [
+            (
+                "read",
+                Tool::builtin(
+                    "read",
+                    "Read a file. Answers with its contents, cut at a size limit.",
+                    serde_json::json!({
+                        "type": "object",
+                        "required": ["path"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "path": { "type": "string", "description": "Path of the file, relative to the working directory" }
+                        }
+                    }),
+                ),
+                Executable {
+                    timeout_secs: None,
+                    params: ExecutableParams::Builtin(Builtin::Read {
+                        max_bytes: self.read.max_bytes.get(),
+                    }),
+                },
+            ),
+            (
+                "write",
+                Tool::builtin(
+                    "write",
+                    "Write a file, replacing it when it exists. Missing parent directories are created.",
+                    serde_json::json!({
+                        "type": "object",
+                        "required": ["path", "content"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "path": { "type": "string", "description": "Path of the file, relative to the working directory" },
+                            "content": { "type": "string", "description": "The whole new content of the file" }
+                        }
+                    }),
+                ),
+                Executable {
+                    timeout_secs: None,
+                    params: ExecutableParams::Builtin(Builtin::Write),
+                },
+            ),
+            (
+                "bash",
+                Tool::builtin(
+                    "bash",
+                    "Run a shell command line with sh -c in the working directory. Answers with its stdout; when it fails, also its stderr and exit status.",
+                    serde_json::json!({
+                        "type": "object",
+                        "required": ["command"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "command": { "type": "string", "description": "The command line to run" }
+                        }
+                    }),
+                ),
+                Executable {
+                    timeout_secs: Some(self.bash.timeout_secs),
+                    params: ExecutableParams::Builtin(Builtin::Bash),
+                },
+            ),
+        ]
+    }
 }
 
 /// A shell command line. It reads the call's JSON arguments on stdin and
@@ -342,6 +513,9 @@ pub struct Config<S> {
     tools: HashMap<String, Tool>,
     #[serde(default)]
     executables: HashMap<String, Executable>,
+    /// Moved into `tools` and `executables` by validation.
+    #[serde(default)]
+    builtins: Builtins,
     #[serde(skip)]
     state: PhantomData<S>,
 }
@@ -359,10 +533,21 @@ impl Config<Raw> {
     }
 
     /// Checks every cross-reference, so that afterwards each name the config
-    /// uses resolves. The tables move into the validated config as they are.
-    pub fn validate(self) -> Result<Config<Validated>, Error> {
+    /// uses resolves. The builtins join the tables first, so an agent names
+    /// them like any other tool; agents' dirs are resolved to where they
+    /// really are. Everything else moves into the validated config as it is.
+    pub fn validate(mut self) -> Result<Config<Validated>, Error> {
         let mut errors = Vec::new();
 
+        for (name, tool, executable) in std::mem::take(&mut self.builtins).into_entries() {
+            if self.tools.insert(name.into(), tool).is_some() {
+                errors.push(ValidationError::reserved("tools", name));
+            }
+            if self.executables.insert(name.into(), executable).is_some() {
+                errors.push(ValidationError::reserved("executables", name));
+            }
+        }
+        resolve_dirs(&mut self.agents, &mut errors);
         validate_agents(&self.agents, &self.providers, &self.tools, &mut errors);
         validate_executables(&self.tools, &self.executables, &mut errors);
 
@@ -382,8 +567,27 @@ impl Config<Raw> {
             agents: self.agents,
             tools: self.tools,
             executables: self.executables,
+            builtins: self.builtins,
             state: PhantomData,
         })
+    }
+}
+
+/// Each dir becomes canonical, so a path checked against it later is
+/// compared with where the dir really is, not with how it was written.
+fn resolve_dirs(agents: &mut HashMap<String, Agent>, errors: &mut Vec<ValidationError>) {
+    for (agent_name, agent) in agents {
+        for dir in &mut agent.dirs {
+            match std::fs::canonicalize(&dir.path) {
+                Ok(path) if path.is_dir() => dir.path = path,
+                Ok(_) => errors.push(ValidationError::dir(
+                    agent_name,
+                    &dir.path,
+                    &std::io::Error::from(std::io::ErrorKind::NotADirectory),
+                )),
+                Err(error) => errors.push(ValidationError::dir(agent_name, &dir.path, &error)),
+            }
+        }
     }
 }
 

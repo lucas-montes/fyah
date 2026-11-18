@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use crate::config::{Registry, Tool};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     User(UserMessage),
     Assistant(AssistantMessage),
@@ -18,7 +19,7 @@ impl Message {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct UserMessage {
     content: String,
 }
@@ -30,7 +31,7 @@ impl UserMessage {
 }
 
 /// A model turn and the calls it made.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct AssistantMessage {
     content: Option<String>,
     tool_calls: Vec<ToolCall>,
@@ -54,7 +55,7 @@ impl AssistantMessage {
 }
 
 /// The answer to one call, paired with it by id.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ToolMessage {
     call_id: String,
     /// What the tool answered, or why it could not. The success side is

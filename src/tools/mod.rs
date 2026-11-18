@@ -1,3 +1,4 @@
+mod builtin;
 mod command;
 mod deadline;
 mod errors;

@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::parser::{self, Agent, Config, Executable, Model, Tool, Validated, Vendor, WireFormat};
+use super::parser::{
+    self, Agent, AgentDir, Config, Executable, Model, Tool, Validated, Vendor, WireFormat,
+};
 use super::registry::{Key, Registry};
 use crate::prompt::ToolSpecs;
 
@@ -230,5 +232,17 @@ impl ExecSnapshot {
     /// not have: model output is not validated config.
     pub fn executable(&self, tool: &str) -> Option<&Executable> {
         self.0.executable(tool)
+    }
+
+    /// What the agent's builtins may reach, canonical.
+    pub fn dirs(&self) -> &[AgentDir] {
+        self.0.agent().dirs()
+    }
+
+    /// The provider-side name of the model the agent runs: who a change is
+    /// attributed to.
+    pub fn model_id(&self) -> &str {
+        let agent = self.0.agent();
+        self.0.config.providers[agent.provider()].models[agent.model()].name()
     }
 }

@@ -1,6 +1,12 @@
-use std::{future::Future, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use tracing::{error, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     client::{Error as ClientError, LlmClient},
@@ -11,6 +17,7 @@ use crate::{
     ui::{Inbound, Notice, OutboundChannel},
 };
 
+#[derive(Debug, Clone, Copy)]
 enum Phase {
     /// A request is in flight.
     Request,
@@ -19,6 +26,17 @@ enum Phase {
     /// Waiting for the user: the model is done, or the loop was stopped.
     Idle,
     Exit,
+}
+
+impl Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Phase::Request => write!(f, "request"),
+            Phase::Tools => write!(f, "tools"),
+            Phase::Idle => write!(f, "idle"),
+            Phase::Exit => write!(f, "exit"),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -74,17 +92,48 @@ struct Agent<R: RunnableExt + Send + 'static> {
     pending: usize,
     /// Reused across turns: drained into the history each time.
     results: Vec<ToolMessage>,
+    /// A turn is one request and the tool phases that answer it.
+    turn: u64,
+    /// When each call was submitted, with its name, for the finish trace.
+    started: HashMap<String, (String, Instant)>,
 }
 
 impl<R: RunnableExt + Send + 'static> Agent<R> {
     /// Moves to the new generation. If a reload removed the agent, it keeps
     /// running on the generation it has.
     fn reload(&mut self) {
-        if !self.config.update() {
+        if self.config.update() {
+            info!(agent_name = self.config.current().name(), "config reloaded");
+        } else {
             warn!(
                 agent_name = self.config.current().name(),
                 "agent was removed from the config; keeping its previous settings"
             );
+        }
+    }
+
+    /// Moves every answer already taken into the history.
+    #[instrument(skip_all)]
+    fn record_answers(&mut self) {
+        for answer in self.results.drain(..) {
+            let (name, elapsed) = match self.started.remove(answer.call_id()) {
+                Some((name, started)) => (name, started.elapsed()),
+                None => (String::new(), Duration::ZERO),
+            };
+            let (status, output) = match answer.output() {
+                Ok(output) => ("ok", output),
+                Err(error) => ("error", error),
+            };
+            info!(
+                call_id = answer.call_id(),
+                name = name.as_str(),
+                status,
+                len = output.len(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                "tool call finished"
+            );
+            debug!(call_id = answer.call_id(), output, "tool output");
+            self.context.answer(answer);
         }
     }
 }
@@ -95,6 +144,7 @@ struct UserChannels {
     output: OutboundChannel,
 }
 
+#[instrument(skip_all, fields(agent = config.current().name()))]
 pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
     config: AgentConfig,
     session: Session,
@@ -103,7 +153,7 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
     user_output_tx: OutboundChannel,
     wasm: Arc<WasmRuntime>,
 ) {
-    tracing::info!(agent_name = config.current().name(), "Starting agent");
+    info!("starting agent");
 
     // Shared with the executor: its calls attribute their changes to it.
     let session = Arc::new(session);
@@ -119,6 +169,8 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
         config,
         pending: 0,
         results: Vec::new(),
+        turn: 0,
+        started: HashMap::new(),
     };
 
     let mut user = UserChannels {
@@ -129,15 +181,24 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
     let mut phase = Phase::Idle;
     //TODO: maybe the select! to listen to the user should be here intead of having it duplicated in each phase
     loop {
-        phase = match phase {
-            Phase::Request => request_phase(&client, &mut user, &mut agent).await,
+        let next = match phase {
+            Phase::Request => {
+                agent.turn += 1;
+                request_phase(&client, &mut user, &mut agent).await
+            }
             Phase::Tools => tools_phase(&mut user, &mut agent).await,
             Phase::Idle => idle_phase(&mut user, &mut agent).await,
-            Phase::Exit => return,
+            Phase::Exit => {
+                info!("agent stopped");
+                return;
+            }
         };
+        info!(from = %phase, to = %next, "phase transition");
+        phase = next;
     }
 }
 
+#[instrument(skip_all, fields(turn = agent.turn))]
 async fn request_phase(
     client: &impl LlmClient,
     user: &mut UserChannels,
@@ -154,6 +215,20 @@ async fn request_phase(
             model.max_tokens(),
             agent.context.messages(),
             runtime.tool_specs(),
+        );
+        info!(
+            model = model.name(),
+            messages = agent.context.messages().len(),
+            tools = runtime.tool_specs().len(),
+            "request sent"
+        );
+        debug!(
+            system = ?runtime.system_prompt(),
+            temperature = ?model.temperature(),
+            max_tokens = ?model.max_tokens(),
+            tool_names = ?runtime.tool_specs().iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+            history = %serde_json::to_string(agent.context.messages()).unwrap_or_default(),
+            "request body"
         );
         client.create_request(runtime.provider(), &conversation)
     };
@@ -178,6 +253,7 @@ async fn request_phase(
 
 /// Records the model's turn. Its calls go to the executor right away, each
 /// with a placeholder answer in the history until its real one arrives.
+#[instrument(skip_all)]
 fn on_reply<R: RunnableExt + Send + 'static>(
     reply: Result<AssistantTurn, ClientError>,
     agent: &mut Agent<R>,
@@ -196,12 +272,29 @@ fn on_reply<R: RunnableExt + Send + 'static>(
     if let Some(content) = &content
         && !content.is_empty()
     {
+        info!(len = content.len(), "model text");
+        debug!(text = content, "model text content");
         // TODO: send message to user with the llm content
     }
+
+    info!(calls = calls.len(), "model replied");
 
     //TODO: ensure that all the calls are allowed to be made
 
     if !calls.is_empty() {
+        for call in &calls {
+            agent.started.insert(
+                call.id().to_owned(),
+                (call.name().to_owned(), Instant::now()),
+            );
+            info!(
+                call_id = call.id(),
+                name = call.name(),
+                len = call.arguments().len(),
+                "tool call submitted"
+            );
+            debug!(call_id = call.id(), arguments = call.arguments(), "tool arguments");
+        }
         // The history keeps the calls; the executor runs copies.
         let runnables: Vec<R> = calls.iter().cloned().map(R::from).collect();
         agent.pending += runnables.len();
@@ -223,6 +316,7 @@ fn on_reply<R: RunnableExt + Send + 'static>(
 
 /// Waits for the next answers, takes every one already in, and goes back
 /// to the model. The calls still running answer in a later tools phase.
+#[instrument(skip_all, fields(turn = agent.turn))]
 async fn tools_phase<R: RunnableExt + Send + 'static>(
     user: &mut UserChannels,
     agent: &mut Agent<R>,
@@ -251,9 +345,7 @@ async fn tools_phase<R: RunnableExt + Send + 'static>(
                     return Phase::Exit;
                 }
                 agent.pending -= received;
-                for answer in agent.results.drain(..) {
-                    agent.context.answer(answer);
-                }
+                agent.record_answers();
                 return Phase::Request;
             }
         }
@@ -265,12 +357,32 @@ enum UserAction {
     NextPhase(Phase),
 }
 
+/// Traces what the user sent: its kind and length at info, its text at debug.
+fn trace_inbound(inbound: Option<&Inbound>) {
+    let (kind, text) = match inbound {
+        None => {
+            info!("user input closed");
+            return;
+        }
+        Some(Inbound::Append(text)) => ("append", text.as_str()),
+        Some(Inbound::Interrupt(text)) => ("interrupt", text.as_str()),
+        Some(Inbound::Stop) => ("stop", ""),
+        Some(Inbound::Continue) => ("continue", ""),
+        Some(Inbound::Exit) => ("exit", ""),
+        Some(Inbound::Agent(name)) => ("agent", name.as_str()),
+    };
+    info!(kind, len = text.len(), "user input");
+    debug!(kind, text, "user input text");
+}
+
+#[instrument(skip_all)]
 fn on_user(
     inbound: Option<Inbound>,
     context: &mut Context,
     config: &mut AgentConfig,
     output: &OutboundChannel,
 ) -> UserAction {
+    trace_inbound(inbound.as_ref());
     // None means the channel closed, which is equivalent to `/exit`.
     let Some(inbound) = inbound else {
         return UserAction::NextPhase(Phase::Exit);
@@ -294,7 +406,7 @@ fn on_user(
         // Applies from the next request; the history carries over.
         Inbound::Agent(name) => {
             if config.switch(&name) {
-                tracing::info!(agent_name = config.current().name(), "switched agent");
+                info!(agent_name = config.current().name(), "switched agent");
             } else {
                 warn!(agent_name = %name, "no such agent; keeping the current one");
                 output.notice(Notice::UnknownAgent(name));
@@ -307,6 +419,7 @@ fn on_user(
 /// Nothing is owed to the model, so this waits for the user. Calls still
 /// running after a stop are recorded as they finish, and the loop stays idle
 /// until the user sends a message or `Continue`.
+#[instrument(skip_all, fields(turn = agent.turn))]
 async fn idle_phase<R: RunnableExt + Send + 'static>(
     user: &mut UserChannels,
     agent: &mut Agent<R>,
@@ -316,6 +429,7 @@ async fn idle_phase<R: RunnableExt + Send + 'static>(
         tokio::select! {
             biased;
             inbound = user.input.recv() => {
+                trace_inbound(inbound.as_ref());
                 let Some(inbound) = inbound else {
                     return Phase::Exit;
                 };
@@ -332,7 +446,7 @@ async fn idle_phase<R: RunnableExt + Send + 'static>(
                     // Applies from the next request; the history carries over.
                     Inbound::Agent(name) => {
                         if agent.config.switch(&name) {
-                            tracing::info!(agent_name = agent.config.current().name(), "switched agent");
+                            info!(agent_name = agent.config.current().name(), "switched agent");
                         } else {
                             warn!(agent_name = %name, "no such agent; keeping the current one");
                             user.output.notice(Notice::UnknownAgent(name));
@@ -342,17 +456,15 @@ async fn idle_phase<R: RunnableExt + Send + 'static>(
                 }
             },
             Ok(()) = agent.config.changed() => agent.reload(),
-            // With nothing pending this waits, and the user branches still run.
 
+            // With nothing pending this waits, and the user branches still run.
             received = agent.tools_executor.next_results(&mut agent.results, pending) => {
                 if received == 0 {
                     error!("tool executor is gone");
                     return Phase::Exit;
                 }
                 agent.pending -= received;
-                for answer in agent.results.drain(..) {
-                    agent.context.answer(answer);
-                }
+                agent.record_answers();
             }
         }
     }

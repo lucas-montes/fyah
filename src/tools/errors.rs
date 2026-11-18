@@ -32,6 +32,14 @@ pub enum ExecError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// A file a builtin reads or writes could not be.
+    File {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// The path lies outside every dir the agent may reach, or every
+    /// writable one for a write.
+    OutOfReach { path: PathBuf },
     /// A directory a wasm module is granted could not be opened.
     PreopenDir {
         dir: PathBuf,
@@ -72,7 +80,12 @@ impl std::fmt::Display for ExecError {
         match self {
             Self::Spawn(e) => write!(f, "failed to spawn: {e}"),
             Self::BadArguments(e) => write!(f, "invalid tool arguments: {e}"),
-            Self::ModuleFile { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::ModuleFile { path, source } | Self::File { path, source } => {
+                write!(f, "{}: {source}", path.display())
+            }
+            Self::OutOfReach { path } => {
+                write!(f, "{}: outside what this agent may reach", path.display())
+            }
             // `:#` prints the whole chain of causes on one line: the model
             // reads it.
             Self::PreopenDir { dir, source } => write!(f, "{}: {source:#}", dir.display()),

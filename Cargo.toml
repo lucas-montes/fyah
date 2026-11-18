@@ -11,7 +11,7 @@ arc-swap = "1.7"
 
 tracing = { version = "0.1", features = ["valuable"] }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "valuable"] }
-tracing-appender = "0.2"
+valuable-serde = "0.1.1"
 
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -38,6 +38,7 @@ sha2 = "0.11.0"
 
 wasmtime = "50.0.2"
 wasmtime-wasi = "50.0.2"
+tracing-appender = "0.2.5"
 
 [workspace.lints.clippy]
 all = { level = "deny" }
@@ -45,3 +46,6 @@ pedantic = { level = "deny" }
 
 [workspace.lints.rust]
 warnings = "deny"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tracing_unstable)'] }

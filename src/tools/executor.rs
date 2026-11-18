@@ -12,7 +12,9 @@ use tokio::{
 use crate::{
     config::{ExecConfig, ExecSnapshot, Executable, ExecutableParams},
     prompt::{ToolCall, ToolMessage},
+    sessions::Session,
     tools::{
+        builtin::{self, Scope},
         command,
         errors::{ExecError, ResolveError},
         output::ToolOutput,
@@ -52,25 +54,33 @@ fn resolve_and_execute(
     context: &CallContext,
 ) -> impl Future<Output = Result<String, ExecError>> + Send {
     match context.config.executable(name) {
-        Some(executable) => Either::Left(execute(executable, arguments, &context.wasm)),
+        Some(executable) => Either::Left(execute(executable, arguments, context)),
         None => Either::Right(future::ready(Err(ExecError::Unavailable(
             ResolveError::UnknownTool,
         )))),
     }
 }
 
-/// Both kinds answer the same way, so everything past the dispatch is shared.
+/// Every kind answers the same way, so everything past the dispatch is
+/// shared.
 fn execute(
     executable: &Executable,
     arguments: String,
-    wasm: &WasmRuntime,
+    context: &CallContext,
 ) -> impl Future<Output = Result<String, ExecError>> + Send {
     let timeout = executable
         .timeout_secs()
         .map(|secs| Duration::from_secs(secs.get()));
     match executable.params() {
-        ExecutableParams::Command(spec) => Either::Left(command::run(spec, arguments, timeout)),
-        ExecutableParams::Wasm(spec) => Either::Right(wasm.run(spec, arguments, timeout)),
+        ExecutableParams::Command(spec) => {
+            Either::Left(Either::Left(command::run(spec.command(), arguments, timeout)))
+        }
+        ExecutableParams::Wasm(spec) => {
+            Either::Left(Either::Right(context.wasm.run(spec, arguments, timeout)))
+        }
+        ExecutableParams::Builtin(builtin) => {
+            Either::Right(builtin::run(builtin, &arguments, timeout, context.scope()))
+        }
     }
     .map_ok(ToolOutput::into_answer)
 }
@@ -102,12 +112,17 @@ pub struct ExecContext {
     /// The workspace's runtime, shared with every other agent; each call in
     /// flight holds it too, since a call outlives any borrow of this.
     wasm: Arc<WasmRuntime>,
-    // session
+    /// Who changes are attributed to, shared with the agent the same way.
+    session: Arc<Session>,
 }
 
 impl ExecContext {
-    pub fn new(config: ExecConfig, wasm: Arc<WasmRuntime>) -> Self {
-        Self { config, wasm }
+    pub fn new(config: ExecConfig, wasm: Arc<WasmRuntime>, session: Arc<Session>) -> Self {
+        Self {
+            config,
+            wasm,
+            session,
+        }
     }
 
     /// The context of a call starting now.
@@ -115,6 +130,7 @@ impl ExecContext {
         CallContext {
             config: self.config.snapshot(),
             wasm: Arc::clone(&self.wasm),
+            session: Arc::clone(&self.session),
         }
     }
 }
@@ -125,6 +141,14 @@ impl ExecContext {
 pub struct CallContext {
     config: ExecSnapshot,
     wasm: Arc<WasmRuntime>,
+    session: Arc<Session>,
+}
+
+impl CallContext {
+    /// What a builtin may touch, as the agent was when the call started.
+    fn scope(&self) -> Scope<'_> {
+        Scope::new(self.config.dirs(), &self.session, self.config.model_id())
+    }
 }
 
 impl<Runnable: RunnableExt + Send + 'static> ToolsExecutor<Runnable> {
