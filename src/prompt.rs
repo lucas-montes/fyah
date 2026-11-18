@@ -65,9 +65,9 @@ pub struct ToolMessage {
 impl ToolMessage {
     /// Stands in for an answer that is not in yet: every call needs one in
     /// each request. Replaced in place when the real one arrives.
-    pub fn pending(call: &ToolCall) -> Self {
+    pub fn pending(call_id: String) -> Self {
         Self {
-            call_id: call.id.clone(),
+            call_id,
             output: Ok(Cow::Borrowed("still running")),
         }
     }

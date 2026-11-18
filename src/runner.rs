@@ -1,9 +1,9 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{future::Future, num::NonZeroUsize, sync::Arc};
 
 use tracing::{error, warn};
 
 use crate::{
-    client::{LlmClient, Error as ClientError},
+    client::{Error as ClientError, LlmClient},
     config::AgentConfig,
     prompt::{AssistantMessage, AssistantTurn, Conversation, Message, ToolCall, ToolMessage},
     sessions::Session,
@@ -31,15 +31,16 @@ impl Context {
         self.messages.push(msg);
     }
 
-
-
     /// The assistant message, then a placeholder answer per call: every
     /// request needs an answer for each call, finished or not.
     fn push_calls(&mut self, content: Option<String>, calls: Vec<ToolCall>) {
         let start = self.messages.len();
-        for call in &calls {
-            self.messages.push(Message::Tool(ToolMessage::pending(call)));
-        }
+
+        let pending = calls
+            .iter()
+            .map(|call| Message::Tool(ToolMessage::pending(call.id().to_owned())));
+
+        self.messages.extend(pending);
         // Slotted in before its placeholders: no second `Vec` for them.
         self.messages.insert(
             start,
@@ -66,7 +67,7 @@ impl Context {
 #[derive(Debug)]
 struct Agent<R: RunnableExt + Send + 'static> {
     context: Context,
-    session: Session,
+    session: Arc<Session>,
     config: AgentConfig,
     tools_executor: ToolsExecutor<R>,
     /// Calls submitted and not answered yet. It is used to pull the results from the toolExecutor
@@ -104,10 +105,17 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
 ) {
     tracing::info!(agent_name = config.current().name(), "Starting agent");
 
+    // Shared with the executor: its calls attribute their changes to it.
+    let session = Arc::new(session);
+
     let mut agent = Agent {
         context: Context::default(),
+        tools_executor: ToolsExecutor::<R>::new(ExecContext::new(
+            config.exec_config(),
+            wasm,
+            Arc::clone(&session),
+        )),
         session,
-        tools_executor: ToolsExecutor::<R>::new(ExecContext::new(config.exec_config(), wasm)),
         config,
         pending: 0,
         results: Vec::new(),
@@ -119,11 +127,12 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
     };
 
     let mut phase = Phase::Idle;
+    //TODO: maybe the select! to listen to the user should be here intead of having it duplicated in each phase
     loop {
         phase = match phase {
             Phase::Request => request_phase(&client, &mut user, &mut agent).await,
             Phase::Tools => tools_phase(&mut user, &mut agent).await,
-            Phase::Idle => idle_phase().await,
+            Phase::Idle => idle_phase(&mut user, &mut agent).await,
             Phase::Exit => return,
         };
     }
@@ -184,7 +193,9 @@ fn on_reply<R: RunnableExt + Send + 'static>(
 
     let (content, calls) = turn.into_parts();
 
-    if let Some(content) = &content && !content.is_empty() {
+    if let Some(content) = &content
+        && !content.is_empty()
+    {
         // TODO: send message to user with the llm content
     }
 
@@ -236,6 +247,7 @@ async fn tools_phase<R: RunnableExt + Send + 'static>(
             received = agent.tools_executor.next_results(&mut agent.results, pending) => {
                 if received == 0 {
                     error!("tool executor is gone");
+                    //TODO: we probably need to restart the toolExecutor here instead of exiting, but we need to think about how to do that
                     return Phase::Exit;
                 }
                 agent.pending -= received;
@@ -292,6 +304,56 @@ fn on_user(
     }
 }
 
-async fn idle_phase() -> Phase {
-    todo!()
+/// Nothing is owed to the model, so this waits for the user. Calls still
+/// running after a stop are recorded as they finish, and the loop stays idle
+/// until the user sends a message or `Continue`.
+async fn idle_phase<R: RunnableExt + Send + 'static>(
+    user: &mut UserChannels,
+    agent: &mut Agent<R>,
+) -> Phase {
+    loop {
+        let pending = NonZeroUsize::new(agent.pending).unwrap_or(NonZeroUsize::MIN);
+        tokio::select! {
+            biased;
+            inbound = user.input.recv() => {
+                let Some(inbound) = inbound else {
+                    return Phase::Exit;
+                };
+                return match inbound {
+                    Inbound::Append(text) | Inbound::Interrupt(text) => {
+                        if !text.trim().is_empty() {
+                            agent.context.append(Message::user(text));
+                        }
+                        Phase::Request
+                    }
+                    Inbound::Stop => Phase::Idle,
+                    Inbound::Continue => Phase::Request,
+                    Inbound::Exit => Phase::Exit,
+                    // Applies from the next request; the history carries over.
+                    Inbound::Agent(name) => {
+                        if agent.config.switch(&name) {
+                            tracing::info!(agent_name = agent.config.current().name(), "switched agent");
+                        } else {
+                            warn!(agent_name = %name, "no such agent; keeping the current one");
+                            user.output.notice(Notice::UnknownAgent(name));
+                        }
+                        Phase::Idle
+                    }
+                }
+            },
+            Ok(()) = agent.config.changed() => agent.reload(),
+            // With nothing pending this waits, and the user branches still run.
+
+            received = agent.tools_executor.next_results(&mut agent.results, pending) => {
+                if received == 0 {
+                    error!("tool executor is gone");
+                    return Phase::Exit;
+                }
+                agent.pending -= received;
+                for answer in agent.results.drain(..) {
+                    agent.context.answer(answer);
+                }
+            }
+        }
+    }
 }
