@@ -71,8 +71,11 @@ max_concurrent_tools = 5
 # When tool results go back to the model: "wait" for all of them (default),
 # "eager" as soon as one is in, or { batch = 3 } once three are.
 results = "wait"
-# Optional: tool calls allowed between two user inputs before pausing.
-# max_tool_calls = 50
+# Optional limits, shown with their defaults. Each counts from the last thing
+# the user sent, and reaching one pauses the loop until the user speaks.
+# max_tool_calls = 50                 tool calls allowed between two user inputs
+# max_consecutive_tool_errors = 3     failed tool calls in a row
+# empty_reply_retries = 1             times an empty model reply is asked again (0 = never)
 # Optional: tokens the whole session may spend before the loop stops itself.
 # token_budget = 200000
 

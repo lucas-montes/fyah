@@ -56,7 +56,9 @@ fn resolve_and_execute(
     match context.config.executable(name) {
         Some(executable) => Either::Left(execute(executable, arguments, context)),
         None => Either::Right(future::ready(Err(ExecError::Unavailable(
-            ResolveError::UnknownTool,
+            ResolveError::UnknownTool {
+                available: context.config.tool_names().join(", "),
+            },
         )))),
     }
 }

@@ -84,7 +84,6 @@
           }
           // lib.optionalAttrs wasmEnabled {
             inherit (wasmTools) javy python-wasi;
-            wasm-tools = wasmTools.wasm-tools;
           };
 
         checks = {
@@ -131,9 +130,12 @@
 
         apps =
           lib.optionalAttrs wasmEnabled {
-            # Build the wasm examples and link them to wasm/dist, where
+            # Build wasm/js/*.js and link python.wasm into wasm/dist, where
             # fyah.toml expects them. Run from the repository root.
-            wasm-tools = wasmTools.app;
+            wasm-tools = {
+              type = "app";
+              program = "${wasmTools.app}/bin/fyah-wasm-tools";
+            };
           }
           // {
           # Launch ollama serving the same baked model the e2e test uses.

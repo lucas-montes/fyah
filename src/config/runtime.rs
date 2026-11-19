@@ -204,6 +204,18 @@ impl AgentView<'_> {
     pub fn tool_specs(&self) -> ToolSpecs<'_> {
         ToolSpecs::new(self.0.agent().tools(), &self.0.config.tools)
     }
+
+    pub fn max_tool_calls(&self) -> usize {
+        self.0.agent().max_tool_calls()
+    }
+
+    pub fn max_consecutive_tool_errors(&self) -> usize {
+        self.0.agent().max_consecutive_tool_errors()
+    }
+
+    pub fn empty_reply_retries(&self) -> usize {
+        self.0.agent().empty_reply_retries()
+    }
 }
 
 /// The part of an agent's configuration the executor reads. Always the
@@ -237,6 +249,11 @@ impl ExecSnapshot {
     /// What the agent's builtins may reach, canonical.
     pub fn dirs(&self) -> &[AgentDir] {
         self.0.agent().dirs()
+    }
+
+    /// The tool names this agent may call, for the model's error message.
+    pub fn tool_names(&self) -> &[String] {
+        self.0.agent().tools()
     }
 
     /// The provider-side name of the model the agent runs: who a change is

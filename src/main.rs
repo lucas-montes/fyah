@@ -66,8 +66,18 @@ fn start_loggers() -> WorkerGuard {
         .with_writer(agent_writer)
         .with_filter(filter_fn(|meta| meta.target() == "agent_trace"));
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,h2=off,hyper=off,tower=off,reqwest=off"));
+    // Applied on top of RUST_LOG too, so these never reach the log.
+    const MUTED: &str = "h2=off,hyper=off,hyper_util=off,tower=off,reqwest=off,\
+        cranelift_codegen=off,cranelift_frontend=off,cranelift_entity=off,\
+        wasmtime=off,wasmtime_internal_cranelift=off,wasmtime_environ=off,\
+        wasmtime_internal_unwinder=off";
+    let base = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = MUTED
+        .split(',')
+        .fold(base, |filter, directive| match directive.parse() {
+            Ok(directive) => filter.add_directive(directive),
+            Err(_) => filter,
+        });
 
     let app_layer = tracing_subscriber::fmt::layer()
         .with_thread_ids(true)

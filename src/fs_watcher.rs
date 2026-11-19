@@ -8,7 +8,8 @@ use notify_debouncer_full::{RecommendedCache, new_debouncer_opt, notify};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{Config, ConfigStore, Error as ConfigError, RuntimeConfig}, ui::{Notice, OutboundChannel}
+    config::{Config, ConfigStore, RuntimeConfig},
+    ui::{Notice, OutboundChannel},
 };
 
 /// Events emitted by the filesystem watcher.

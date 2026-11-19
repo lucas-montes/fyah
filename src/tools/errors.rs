@@ -3,20 +3,20 @@ use std::{any::Any, path::PathBuf};
 /// Why a tool call cannot run at all; the model is told instead.
 #[derive(Debug)]
 pub enum ResolveError {
-    /// Nothing — no builtin and no `[tools.*]` entry — answers to the name.
-    UnknownTool,
-    /// The tool names an `[executables.*]` entry that is not there.
-    MissingExecutable,
-    /// The agent that asked is no longer in the config.
-    AgentGone,
+    /// The agent has no tool by that name. `available` lists the ones it has,
+    /// so the model can pick one.
+    UnknownTool { available: String },
 }
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownTool => write!(f, "unknown tool"),
-            Self::MissingExecutable => write!(f, "unknown executable"),
-            Self::AgentGone => write!(f, "the agent is no longer configured"),
+            Self::UnknownTool { available } if available.is_empty() => {
+                write!(f, "unknown tool; this agent has no tools")
+            }
+            Self::UnknownTool { available } => {
+                write!(f, "unknown tool; the tools this agent has are: {available}")
+            }
         }
     }
 }

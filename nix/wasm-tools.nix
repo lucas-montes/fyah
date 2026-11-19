@@ -1,15 +1,17 @@
-# The wasm tool examples under wasm/, and what builds and runs them.
+# Tooling for the wasm tools fyah.toml points at.
 #
 #   javy         Javy, which turns a .js file into a WASI preview 1 module.
 #                Not in nixpkgs: the upstream release binary, patched for Nix.
 #   python-wasi  CPython built for WASI: python.wasm and its standard library.
 #                The upstream release; nixpkgs' wasi cross build is fragile.
-#   wasm-tools   What fyah.toml points at, under wasm/dist:
-#                  js/text_stats.wasm     wasm/js/text_stats.js, built by Javy
-#                  python/python.wasm     the interpreter
-#                  python/lib/            its standard library
-#                The Python scripts themselves are read from wasm/python/ in
-#                the repository, so editing one needs no rebuild.
+#   app          `nix run .#wasm-tools`, from the repository root. Fills
+#                wasm/dist from the working tree:
+#                  js/<name>.wasm      one per wasm/js/<name>.js, built by Javy
+#                  python/python.wasm  the interpreter (a link into the store)
+#                  python/lib/         its standard library
+#                It reads the sources as they are on disk, so a new .js file
+#                needs no git add and no flake rebuild. Python scripts under
+#                wasm/python/ are read at call time and need no build.
 {pkgs}: let
   inherit (pkgs) lib stdenv fetchurl;
 
@@ -63,51 +65,30 @@
     };
   };
 
-  wasm-tools = stdenv.mkDerivation {
-    pname = "fyah-wasm-tools";
-    version = "0.1.0";
-    src = lib.fileset.toSource {
-      root = ../wasm;
-      fileset = ../wasm/js;
-    };
-    nativeBuildInputs = [javy];
-    buildPhase = ''
-      runHook preBuild
-      export HOME=$TMPDIR
-      for js in js/*.js; do
-        javy build "$js" -o "''${js%.js}.wasm"
-      done
-      runHook postBuild
-    '';
-    installPhase = ''
-      runHook preInstall
-      install -d $out/js $out/python
-      cp js/*.wasm $out/js/
-      ln -s ${python-wasi}/python.wasm $out/python/python.wasm
-      ln -s ${python-wasi}/lib $out/python/lib
-      runHook postInstall
-    '';
-    dontFixup = true;
-    meta.platforms = javy.meta.platforms;
-  };
+  app = pkgs.writeShellApplication {
+    name = "fyah-wasm-tools";
+    runtimeInputs = [javy];
+    text = ''
+      if [[ ! -f fyah.toml || ! -d wasm ]]; then
+        echo "run this from the fyah repository root" >&2
+        exit 1
+      fi
 
-  # `nix run .#wasm-tools`, from the repository root: builds the above and
-  # points wasm/dist at it. The link is a GC root, so a garbage collection
-  # does not pull the modules out from under a running fyah.
-  link = pkgs.writeShellScript "fyah-wasm-tools" ''
-    set -euo pipefail
-    if [[ ! -f fyah.toml ]]; then
-      echo "run this from the fyah repository root (no fyah.toml here)" >&2
-      exit 1
-    fi
-    mkdir -p wasm
-    nix-store --realise ${wasm-tools} --add-root wasm/dist >/dev/null
-    echo "wasm/dist -> ${wasm-tools}"
-  '';
-in {
-  inherit javy python-wasi wasm-tools;
-  app = {
-    type = "app";
-    program = "${link}";
+      rm -rf wasm/dist
+      mkdir -p wasm/dist/js wasm/dist/python
+
+      shopt -s nullglob
+      for source in wasm/js/*.js; do
+        name=$(basename "$source" .js)
+        javy build "$source" -o "wasm/dist/js/$name.wasm"
+        echo "built wasm/dist/js/$name.wasm"
+      done
+
+      ln -sfn ${python-wasi}/python.wasm wasm/dist/python/python.wasm
+      ln -sfn ${python-wasi}/lib wasm/dist/python/lib
+      echo "linked wasm/dist/python"
+    '';
   };
+in {
+  inherit javy python-wasi app;
 }

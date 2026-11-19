@@ -30,38 +30,38 @@ pub enum Inbound {
 /// what happened instead of on wording.
 #[derive(Debug)]
 pub enum Notice {
-    /// `/stop`; tools still running keep going.
-    Stopped { running: usize },
-    /// A stop condition stopped the loop.
-    StopCondition,
-    /// The config no longer describes the agent.
-    Unavailable,
     RequestFailed(ClientError),
-    RunningTools(usize),
-    ToolsFinished(usize),
     /// A reload failed; the last good config stays active.
     ConfigRejected(ConfigError),
     /// `/agent` named an agent the config does not have; the current one
     /// stays.
     UnknownAgent(String),
+    /// The model's tool calls would pass the agent's `max_tool_calls` limit.
+    ToolCallLimit(usize),
+    /// Failed tool calls in a row reached `max_consecutive_tool_errors`.
+    ToolErrors(usize),
+    /// The model kept sending empty replies past `empty_reply_retries`.
+    EmptyReply,
 }
 
 impl Display for Notice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Stopped { running } => write!(
-                f,
-                "stopped, {running} tool call(s) still running; a message or /continue resumes"
-            ),
-            Self::StopCondition => write!(f, "stopped; /continue to go on"),
-            Self::Unavailable => {
-                write!(f, "unavailable; fix it and /continue")
-            }
             Self::RequestFailed(error) => write!(f, "request failed: {error}; /continue to retry"),
-            Self::RunningTools(n) => write!(f, "running {n} tool call(s)"),
-            Self::ToolsFinished(n) => write!(f, "{n} tool call(s) finished"),
+
             Self::ConfigRejected(error) => write!(f, "failed to reload config: {error}"),
             Self::UnknownAgent(name) => write!(f, "no agent named {name}; keeping the current one"),
+            Self::ToolCallLimit(limit) => write!(
+                f,
+                "tool call limit of {limit} reached; a message or /continue goes on"
+            ),
+            Self::ToolErrors(n) => write!(
+                f,
+                "stopped after {n} failed tool calls in a row; a message or /continue goes on"
+            ),
+            Self::EmptyReply => {
+                write!(f, "the model sent an empty reply; a message or /continue retries")
+            }
         }
     }
 }

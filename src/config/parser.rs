@@ -12,24 +12,20 @@ use valuable::Valuable;
 
 #[derive(Debug)]
 pub enum ValidationError {
-    UnknownStep(String),
     UnknownTool(String),
     UnknownProvider(String),
     UnknownModel(String),
     UnknownExecutable(String),
-    InvalidContext(String),
-    InvalidLimits(String),
     /// A `[tools.*]` or `[executables.*]` entry takes a builtin's name.
     ReservedName(String),
     /// An agent's `dirs` entry does not resolve to a directory.
     InvalidDir(String),
+    /// A wasm executable's module is not on disk.
+    MissingModule(String),
 }
 
 // Named constructors for the cross-reference failures raised by validation.
 impl ValidationError {
-    fn step(workflow: &str, step: &str) -> Self {
-        Self::UnknownStep(format!("{step} (referenced by workflow {workflow})"))
-    }
 
     fn tool(agent: &str, tool: &str) -> Self {
         Self::UnknownTool(format!("{tool} (referenced by agent {agent})"))
@@ -43,21 +39,11 @@ impl ValidationError {
         Self::UnknownModel(format!("{model} (referenced by agent {agent})"))
     }
 
-    fn executable(owner: &str, slot: &str, exe: &str) -> Self {
-        Self::UnknownExecutable(format!("{exe} (referenced by {owner}.{slot})"))
-    }
 
     fn tool_executable(tool: &str, exe: &str) -> Self {
         Self::UnknownExecutable(format!("{exe} (referenced by tool {tool})"))
     }
 
-    fn context(agent: &str, detail: &str) -> Self {
-        Self::InvalidContext(format!("{detail} (referenced by agent {agent}.context)"))
-    }
-
-    fn limits(agent: &str, detail: &str) -> Self {
-        Self::InvalidLimits(format!("{detail} (referenced by agent {agent}.limits)"))
-    }
 
     fn reserved(table: &str, name: &str) -> Self {
         Self::ReservedName(format!("[{table}.{name}] (a builtin has that name)"))
@@ -66,20 +52,26 @@ impl ValidationError {
     fn dir(agent: &str, dir: &Path, error: &std::io::Error) -> Self {
         Self::InvalidDir(format!("{}: {error} (referenced by agent {agent}.dirs)", dir.display()))
     }
+
+    fn missing_module(executable: &str, path: &Path) -> Self {
+        Self::MissingModule(format!(
+            "{} (executable {executable}); build it with `nix run .#wasm-tools`",
+            path.display()
+        ))
+    }
+
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownTool(t) => write!(f, "unknown tool: {t}"),
-            Self::UnknownStep(s) => write!(f, "unknown step: {s}"),
             Self::UnknownProvider(p) => write!(f, "unknown provider: {p}"),
             Self::UnknownModel(m) => write!(f, "unknown model: {m}"),
             Self::UnknownExecutable(e) => write!(f, "unknown executable: {e}"),
-            Self::InvalidContext(c) => write!(f, "invalid context config: {c}"),
-            Self::InvalidLimits(l) => write!(f, "invalid limits config: {l}"),
             Self::ReservedName(n) => write!(f, "reserved name: {n}"),
             Self::InvalidDir(d) => write!(f, "invalid dir: {d}"),
+            Self::MissingModule(m) => write!(f, "missing wasm module: {m}"),
         }
     }
 }
@@ -149,10 +141,32 @@ pub struct Agent {
     #[serde(default)]
     dirs: Vec<AgentDir>,
     max_concurrent_tools: NonZeroUsize,
-    max_turns: NonZeroUsize,
-    max_tokens: Option<NonZeroUsize>,
-    done_check: Option<String>,
-    context_strategy: Option<String>,
+
+    // max_tokens: Option<NonZeroUsize>,
+    // done_check: Option<String>,
+    // context_strategy: Option<String>,
+    /// Tool calls allowed between two user inputs before the loop pauses.
+    #[serde(default = "default_max_tool_calls")]
+    max_tool_calls: NonZeroUsize,
+    /// Failed tool calls in a row before the loop pauses.
+    #[serde(default = "default_max_consecutive_tool_errors")]
+    max_consecutive_tool_errors: NonZeroUsize,
+    /// Retries of an empty model reply before the loop pauses. Zero means
+    /// no retry.
+    #[serde(default = "default_empty_reply_retries")]
+    empty_reply_retries: usize,
+}
+
+const fn default_max_tool_calls() -> NonZeroUsize {
+    NonZeroUsize::new(50).expect("50 is not zero")
+}
+
+const fn default_max_consecutive_tool_errors() -> NonZeroUsize {
+    NonZeroUsize::new(3).expect("3 is not zero")
+}
+
+const fn default_empty_reply_retries() -> usize {
+    1
 }
 
 impl Agent {
@@ -178,6 +192,18 @@ impl Agent {
 
     pub fn max_concurrent_tools(&self) -> NonZeroUsize {
         self.max_concurrent_tools
+    }
+
+    pub fn max_tool_calls(&self) -> usize {
+        self.max_tool_calls.get()
+    }
+
+    pub fn max_consecutive_tool_errors(&self) -> usize {
+        self.max_consecutive_tool_errors.get()
+    }
+
+    pub fn empty_reply_retries(&self) -> usize {
+        self.empty_reply_retries
     }
 
     /// Canonical once validated: resolved through every symlink.
@@ -550,6 +576,7 @@ impl Config<Raw> {
         resolve_dirs(&mut self.agents, &mut errors);
         validate_agents(&self.agents, &self.providers, &self.tools, &mut errors);
         validate_executables(&self.tools, &self.executables, &mut errors);
+        validate_modules(&self.executables, &mut errors);
 
         if !errors.is_empty() {
             return Err(Error::Validation(errors));
@@ -570,6 +597,21 @@ impl Config<Raw> {
             builtins: self.builtins,
             state: PhantomData,
         })
+    }
+}
+
+/// Every wasm module must be on disk. Relative paths are read from the
+/// working directory, as the runtime reads them.
+fn validate_modules(
+    executables: &HashMap<String, Executable>,
+    errors: &mut Vec<ValidationError>,
+) {
+    for (name, executable) in executables {
+        if let ExecutableParams::Wasm(spec) = executable.params()
+            && !spec.path().is_file()
+        {
+            errors.push(ValidationError::missing_module(name, spec.path()));
+        }
     }
 }
 

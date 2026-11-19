@@ -17,7 +17,7 @@ use crate::{
     ui::{Inbound, Notice, OutboundChannel},
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum Phase {
     /// A request is in flight.
     Request,
@@ -82,10 +82,40 @@ impl Context {
     }
 }
 
+/// What the loop may still spend, counted from the last time the user spoke.
+#[derive(Debug, Default)]
+struct Budget {
+    /// Tool calls submitted since the user last spoke.
+    calls: usize,
+    /// Failed tool calls in a row, as of the latest answer.
+    errors_in_row: usize,
+    /// Empty replies asked again since the user last spoke.
+    empty_retries: usize,
+}
+
+impl Budget {
+    /// The user spoke: a fresh allowance.
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether `calls` more calls keep the count within `limit`.
+    fn admits(&self, calls: usize, limit: usize) -> bool {
+        self.calls.saturating_add(calls) <= limit
+    }
+
+    fn record_calls(&mut self, calls: usize) {
+        self.calls = self.calls.saturating_add(calls);
+    }
+
+    fn record_outcome(&mut self, failed: bool) {
+        self.errors_in_row = if failed { self.errors_in_row + 1 } else { 0 };
+    }
+}
+
 #[derive(Debug)]
 struct Agent<R: RunnableExt + Send + 'static> {
     context: Context,
-    session: Arc<Session>,
     config: AgentConfig,
     tools_executor: ToolsExecutor<R>,
     /// Calls submitted and not answered yet. It is used to pull the results from the toolExecutor
@@ -95,7 +125,8 @@ struct Agent<R: RunnableExt + Send + 'static> {
     /// A turn is one request and the tool phases that answer it.
     turn: u64,
     /// When each call was submitted, with its name, for the finish trace.
-    started: HashMap<String, (String, Instant)>,
+    started: HashMap<String, (String, Instant)>, //TODO: this probably should be in the ExecutorTool
+    budget: Budget,
 }
 
 impl<R: RunnableExt + Send + 'static> Agent<R> {
@@ -120,6 +151,7 @@ impl<R: RunnableExt + Send + 'static> Agent<R> {
                 Some((name, started)) => (name, started.elapsed()),
                 None => (String::new(), Duration::ZERO),
             };
+            self.budget.record_outcome(answer.output().is_err());
             let (status, output) = match answer.output() {
                 Ok(output) => ("ok", output),
                 Err(error) => ("error", error),
@@ -153,7 +185,7 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
     user_output_tx: OutboundChannel,
     wasm: Arc<WasmRuntime>,
 ) {
-    info!("starting agent");
+    info!(session_id = session.id(), "starting agent");
 
     // Shared with the executor: its calls attribute their changes to it.
     let session = Arc::new(session);
@@ -165,12 +197,12 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
             wasm,
             Arc::clone(&session),
         )),
-        session,
         config,
         pending: 0,
         results: Vec::new(),
         turn: 0,
         started: HashMap::new(),
+        budget: Budget::default(),
     };
 
     let mut user = UserChannels {
@@ -238,15 +270,19 @@ async fn request_phase(
             // The user outranks the machine: a `/stop` should win the race.
             biased;
             inbound = user.input.recv() => {
-                if let UserAction::NextPhase(phase) =
-                    on_user(inbound, &mut agent.context, &mut agent.config, &user.output)
-                {
+                if let UserAction::NextPhase(phase) = on_user(
+                    inbound,
+                    &mut agent.context,
+                    &mut agent.config,
+                    &user.output,
+                    &mut agent.budget,
+                ) {
                     return phase;
                 }
             }
             // Applies from the next request; this one is already sent.
             Ok(()) = agent.config.changed() => agent.reload(),
-            reply = &mut request => return on_reply(reply, agent),
+            reply = &mut request => return on_reply(reply, agent, &user.output),
         }
     }
 }
@@ -257,31 +293,57 @@ async fn request_phase(
 fn on_reply<R: RunnableExt + Send + 'static>(
     reply: Result<AssistantTurn, ClientError>,
     agent: &mut Agent<R>,
+    output: &OutboundChannel,
 ) -> Phase {
     let turn = match reply {
         Ok(turn) => turn,
         Err(error) => {
             warn!(%error, "model request failed");
-            // TODO: send notif to user about the error and retry
+            output.notice(Notice::RequestFailed(error));
             return Phase::Idle;
         }
     };
 
     let (content, calls) = turn.into_parts();
+    let has_text = content.as_deref().is_some_and(|text| !text.trim().is_empty());
 
-    if let Some(content) = &content
-        && !content.is_empty()
-    {
-        info!(len = content.len(), "model text");
-        debug!(text = content, "model text content");
-        // TODO: send message to user with the llm content
+    // An empty reply is neither stored nor answered: it is asked again, a
+    // configured number of times, then the user decides.
+    if !has_text && calls.is_empty() {
+        let retries = agent.config.current().empty_reply_retries();
+        if agent.budget.empty_retries < retries {
+            agent.budget.empty_retries += 1;
+            warn!(retry = agent.budget.empty_retries, retries, "empty model reply; asking again");
+            return Phase::Request;
+        }
+        warn!(retries, "empty model reply; pausing");
+        output.notice(Notice::EmptyReply);
+        return Phase::Tools;
+    }
+    agent.budget.empty_retries = 0;
+
+    if let Some(text) = content.as_deref().filter(|text| !text.trim().is_empty()) {
+        info!(len = text.len(), "model text");
+        debug!(text, "model text content");
+        output.ai(text.to_owned());
     }
 
     info!(calls = calls.len(), "model replied");
 
-    //TODO: ensure that all the calls are allowed to be made
+    let limit = agent.config.current().max_tool_calls();
+    if !agent.budget.admits(calls.len(), limit) {
+        warn!(limit, calls = calls.len(), "tool call limit reached; not running the calls");
+        output.notice(Notice::ToolCallLimit(limit));
+        // Every call needs an answer, and none of these will run, so only the
+        // text is kept.
+        if has_text {
+            agent.context.push_calls(content, Vec::new());
+        }
+        return Phase::Tools;
+    }
 
     if !calls.is_empty() {
+        agent.budget.record_calls(calls.len());
         for call in &calls {
             agent.started.insert(
                 call.id().to_owned(),
@@ -306,12 +368,7 @@ fn on_reply<R: RunnableExt + Send + 'static>(
 
     agent.context.push_calls(content, calls);
 
-    // Answers still owed from earlier turns keep the loop going too.
-    if agent.pending == 0 {
-        Phase::Idle
-    } else {
-        Phase::Tools
-    }
+    Phase::Tools
 }
 
 /// Waits for the next answers, takes every one already in, and goes back
@@ -331,9 +388,13 @@ async fn tools_phase<R: RunnableExt + Send + 'static>(
             // Running calls keep running whatever the user does; their
             // answers come in a later tools phase.
             inbound = user.input.recv() => {
-                if let UserAction::NextPhase(phase) =
-                    on_user(inbound, &mut agent.context, &mut agent.config, &user.output)
-                {
+                if let UserAction::NextPhase(phase) = on_user(
+                    inbound,
+                    &mut agent.context,
+                    &mut agent.config,
+                    &user.output,
+                    &mut agent.budget,
+                ) {
                     return phase;
                 }
             }
@@ -346,6 +407,12 @@ async fn tools_phase<R: RunnableExt + Send + 'static>(
                 }
                 agent.pending -= received;
                 agent.record_answers();
+                let limit = agent.config.current().max_consecutive_tool_errors();
+                if agent.budget.errors_in_row >= limit {
+                    warn!(limit, "too many failed tool calls in a row; pausing");
+                    user.output.notice(Notice::ToolErrors(limit));
+                    return Phase::Idle;
+                }
                 return Phase::Request;
             }
         }
@@ -381,6 +448,7 @@ fn on_user(
     context: &mut Context,
     config: &mut AgentConfig,
     output: &OutboundChannel,
+    budget: &mut Budget,
 ) -> UserAction {
     trace_inbound(inbound.as_ref());
     // None means the channel closed, which is equivalent to `/exit`.
@@ -389,19 +457,24 @@ fn on_user(
     };
     match inbound {
         Inbound::Append(text) => {
+            budget.reset();
             if !text.trim().is_empty() {
                 context.append(Message::user(text));
             }
             UserAction::Continue
         }
         Inbound::Interrupt(text) => {
+            budget.reset();
             if !text.trim().is_empty() {
                 context.append(Message::user(text));
             }
             UserAction::NextPhase(Phase::Request)
         }
         Inbound::Stop => UserAction::NextPhase(Phase::Idle),
-        Inbound::Continue => UserAction::Continue,
+        Inbound::Continue => {
+            budget.reset();
+            UserAction::Continue
+        }
         Inbound::Exit => UserAction::NextPhase(Phase::Exit),
         // Applies from the next request; the history carries over.
         Inbound::Agent(name) => {
@@ -435,13 +508,17 @@ async fn idle_phase<R: RunnableExt + Send + 'static>(
                 };
                 return match inbound {
                     Inbound::Append(text) | Inbound::Interrupt(text) => {
+                        agent.budget.reset();
                         if !text.trim().is_empty() {
                             agent.context.append(Message::user(text));
                         }
                         Phase::Request
                     }
                     Inbound::Stop => Phase::Idle,
-                    Inbound::Continue => Phase::Request,
+                    Inbound::Continue => {
+                        agent.budget.reset();
+                        Phase::Request
+                    }
                     Inbound::Exit => Phase::Exit,
                     // Applies from the next request; the history carries over.
                     Inbound::Agent(name) => {
