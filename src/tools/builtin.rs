@@ -18,9 +18,9 @@ use futures::{
 use serde::Deserialize;
 
 use crate::{
-    config::{AgentDir, Builtin},
+    config::{AgentDir, AgentKernel, Builtin},
     sessions::Session,
-    tools::{command, deadline::blocking, errors::ExecError, output::ToolOutput},
+    tools::{command, deadline::blocking, errors::ExecError, kernel, output::ToolOutput},
 };
 
 /// What a builtin call may touch, and who its changes are attributed to.
@@ -29,15 +29,27 @@ pub struct Scope<'a> {
     dirs: &'a [AgentDir],
     session: &'a Session,
     model_id: &'a str,
+    kernel: AgentKernel,
 }
 
 impl<'a> Scope<'a> {
-    pub fn new(dirs: &'a [AgentDir], session: &'a Session, model_id: &'a str) -> Self {
+    pub fn new(
+        dirs: &'a [AgentDir],
+        session: &'a Session,
+        model_id: &'a str,
+        kernel: AgentKernel,
+    ) -> Self {
         Self {
             dirs,
             session,
             model_id,
+            kernel,
         }
+    }
+
+    /// Which kernel operations this agent enabled.
+    pub fn kernel(&self) -> AgentKernel {
+        self.kernel
     }
 }
 
@@ -51,11 +63,19 @@ pub fn run<'s>(
     scope: Scope<'s>,
 ) -> impl Future<Output = Result<ToolOutput, ExecError>> + Send + use<'s> {
     match builtin {
-        Builtin::Read { max_bytes } => {
-            Either::Left(Either::Left(read(arguments, *max_bytes, scope.dirs)))
-        }
-        Builtin::Write => Either::Left(Either::Right(write(arguments, scope))),
-        Builtin::Bash => Either::Right(bash(arguments, timeout)),
+        Builtin::Read { max_bytes } => Either::Left(Either::Left(Either::Left(read(
+            arguments,
+            *max_bytes,
+            scope.dirs,
+        )))),
+        Builtin::Write => Either::Left(Either::Left(Either::Right(write(arguments, scope)))),
+        Builtin::Bash => Either::Left(Either::Right(bash(arguments, timeout))),
+        Builtin::Kernel { device, max_bytes } => Either::Right(kernel::run(
+            arguments,
+            device,
+            *max_bytes,
+            scope.kernel(),
+        )),
     }
 }
 
@@ -282,5 +302,30 @@ impl Written {
         // Writing to a `Vec` cannot fail.
         let _ = write!(answer, "wrote {} bytes to {}", self.new.len(), self.path.display());
         ToolOutput::from_bytes(0, answer, Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(toml: &str) -> AgentDir {
+        toml::from_str(toml).expect("valid dir")
+    }
+
+    #[test]
+    fn root_dir_reaches_everything() {
+        let dirs = [dir("path = \"/\"\nwrite = true")];
+        for path in ["/etc/shadow", "/root/new-file", "/proc/sys/kernel/hostname"] {
+            assert!(reachable(PathBuf::from(path), &dirs, Access::Read).is_ok());
+            assert!(reachable(PathBuf::from(path), &dirs, Access::Write).is_ok());
+        }
+    }
+
+    #[test]
+    fn read_only_root_refuses_writes() {
+        let dirs = [dir("path = \"/\"")];
+        assert!(reachable(PathBuf::from("/etc/hosts"), &dirs, Access::Read).is_ok());
+        assert!(reachable(PathBuf::from("/etc/hosts"), &dirs, Access::Write).is_err());
     }
 }

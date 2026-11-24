@@ -825,6 +825,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "notify-types",

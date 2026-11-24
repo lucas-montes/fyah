@@ -40,6 +40,8 @@ wasmtime = "50.0.2"
 wasmtime-wasi = "50.0.2"
 tracing-appender = "0.2.5"
 
+libc = "0.2"
+
 [workspace.lints.clippy]
 all = { level = "deny" }
 pedantic = { level = "deny" }

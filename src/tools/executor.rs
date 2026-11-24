@@ -149,7 +149,12 @@ pub struct CallContext {
 impl CallContext {
     /// What a builtin may touch, as the agent was when the call started.
     fn scope(&self) -> Scope<'_> {
-        Scope::new(self.config.dirs(), &self.session, self.config.model_id())
+        Scope::new(
+            self.config.dirs(),
+            &self.session,
+            self.config.model_id(),
+            self.config.kernel(),
+        )
     }
 }
 

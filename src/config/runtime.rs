@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::parser::{
-    self, Agent, AgentDir, Config, Executable, Model, Tool, Validated, Vendor, WireFormat,
+    self, Agent, AgentDir, AgentKernel, Config, Executable, Model, Tool, Validated, Vendor,
+    WireFormat,
 };
 use super::registry::{Key, Registry};
 use crate::prompt::ToolSpecs;
@@ -249,6 +250,11 @@ impl ExecSnapshot {
     /// What the agent's builtins may reach, canonical.
     pub fn dirs(&self) -> &[AgentDir] {
         self.0.agent().dirs()
+    }
+
+    /// Which kernel operations this agent enabled.
+    pub fn kernel(&self) -> AgentKernel {
+        self.0.agent().kernel()
     }
 
     /// The tool names this agent may call, for the model's error message.

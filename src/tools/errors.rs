@@ -56,6 +56,29 @@ pub enum ExecError {
     ExecutorGone,
     /// The call could not be matched to anything that runs.
     Unavailable(ResolveError),
+    /// The kernel device could not be opened.
+    KernelDevice {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// The `ioctl` itself failed.
+    KernelIo {
+        op: &'static str,
+        source: std::io::Error,
+    },
+    /// The module answered with a negative errno.
+    KernelStatus {
+        op: &'static str,
+        errno: i32,
+    },
+    /// The agent did not enable this kernel capability.
+    KernelDenied {
+        capability: &'static str,
+    },
+    /// The call's arguments are not usable for this kernel op.
+    KernelArguments(&'static str),
+    /// The model named a kernel op that does not exist.
+    KernelUnknownOp(String),
 }
 
 impl ExecError {
@@ -96,6 +119,21 @@ impl std::fmt::Display for ExecError {
             Self::Wasm(error) => write!(f, "wasm: {error:#}"),
             Self::ExecutorGone => write!(f, "the tool executor is gone"),
             Self::Unavailable(error) => write!(f, "unavailable: {error}"),
+            Self::KernelDevice { path, source } => {
+                write!(f, "kernel device {}: {source}", path.display())
+            }
+            Self::KernelIo { op, source } => write!(f, "kernel {op}: {source}"),
+            Self::KernelStatus { op, errno } => write!(
+                f,
+                "kernel {op} failed: {}",
+                std::io::Error::from_raw_os_error(errno.saturating_neg())
+            ),
+            Self::KernelDenied { capability } => write!(
+                f,
+                "kernel {capability} access is not enabled for this agent"
+            ),
+            Self::KernelArguments(message) => write!(f, "kernel arguments: {message}"),
+            Self::KernelUnknownOp(op) => write!(f, "unknown kernel op: {op}"),
         }
     }
 }

@@ -155,6 +155,9 @@ pub struct Agent {
     /// no retry.
     #[serde(default = "default_empty_reply_retries")]
     empty_reply_retries: usize,
+    /// Which destructive kernel operations the `kernel` builtin may issue.
+    #[serde(default)]
+    kernel: AgentKernel,
 }
 
 const fn default_max_tool_calls() -> NonZeroUsize {
@@ -209,6 +212,45 @@ impl Agent {
     /// Canonical once validated: resolved through every symlink.
     pub fn dirs(&self) -> &[AgentDir] {
         &self.dirs
+    }
+
+    /// What the `kernel` builtin may do for this agent.
+    pub fn kernel(&self) -> AgentKernel {
+        self.kernel
+    }
+}
+
+/// Per-agent gates for the `kernel` builtin. Everything is off unless the
+/// agent opts in. This is a UX and audit gate, not a security boundary: an
+/// agent with `bash` can reach the device itself when it runs as root.
+#[derive(Debug, Deserialize, Default, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct AgentKernel {
+    #[serde(default)]
+    write: bool,
+    #[serde(default)]
+    phys: bool,
+    #[serde(default)]
+    call: bool,
+    #[serde(default)]
+    probe: bool,
+}
+
+impl AgentKernel {
+    pub fn write(&self) -> bool {
+        self.write
+    }
+
+    pub fn phys(&self) -> bool {
+        self.phys
+    }
+
+    pub fn call(&self) -> bool {
+        self.call
+    }
+
+    pub fn probe(&self) -> bool {
+        self.probe
     }
 }
 
@@ -296,6 +338,8 @@ pub enum Builtin {
     Read { max_bytes: u64 },
     Write,
     Bash,
+    /// Drives the `fyah_km` module through `/dev/fyah`.
+    Kernel { device: String, max_bytes: u64 },
 }
 
 /// The `[builtins]` table: the settings of the tools fyah runs itself.
@@ -307,6 +351,8 @@ struct Builtins {
     read: ReadSettings,
     #[serde(default)]
     bash: BashSettings,
+    #[serde(default)]
+    kernel: KernelSettings,
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,10 +383,26 @@ impl Default for BashSettings {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KernelSettings {
+    device: String,
+    max_bytes: NonZeroU64,
+}
+
+impl Default for KernelSettings {
+    fn default() -> Self {
+        Self {
+            device: "/dev/fyah".into(),
+            max_bytes: NonZeroU64::new(64 << 10).expect("not zero"),
+        }
+    }
+}
+
 impl Builtins {
     /// Each builtin as the tool the model sees and the executable that runs
     /// it, both under the builtin's name.
-    fn into_entries(self) -> [(&'static str, Tool, Executable); 3] {
+    fn into_entries(self) -> [(&'static str, Tool, Executable); 4] {
         [
             (
                 "read",
@@ -400,6 +462,35 @@ impl Builtins {
                 Executable {
                     timeout_secs: Some(self.bash.timeout_secs),
                     params: ExecutableParams::Builtin(Builtin::Bash),
+                },
+            ),
+            (
+                "kernel",
+                Tool::builtin(
+                    "kernel",
+                    "Read, write or call into the running kernel through the fyah_km module. Ops: version, lookup, read, write, read_phys, write_phys, call, alloc, free, probe_attach, probe_detach, probe_stats, probe_list, patch. Addresses may be numbers or 0x strings; call and patch also accept a symbol name. Each agent enables only some ops in its kernel settings; a disabled op answers with an error.",
+                    serde_json::json!({
+                        "type": "object",
+                        "required": ["op"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "op": { "type": "string", "enum": ["version", "lookup", "read", "write", "read_phys", "write_phys", "call", "alloc", "free", "probe_attach", "probe_detach", "probe_stats", "probe_list", "patch"] },
+                            "addr": { "description": "Kernel virtual or physical address, as a number or a 0x string" },
+                            "name": { "type": "string", "description": "Kernel symbol, used by lookup, call and patch" },
+                            "len": { "type": "integer", "description": "Byte count for read, read_phys and alloc" },
+                            "hex": { "type": "string", "description": "Bytes to write, as hex with optional spaces" },
+                            "args": { "type": "array", "items": { "type": "integer" }, "description": "Up to six integer arguments for call" },
+                            "id": { "type": "integer", "description": "Probe id for probe_detach and probe_stats" },
+                            "mmio": { "type": "boolean", "description": "Map physical memory write-combined instead of write-back" }
+                        }
+                    }),
+                ),
+                Executable {
+                    timeout_secs: Some(NonZeroU64::new(60).expect("not zero")),
+                    params: ExecutableParams::Builtin(Builtin::Kernel {
+                        device: self.kernel.device,
+                        max_bytes: self.kernel.max_bytes.get(),
+                    }),
                 },
             ),
         ]

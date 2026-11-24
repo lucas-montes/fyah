@@ -1,4 +1,3 @@
-
 [watcher]
 debounce_ms = 2000
 
@@ -24,10 +23,10 @@ name = "qwen2.5:14b"
 temperature = 0.1
 
 [providers.ollama.models."qwen3-4"]
-name = "qwen3.5:4b"
+name = "qwen3-5:4b"
 temperature = 0.1
 
-[providers.ollama.models."gemma4"]
+[providers.ollama.models.gemma4]
 name = "gemma4:e2b"
 temperature = 0.1
 
@@ -58,26 +57,29 @@ max_concurrent_tools = 1
 
 [agents.default]
 system_prompt = "You are Fyah, an AI coding assistant"
-provider = "ollama"
-model = "qwen3-4"
+provider = "openrouter"
+model = "nemotron"
 max_turns = 25
 # read/write/bash are builtins -- no [tools.*] or [executables.*] entry needed.
 # git_log, text_stats and line_count are config-declared: see the bottom.
-tools = ["git_log", "text_stats", "line_count"]
+tools = ["write", "read", "ip_info", "bash"]
 # What read and write may reach: read-only unless write = true. Empty, or
 # left out, reaches nothing.
 dirs = [{ path = ".", write = true }]
 max_concurrent_tools = 5
-# When tool results go back to the model: "wait" for all of them (default),
-# "eager" as soon as one is in, or { batch = 3 } once three are.
-results = "wait"
-# Optional limits, shown with their defaults. Each counts from the last thing
-# the user sent, and reaching one pauses the loop until the user speaks.
-# max_tool_calls = 50                 tool calls allowed between two user inputs
-# max_consecutive_tool_errors = 3     failed tool calls in a row
-# empty_reply_retries = 1             times an empty model reply is asked again (0 = never)
-# Optional: tokens the whole session may spend before the loop stops itself.
-# token_budget = 200000
+
+# Full access: read and write anywhere. Only meaningful when fyah runs as
+# root (`sudo fyah --agent root`); otherwise the OS still says no.
+[agents.root]
+system_prompt = "You are Fyah, a system administration agent with full access to this machine"
+provider = "openrouter"
+model = "nemotron"
+max_turns = 25
+tools = ["read", "write", "bash", "kernel"]
+dirs = [{ path = "/", write = true }]
+max_concurrent_tools = 5
+kernel = { write = true, phys = true, call = true, probe = true }
+
 
 [runtime]
 ctrl_c = "immediate"
@@ -100,6 +102,7 @@ command = "./exes/context.sh"
 [builtins]
 read = { max_bytes = 262144 }
 bash = { timeout_secs = 120 }
+kernel = { device = "/dev/fyah", max_bytes = 65536 }
 
 # ---------------------------------------------------------------------------
 # A config-declared tool, for exercising that path by hand next to the
@@ -116,9 +119,6 @@ timeout_secs = 10
 description = "List the most recent commits in this git repository."
 executable = "git_log"
 parameters = { type = "object", additionalProperties = false, properties = { count = { type = "integer", minimum = 1, description = "How many commits to list (default 5)" } } }
-
-# Builtins (read/write/bash) are immutable: a [tools.*] entry with a builtin
-# name is rejected at load. Declare your own tool under a different name.
 
 # ---------------------------------------------------------------------------
 # Wasm tools: WASI preview 1 modules that read their JSON arguments on stdin
@@ -172,3 +172,17 @@ dirs = [
 description = "Count the lines, words and bytes of a file in the repository."
 executable = "line_count"
 parameters = { type = "object", required = ["path"], additionalProperties = false, properties = { path = { type = "string", description = "Path relative to the repository root" } } }
+
+# ---------------------------------------------------------------------------
+# New tool: IP info fetcher
+# ---------------------------------------------------------------------------
+[executables.ip_info]
+type = "wasm"
+path = "./wasm/dist/js/ip_info.wasm"
+timeout_secs = 10
+memory_mb = 32
+
+[tools.ip_info]
+description = "Fetch the public IP address from api.ipify.org."
+executable = "ip_info"
+parameters = { type = "object", additionalProperties = false, properties = {} }

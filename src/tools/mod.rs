@@ -3,6 +3,7 @@ mod command;
 mod deadline;
 mod errors;
 mod executor;
+mod kernel;
 mod output;
 mod wasm;
 
