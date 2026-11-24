@@ -17,6 +17,7 @@
   outputs = {
     self,
     nixpkgs,
+    nixpkgs-host,
     crane,
     rust-overlay,
     flake-utils,
@@ -77,6 +78,12 @@
         # Javy ships prebuilt for x86_64-linux only here; see nix/wasm-tools.nix.
         wasmEnabled = system == "x86_64-linux";
         wasmTools = import ./nix/wasm-tools.nix {inherit pkgs;};
+
+        # The companion kernel module is built against the host's exact
+        # kernel, from the nixpkgs revision the host booted.
+        kmodEnabled = system == "x86_64-linux";
+        hostPkgs = import nixpkgs-host {inherit system;};
+        fyahKmod = import ./nix/kmod.nix {inherit hostPkgs lib;};
       in {
         packages =
           {
@@ -88,6 +95,9 @@
           }
           // lib.optionalAttrs wasmEnabled {
             inherit (wasmTools) javy python-wasi;
+          }
+          // lib.optionalAttrs kmodEnabled {
+            fyah-km = fyahKmod;
           };
 
         checks = {
@@ -107,6 +117,11 @@
             // {
               cargoArtifacts = fyahDeps;
             });
+        }
+        // lib.optionalAttrs kmodEnabled {
+          # Boots the host kernel in QEMU, loads fyah_km and drives every
+          # op group from kmod/fyah_km/kmod_test.rs.
+          fyah-km = import ./nix/kmod-test.nix {inherit hostPkgs fyahKmod;};
         };
 
         devShells.default = pkgs.mkShell {

@@ -20,6 +20,7 @@ use crate::{
         output::ToolOutput,
         wasm::WasmRuntime,
     },
+    ui::OutboundChannel,
 };
 
 pub struct Runnable {
@@ -116,14 +117,22 @@ pub struct ExecContext {
     wasm: Arc<WasmRuntime>,
     /// Who changes are attributed to, shared with the agent the same way.
     session: Arc<Session>,
+    /// Where a call asks the user to approve it.
+    output: OutboundChannel,
 }
 
 impl ExecContext {
-    pub fn new(config: ExecConfig, wasm: Arc<WasmRuntime>, session: Arc<Session>) -> Self {
+    pub fn new(
+        config: ExecConfig,
+        wasm: Arc<WasmRuntime>,
+        session: Arc<Session>,
+        output: OutboundChannel,
+    ) -> Self {
         Self {
             config,
             wasm,
             session,
+            output,
         }
     }
 
@@ -133,6 +142,7 @@ impl ExecContext {
             config: self.config.snapshot(),
             wasm: Arc::clone(&self.wasm),
             session: Arc::clone(&self.session),
+            output: self.output.clone(),
         }
     }
 }
@@ -144,6 +154,7 @@ pub struct CallContext {
     config: ExecSnapshot,
     wasm: Arc<WasmRuntime>,
     session: Arc<Session>,
+    output: OutboundChannel,
 }
 
 impl CallContext {
@@ -154,6 +165,7 @@ impl CallContext {
             &self.session,
             self.config.model_id(),
             self.config.kernel(),
+            &self.output,
         )
     }
 }

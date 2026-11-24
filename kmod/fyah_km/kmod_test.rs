@@ -181,7 +181,7 @@ fn main() {
     request.name = name_field("__x64_sys_getpid");
     issue(fd, &mut request);
     expect_ok(&request, "probe_attach");
-    let probe = request.id;
+    let probe = u32::try_from(request.value).expect("probe id fits u32");
     assert_ne!(probe, 0, "probe id is zero");
 
     // SAFETY: plain syscall wrapper.

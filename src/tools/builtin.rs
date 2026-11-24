@@ -21,6 +21,7 @@ use crate::{
     config::{AgentDir, AgentKernel, Builtin},
     sessions::Session,
     tools::{command, deadline::blocking, errors::ExecError, kernel, output::ToolOutput},
+    ui::OutboundChannel,
 };
 
 /// What a builtin call may touch, and who its changes are attributed to.
@@ -30,6 +31,8 @@ pub struct Scope<'a> {
     session: &'a Session,
     model_id: &'a str,
     kernel: AgentKernel,
+    /// Where a call asks the user to approve it.
+    output: &'a OutboundChannel,
 }
 
 impl<'a> Scope<'a> {
@@ -38,18 +41,15 @@ impl<'a> Scope<'a> {
         session: &'a Session,
         model_id: &'a str,
         kernel: AgentKernel,
+        output: &'a OutboundChannel,
     ) -> Self {
         Self {
             dirs,
             session,
             model_id,
             kernel,
+            output,
         }
-    }
-
-    /// Which kernel operations this agent enabled.
-    pub fn kernel(&self) -> AgentKernel {
-        self.kernel
     }
 }
 
@@ -74,7 +74,8 @@ pub fn run<'s>(
             arguments,
             device,
             *max_bytes,
-            scope.kernel(),
+            scope.kernel,
+            scope.output,
         )),
     }
 }

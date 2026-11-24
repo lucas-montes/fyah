@@ -75,6 +75,8 @@ pub enum ExecError {
     KernelDenied {
         capability: &'static str,
     },
+    /// The user answered no to a state-changing kernel op.
+    KernelRefused,
     /// The call's arguments are not usable for this kernel op.
     KernelArguments(&'static str),
     /// The model named a kernel op that does not exist.
@@ -132,6 +134,7 @@ impl std::fmt::Display for ExecError {
                 f,
                 "kernel {capability} access is not enabled for this agent"
             ),
+            Self::KernelRefused => f.write_str("the user refused this kernel operation"),
             Self::KernelArguments(message) => write!(f, "kernel arguments: {message}"),
             Self::KernelUnknownOp(op) => write!(f, "unknown kernel op: {op}"),
         }

@@ -246,10 +246,19 @@ impl MiscDevice for FyahDevice {
         // unaligned because userspace may pass a loosely aligned struct.
         let mut request = unsafe { core::ptr::read_unaligned(raw.as_ptr().cast::<Request>()) };
 
+        let seq = REQUESTS.fetch_add(1, Ordering::Relaxed);
+        pr_info!(
+            "req {} op {} addr {:#x} len {}\n",
+            seq,
+            op_name(request.op),
+            request.addr,
+            request.len
+        );
         match dispatch(&mut request) {
             Ok(()) => request.status = 0,
             Err(error) => request.status = error.to_errno(),
         }
+        pr_info!("req {} status {}\n", seq, request.status);
 
         // SAFETY: `request` is a live `Request` and `size` is its exact size.
         let bytes = unsafe {
@@ -259,6 +268,28 @@ impl MiscDevice for FyahDevice {
             .writer()
             .write_slice(bytes)?;
         Ok(0)
+    }
+}
+
+/// Sequence number of every request, for matching the two dmesg lines.
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+fn op_name(op: u32) -> &'static str {
+    match op {
+        OP_VERSION => "version",
+        OP_LOOKUP => "lookup",
+        OP_READ_VIRT => "read",
+        OP_WRITE_VIRT => "write",
+        OP_READ_PHYS => "read_phys",
+        OP_WRITE_PHYS => "write_phys",
+        OP_CALL => "call",
+        OP_ALLOC => "alloc",
+        OP_FREE => "free",
+        OP_PROBE_ATTACH => "probe_attach",
+        OP_PROBE_DETACH => "probe_detach",
+        OP_PROBE_STATS => "probe_stats",
+        OP_PROBE_LIST => "probe_list",
+        _ => "unknown",
     }
 }
 
@@ -558,7 +589,7 @@ impl kernel::Module for FyahModule {
         let device =
             KBox::pin_init(MiscDeviceRegistration::<FyahDevice>::register(options), GFP_KERNEL)?;
 
-        pr_info!("fyah_km: loaded, /dev/fyah ready\n");
+        pr_info!("loaded, /dev/fyah ready\n");
         Ok(Self { _device: device })
     }
 }
@@ -571,7 +602,10 @@ impl Drop for FyahModule {
             // `probe_attach` and has not been detached.
             unsafe { unregister_kprobe(&mut probe.kp) };
         }
-        pr_info!("fyah_km: unloaded\n");
+        // The static is never dropped, so buffers handed out by `alloc` and
+        // never freed are released here.
+        while state.allocations.pop().is_some() {}
+        pr_info!("unloaded\n");
     }
 }
 

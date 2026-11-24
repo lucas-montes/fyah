@@ -5,13 +5,7 @@
 //! and this file must agree on that layout. The module is not an agent: it is
 //! a primitive layer, and this tool is where the per-agent gates are applied.
 
-use std::{
-    borrow::Cow,
-    fmt::Write as _,
-    fs::OpenOptions,
-    os::fd::AsRawFd as _,
-    path::Path,
-};
+use std::{borrow::Cow, fmt::Write as _, fs::OpenOptions, os::fd::AsRawFd as _, path::Path};
 
 use futures::{
     FutureExt as _,
@@ -22,6 +16,7 @@ use serde::{Deserialize, Deserializer, de};
 use crate::{
     config::AgentKernel,
     tools::{deadline::blocking, errors::ExecError, output::ToolOutput},
+    ui::OutboundChannel,
 };
 
 /// Version of the request ABI, mirrored from `kmod/fyah_km/fyah_km.rs`.
@@ -228,8 +223,7 @@ fn parse_addr(text: &str) -> Result<u64, String> {
 
 /// Parse the model's arguments into one owned operation.
 fn parse_args(arguments: &str) -> Result<Op, ExecError> {
-    let args: Args<'_> =
-        serde_json::from_str(arguments).map_err(ExecError::BadArguments)?;
+    let args: Args<'_> = serde_json::from_str(arguments).map_err(ExecError::BadArguments)?;
     match args.op.as_ref() {
         "version" => Ok(Op::Version),
         "lookup" => Ok(Op::Lookup {
@@ -338,9 +332,9 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, ExecError> {
         if character.is_whitespace() || character == '_' {
             continue;
         }
-        let digit = character
-            .to_digit(16)
-            .ok_or(ExecError::KernelArguments("hex payload has a non-hex character"))?;
+        let digit = character.to_digit(16).ok_or(ExecError::KernelArguments(
+            "hex payload has a non-hex character",
+        ))?;
         nibbles.push(digit);
     }
     if nibbles.len() % 2 != 0 {
@@ -356,20 +350,77 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, ExecError> {
         .collect())
 }
 
-/// Run the call on the blocking pool: `ioctl` sleeps.
+/// Gate the call, ask the user when it changes kernel state, then run it on
+/// the blocking pool: `ioctl` sleeps. A refused or disabled op never opens
+/// the device.
 pub fn run(
     arguments: &str,
     device: &str,
     max_bytes: u64,
     access: AgentKernel,
+    output: &OutboundChannel,
 ) -> impl Future<Output = Result<ToolOutput, ExecError>> + Send + use<> {
-    let parsed = parse_args(arguments);
-    let device = device.to_owned();
-    match parsed {
-        Ok(op) => Either::Left(
-            blocking(move || execute(&op, &device, max_bytes, access)).map(Result::flatten),
-        ),
+    let checked = parse_args(arguments).and_then(|op| gate(&op, access).map(|()| op));
+    match checked {
+        Ok(op) => {
+            let approval = match question(&op) {
+                Some(question) if access.confirm() => Either::Left(output.confirm(question)),
+                _ => Either::Right(future::ready(true)),
+            };
+            let device = device.to_owned();
+            Either::Left(approval.then(move |approved| {
+                if approved {
+                    Either::Left(
+                        blocking(move || execute(&op, &device, max_bytes)).map(Result::flatten),
+                    )
+                } else {
+                    Either::Right(future::ready(Err(ExecError::KernelRefused)))
+                }
+            }))
+        }
         Err(error) => Either::Right(future::ready(Err(error))),
+    }
+}
+
+/// What to ask the user before an op that changes kernel state; `None` for
+/// ops that only observe it.
+fn question(op: &Op) -> Option<String> {
+    match op {
+        Op::Version
+        | Op::Lookup { .. }
+        | Op::Read { .. }
+        | Op::ReadPhys { .. }
+        | Op::Alloc { .. }
+        | Op::Free { .. }
+        | Op::ProbeDetach { .. }
+        | Op::ProbeStats { .. }
+        | Op::ProbeList => None,
+        Op::Write { addr, bytes } => Some(format!(
+            "kernel: write {} bytes at {addr:#018x}?",
+            bytes.len()
+        )),
+        Op::WritePhys { addr, bytes, .. } => Some(format!(
+            "kernel: write {} bytes at physical {addr:#018x}?",
+            bytes.len()
+        )),
+        Op::Patch { target, bytes } => Some(format!(
+            "kernel: patch {} bytes of kernel text at {target}?",
+            bytes.len()
+        )),
+        Op::Call { target, args } => Some(format!(
+            "kernel: call {target}({})?",
+            format_args_list(args)
+        )),
+        Op::ProbeAttach { name } => Some(format!("kernel: attach a kprobe to {name}?")),
+    }
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Addr(addr) => write!(f, "{addr:#018x}"),
+            Self::Name(name) => f.write_str(name),
+        }
     }
 }
 
@@ -379,14 +430,7 @@ struct Session {
     max_bytes: u64,
 }
 
-fn execute(
-    op: &Op,
-    device: &str,
-    max_bytes: u64,
-    access: AgentKernel,
-) -> Result<ToolOutput, ExecError> {
-    // Gate before touching the device: a disabled op must not open it.
-    gate(op, access)?;
+fn execute(op: &Op, device: &str, max_bytes: u64) -> Result<ToolOutput, ExecError> {
     let mut session = Session {
         device: Device::open(Path::new(device))?,
         max_bytes,
@@ -402,10 +446,9 @@ fn gate(op: &Op, access: AgentKernel) -> Result<(), ExecError> {
         Op::Write { .. } | Op::Patch { .. } => ("write", access.write()),
         Op::ReadPhys { .. } | Op::WritePhys { .. } => ("phys", access.phys()),
         Op::Call { .. } | Op::Alloc { .. } | Op::Free { .. } => ("call", access.call()),
-        Op::ProbeAttach { .. }
-        | Op::ProbeDetach { .. }
-        | Op::ProbeStats { .. }
-        | Op::ProbeList => ("probe", access.probe()),
+        Op::ProbeAttach { .. } | Op::ProbeDetach { .. } | Op::ProbeStats { .. } | Op::ProbeList => {
+            ("probe", access.probe())
+        }
     };
     if capability.1 {
         Ok(())
@@ -419,9 +462,7 @@ fn gate(op: &Op, access: AgentKernel) -> Result<(), ExecError> {
 impl Session {
     fn run(&mut self, op: &Op) -> Result<ToolOutput, ExecError> {
         match op {
-            Op::Version => Ok(output(format!(
-                "fyah_km ABI version {ABI_VERSION}\n"
-            ))),
+            Op::Version => Ok(output(format!("fyah_km ABI version {ABI_VERSION}\n"))),
             Op::Lookup { name } => {
                 let addr = self.lookup(name)?;
                 Ok(output(format!("{name} = {addr:#018x}\n")))
@@ -443,11 +484,7 @@ impl Session {
                 let bytes = self.read_phys(*addr, len, *mmio)?;
                 Ok(output(hex_dump(&bytes, *addr)))
             }
-            Op::WritePhys {
-                addr,
-                bytes,
-                mmio,
-            } => {
+            Op::WritePhys { addr, bytes, mmio } => {
                 self.write_phys(*addr, bytes, *mmio)?;
                 Ok(output(format!(
                     "wrote {} bytes at physical {addr:#018x}\n",
@@ -510,7 +547,8 @@ impl Session {
 
     fn cap(&self, len: usize) -> usize {
         let limit = usize::try_from(self.max_bytes).unwrap_or(usize::MAX);
-        len.min(limit).min(usize::try_from(MAX_IO).unwrap_or(usize::MAX))
+        len.min(limit)
+            .min(usize::try_from(MAX_IO).unwrap_or(usize::MAX))
     }
 
     fn version(&mut self) -> Result<(), ExecError> {
@@ -681,13 +719,8 @@ impl Device {
     fn request(&mut self, request: &mut Request, op: &'static str) -> Result<(), ExecError> {
         // SAFETY: the fd is open and `request` is a live `Request`; the ioctl
         // copies it in and out.
-        let result = unsafe {
-            libc::ioctl(
-                self.file.as_raw_fd(),
-                FYAH_IOC,
-                std::ptr::from_mut(request),
-            )
-        };
+        let result =
+            unsafe { libc::ioctl(self.file.as_raw_fd(), FYAH_IOC, std::ptr::from_mut(request)) };
         if result < 0 {
             return Err(ExecError::KernelIo {
                 op,
@@ -825,6 +858,57 @@ mod tests {
     fn write_is_allowed_when_configured() {
         let op = parse_args(r#"{"op":"write","addr":4096,"hex":"90"}"#).expect("parsed");
         assert!(gate(&op, access("write = true")).is_ok());
+    }
+
+    #[test]
+    fn only_state_changes_ask_the_user() {
+        let read = parse_args(r#"{"op":"read","addr":0}"#).expect("parsed");
+        assert!(question(&read).is_none());
+        let call = parse_args(r#"{"op":"call","name":"ktime_get","args":[1]}"#).expect("parsed");
+        assert_eq!(
+            question(&call).as_deref(),
+            Some("kernel: call ktime_get(0x1)?")
+        );
+    }
+
+    #[test]
+    fn confirm_is_on_by_default() {
+        assert!(AgentKernel::default().confirm());
+        assert!(access("write = true").confirm());
+        assert!(!access("confirm = false").confirm());
+    }
+
+    /// No terminal to answer means no: the call fails before the device,
+    /// which here does not even exist.
+    #[tokio::test]
+    async fn unanswered_write_is_refused_without_opening_the_device() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let output = OutboundChannel::from(tx);
+        let result = run(
+            r#"{"op":"write","addr":4096,"hex":"90"}"#,
+            "/nonexistent/fyah",
+            64,
+            access("write = true"),
+            &output,
+        )
+        .await;
+        assert!(matches!(result, Err(ExecError::KernelRefused)));
+    }
+
+    #[tokio::test]
+    async fn confirm_false_goes_straight_to_the_device() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let output = OutboundChannel::from(tx);
+        let result = run(
+            r#"{"op":"write","addr":4096,"hex":"90"}"#,
+            "/nonexistent/fyah",
+            64,
+            access("write = true\nconfirm = false"),
+            &output,
+        )
+        .await;
+        assert!(matches!(result, Err(ExecError::KernelDevice { .. })));
     }
 
     #[test]

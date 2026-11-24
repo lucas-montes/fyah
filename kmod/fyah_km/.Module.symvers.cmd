@@ -1,1 +1,0 @@
-savedcmd_Module.symvers :=  /nix/store/zfcszlxyla45fjhcmqmga7a87mf1hqk0-linux-7.2.15-dev/lib/modules/7.2.15/build/scripts/mod/modpost -M          -o Module.symvers -n -T modules.order -i /nix/store/zfcszlxyla45fjhcmqmga7a87mf1hqk0-linux-7.2.15-dev/lib/modules/7.2.15/build/Module.symvers -e 

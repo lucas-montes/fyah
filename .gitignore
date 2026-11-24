@@ -9,3 +9,11 @@ result/
 qwen*
 result
 wasm/
+# Kbuild outputs of kmod/fyah_km
+kmod/**/*.o
+kmod/**/*.ko
+kmod/**/*.mod
+kmod/**/*.mod.c
+kmod/**/.*.cmd
+kmod/**/Module.symvers
+kmod/**/modules.order

@@ -220,10 +220,12 @@ impl Agent {
     }
 }
 
-/// Per-agent gates for the `kernel` builtin. Everything is off unless the
-/// agent opts in. This is a UX and audit gate, not a security boundary: an
-/// agent with `bash` can reach the device itself when it runs as root.
-#[derive(Debug, Deserialize, Default, Clone, Copy)]
+/// Per-agent gates for the `kernel` builtin. Every op group is off unless
+/// the agent opts in, and the ops that change kernel state ask the user
+/// first unless `confirm = false`. This is a UX and audit gate, not a
+/// security boundary: an agent with `bash` can reach the device itself when
+/// it runs as root.
+#[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(deny_unknown_fields)]
 pub struct AgentKernel {
     #[serde(default)]
@@ -234,9 +236,32 @@ pub struct AgentKernel {
     call: bool,
     #[serde(default)]
     probe: bool,
+    #[serde(default = "default_confirm")]
+    confirm: bool,
+}
+
+const fn default_confirm() -> bool {
+    true
+}
+
+impl Default for AgentKernel {
+    fn default() -> Self {
+        Self {
+            write: false,
+            phys: false,
+            call: false,
+            probe: false,
+            confirm: default_confirm(),
+        }
+    }
 }
 
 impl AgentKernel {
+    /// Whether state-changing ops wait for the user's yes.
+    pub fn confirm(&self) -> bool {
+        self.confirm
+    }
+
     pub fn write(&self) -> bool {
         self.write
     }

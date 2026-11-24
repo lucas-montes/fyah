@@ -33,7 +33,7 @@ let
     '';
   };
 in
-pkgs.nixosTest {
+pkgs.testers.nixosTest {
   name = "fyah-km";
 
   nodes.machine = {
@@ -51,7 +51,10 @@ pkgs.nixosTest {
     machine.succeed("insmod /etc/fyah_km.ko")
     machine.wait_for_file("/dev/fyah")
     machine.succeed("kmod-test")
+    machine.succeed("dmesg | grep -q 'fyah_km: req .* op write '")
     machine.succeed("rmmod fyah_km")
     machine.fail("test -e /dev/fyah")
+    machine.succeed("dmesg | grep -q 'fyah_km: unloaded'")
+    machine.fail("dmesg | grep -E 'Oops|BUG:|Call Trace'")
   '';
 }

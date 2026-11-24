@@ -196,6 +196,8 @@ pub async fn run_agent<C: LlmClient, R: RunnableExt + Send + 'static>(
             config.exec_config(),
             wasm,
             Arc::clone(&session),
+            // Tools that need the user's approval ask through it.
+            user_output_tx.clone(),
         )),
         config,
         pending: 0,

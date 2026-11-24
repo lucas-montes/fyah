@@ -78,6 +78,9 @@ max_turns = 25
 tools = ["read", "write", "bash", "kernel"]
 dirs = [{ path = "/", write = true }]
 max_concurrent_tools = 5
+# Op groups of the kernel builtin (needs fyah_km loaded). Writes, patches,
+# calls and probe attaches ask y/N on the terminal first; confirm = false
+# turns that off for unattended runs.
 kernel = { write = true, phys = true, call = true, probe = true }
 
 
